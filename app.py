@@ -27,6 +27,8 @@ class PrismaMonitorApp(tk.Tk):
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
         self.browser = BrowserController()
+        self._is_closing = False
+        self._active_browser_launch: int | None = None
         self.csv_path = tk.StringVar()
         self.browser_name = tk.StringVar(value="Chrome")
         self.status = tk.StringVar(value="Готово до роботи")
@@ -50,9 +52,10 @@ class PrismaMonitorApp(tk.Tk):
             width=18,
         ).grid(row=1, column=1, sticky="w")
 
-        ttk.Button(frame, text="Відкрити PRISMA", command=self.open_prisma).grid(
-            row=1, column=2, padx=(12, 0)
+        self.open_button = ttk.Button(
+            frame, text="Відкрити PRISMA", command=self.open_prisma
         )
+        self.open_button.grid(row=1, column=2, padx=(12, 0))
 
         ttk.Label(frame, text="CSV-файл:").grid(row=2, column=0, sticky="w", pady=(16, 0))
         ttk.Entry(frame, textvariable=self.csv_path, width=52).grid(
@@ -99,12 +102,52 @@ class PrismaMonitorApp(tk.Tk):
             self.status.set(f"Вибрано: {Path(selected).name}")
 
     def open_prisma(self) -> None:
+        browser_name = self.browser_name.get()
         try:
-            self.browser.open(self.browser_name.get())
-            self.status.set(f"PRISMA відкрито у {self.browser_name.get()}")
+            self.open_button.config(state="disabled")
+            self.status.set(f"Запуск PRISMA у {browser_name}...")
+            self._active_browser_launch = self.browser.open(browser_name)
+            self.after(50, self._poll_browser_launch)
         except Exception as exc:
-            messagebox.showerror("Помилка браузера", str(exc))
-            self.status.set("Не вдалося відкрити браузер")
+            self._browser_start_failed(exc)
+
+    def _poll_browser_launch(self) -> None:
+        if self._is_closing:
+            return
+
+        generation = self._active_browser_launch
+        if generation is None:
+            return
+
+        for result in self.browser.get_launch_results():
+            if result.generation != generation:
+                continue
+            self._active_browser_launch = None
+            if result.success:
+                self._browser_started(self.browser_name.get())
+            else:
+                self._browser_start_failed(result.error or "Невідома помилка")
+            return
+
+        self.after(50, self._poll_browser_launch)
+
+    def _browser_started(self, browser_name: str) -> None:
+        if self._is_closing:
+            return
+        self.open_button.config(state="normal")
+        self.status.set(f"PRISMA відкрито у {browser_name}")
+
+    def _browser_start_failed(self, exc: Exception | str) -> None:
+        if self._is_closing:
+            return
+        self._active_browser_launch = None
+        self.open_button.config(state="normal")
+        reason = str(exc).strip() or exc.__class__.__name__
+        messagebox.showerror(
+            "Помилка браузера",
+            f"Не вдалося відкрити браузер. Причина: {reason}",
+        )
+        self.status.set("Не вдалося відкрити браузер")
 
     def start_processing(self) -> None:
         source = Path(self.csv_path.get())
@@ -145,9 +188,13 @@ class PrismaMonitorApp(tk.Tk):
 
     def stop_work(self) -> None:
         self.browser.stop()
+        self._active_browser_launch = None
+        self.open_button.config(state="normal")
         self.status.set("Браузер закрито. Поточна обробка CSV завершиться безпечно.")
 
     def close_app(self) -> None:
+        self._is_closing = True
+        self._active_browser_launch = None
         self.browser.stop()
         self.destroy()
 
