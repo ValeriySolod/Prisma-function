@@ -5,7 +5,81 @@ from types import SimpleNamespace
 
 import pytest
 
-from browser import BrowserController, BrowserState
+from browser import BrowserController, BrowserState, PrismaAuctionFilter
+
+
+class FakeLocator:
+    def __init__(self, *, wait_error=None, click_error=None, on_click=None):
+        self.first = self
+        self.wait_error = wait_error
+        self.click_error = click_error
+        self.on_click = on_click
+        self.selected_labels = []
+        self.filled_values = []
+        self.clicks = 0
+
+    def wait_for(self, *, state, timeout):
+        if self.wait_error:
+            raise self.wait_error
+
+    def select_option(self, *, label, timeout):
+        self.selected_labels.append(label)
+
+    def fill(self, value, *, timeout):
+        self.filled_values.append(value)
+
+    def click(self, *, timeout):
+        self.clicks += 1
+        if self.on_click:
+            self.on_click()
+        if self.click_error:
+            raise self.click_error
+
+    def count(self):
+        return 1
+
+
+class FakeFilterContainer(FakeLocator):
+    def __init__(self, *, apply_button=None):
+        super().__init__()
+        self.operator = FakeLocator()
+        self.value_input = FakeLocator()
+        self.apply_button = apply_button or FakeLocator()
+        self.role_calls = []
+
+    def get_by_label(self, name):
+        if "operator|condition" in getattr(name, "pattern", ""):
+            return self.operator
+        return self.value_input
+
+    def get_by_role(self, role, name=None):
+        self.role_calls.append(role)
+        if role == "combobox":
+            return self.operator
+        if role in ("spinbutton", "textbox"):
+            return self.value_input
+        if role == "button":
+            return self.apply_button
+        raise AssertionError(f"unexpected container role: {role}")
+
+    def locator(self, selector):
+        if selector == "select":
+            return self.operator
+        return self.value_input
+
+
+class FakePageFilter:
+    def __init__(self, error=None, block=None):
+        self.error = error
+        self.block = block
+        self.pages = []
+
+    def apply(self, page, cancel_event):
+        self.pages.append(page)
+        if self.block:
+            self.block(cancel_event)
+        if self.error:
+            raise self.error
 
 
 class SignallingQueue:
@@ -28,6 +102,30 @@ class FakePage:
     def goto(self, *args, **kwargs):
         if self.navigation_error:
             raise self.navigation_error
+
+
+class FakeFilterPage(FakePage):
+    def __init__(self, container):
+        super().__init__()
+        self.container = container
+        self.other_filter_dropdown = FakeLocator()
+        self.global_role_calls = []
+
+    def wait_for_load_state(self, state, *, timeout):
+        pass
+
+    def get_by_role(self, role, name=None):
+        self.global_role_calls.append(role)
+        if role == "group":
+            return self.container
+        if role == "option":
+            return FakeLocator()
+        if role == "combobox":
+            return self.other_filter_dropdown
+        raise AssertionError(f"unexpected page role: {role}")
+
+    def get_by_text(self, text):
+        raise AssertionError("group strategy should find the container first")
 
 
 class FakeBrowser:
@@ -65,6 +163,74 @@ def join_worker(controller):
     assert not controller._thread.is_alive()
 
 
+def test_operator_dropdown_is_resolved_only_inside_marketed_capacity_container():
+    container = FakeFilterContainer()
+    page = FakeFilterPage(container)
+
+    PrismaAuctionFilter().apply(page, threading.Event())
+
+    assert container.operator.selected_labels == ["Greater than or equal"]
+    assert "combobox" not in page.global_role_calls
+    assert page.other_filter_dropdown.selected_labels == []
+
+
+def test_value_input_is_resolved_only_inside_marketed_capacity_container():
+    container = FakeFilterContainer()
+    page = FakeFilterPage(container)
+
+    PrismaAuctionFilter().apply(page, threading.Event())
+
+    assert container.value_input.filled_values == ["1000"]
+    assert not any(role in ("spinbutton", "textbox") for role in page.global_role_calls)
+
+
+def test_missing_apply_is_not_treated_as_unverified_auto_apply():
+    missing_apply = FakeLocator(wait_error=RuntimeError("not found"))
+    container = FakeFilterContainer(apply_button=missing_apply)
+
+    with pytest.raises(RuntimeError, match="Apply"):
+        PrismaAuctionFilter().apply(FakeFilterPage(container), threading.Event())
+
+    assert container.operator.selected_labels
+    assert container.value_input.filled_values == ["1000"]
+
+
+def test_apply_click_error_reports_failure_and_cleans_resources(monkeypatch):
+    apply_button = FakeLocator(click_error=RuntimeError("click intercepted"))
+    page = FakeFilterPage(FakeFilterContainer(apply_button=apply_button))
+    browser = FakeBrowser(page)
+    controller = BrowserController()
+    playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open("Chrome")
+    join_worker(controller)
+
+    result = controller.get_launch_results()[0]
+    assert not result.success
+    assert "Apply" in result.error
+    assert controller.state is BrowserState.IDLE
+    assert browser.closed.is_set()
+    assert playwright.stopped.is_set()
+
+
+def test_cancellation_during_apply_does_not_report_failure(monkeypatch):
+    controller = BrowserController()
+    apply_button = FakeLocator(
+        click_error=RuntimeError("cancelled click"), on_click=controller.stop
+    )
+    browser = FakeBrowser(FakeFilterPage(FakeFilterContainer(apply_button=apply_button)))
+    playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open("Edge")
+    join_worker(controller)
+
+    assert controller.get_launch_results() == []
+    assert controller.last_error is None
+    assert controller.state is BrowserState.IDLE
+    assert browser.closed.is_set()
+    assert playwright.stopped.is_set()
+
+
 @pytest.mark.parametrize(
     ("browser_name", "expected_channel"),
     [("Chrome", "chrome"), ("Edge", "msedge")],
@@ -72,7 +238,8 @@ def join_worker(controller):
 def test_successful_start_uses_expected_channel(
     monkeypatch, browser_name, expected_channel
 ):
-    controller = BrowserController()
+    page_filter = FakePageFilter()
+    controller = BrowserController(page_filter)
     controller._results = SignallingQueue()
     browser = FakeBrowser()
     launches = []
@@ -90,6 +257,7 @@ def test_successful_start_uses_expected_channel(
     assert result.generation == generation
     assert result.success
     assert launches[0]["channel"] == expected_channel
+    assert page_filter.pages == [browser.page]
 
     controller.stop()
     assert controller.state is BrowserState.STOPPING
@@ -101,7 +269,7 @@ def test_successful_start_uses_expected_channel(
 
 
 def test_browser_creation_error_reports_failure_and_cleans_resources(monkeypatch):
-    controller = BrowserController()
+    controller = BrowserController(FakePageFilter())
 
     def fail_launch(**kwargs):
         raise RuntimeError("driver missing")
@@ -120,7 +288,7 @@ def test_browser_creation_error_reports_failure_and_cleans_resources(monkeypatch
 
 
 def test_navigation_error_reports_failure_and_closes_all_resources(monkeypatch):
-    controller = BrowserController()
+    controller = BrowserController(FakePageFilter())
     browser = FakeBrowser(FakePage(RuntimeError("navigation failed")))
     playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
@@ -136,7 +304,7 @@ def test_navigation_error_reports_failure_and_closes_all_resources(monkeypatch):
 
 
 def test_open_twice_is_rejected_while_starting(monkeypatch):
-    controller = BrowserController()
+    controller = BrowserController(FakePageFilter())
     launch_entered = threading.Event()
     release_launch = threading.Event()
 
@@ -159,7 +327,7 @@ def test_open_twice_is_rejected_while_starting(monkeypatch):
 
 
 def test_stop_during_startup_suppresses_success_and_cleans_resources(monkeypatch):
-    controller = BrowserController()
+    controller = BrowserController(FakePageFilter())
     launch_entered = threading.Event()
     release_launch = threading.Event()
     browser = FakeBrowser()
@@ -183,3 +351,46 @@ def test_stop_during_startup_suppresses_success_and_cleans_resources(monkeypatch
     assert not controller.is_running
     assert browser.closed.is_set()
     assert playwright.stopped.is_set()
+
+
+def test_filter_error_reports_clear_failure_and_returns_to_idle(monkeypatch):
+    page_filter = FakePageFilter(RuntimeError("поле введення не знайдено"))
+    controller = BrowserController(page_filter)
+    browser = FakeBrowser()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open("Chrome")
+    join_worker(controller)
+
+    result = controller.get_launch_results()[0]
+    assert not result.success
+    assert "Marketed Capacity >= 1000" in result.error
+    assert "поле введення не знайдено" in result.error
+    assert controller.last_error == result.error
+    assert controller.state is BrowserState.IDLE
+    assert browser.closed.is_set()
+
+
+def test_stop_while_filter_is_configured_does_not_report_filter_failure(monkeypatch):
+    filter_entered = threading.Event()
+    release_filter = threading.Event()
+
+    def blocked_filter(cancel_event):
+        filter_entered.set()
+        assert release_filter.wait(2)
+        assert cancel_event.is_set()
+
+    controller = BrowserController(FakePageFilter(block=blocked_filter))
+    browser = FakeBrowser()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open("Edge")
+    assert filter_entered.wait(2)
+    assert controller.state is BrowserState.STARTING
+    controller.stop()
+    release_filter.set()
+    join_worker(controller)
+
+    assert controller.get_launch_results() == []
+    assert controller.last_error is None
+    assert controller.state is BrowserState.IDLE
