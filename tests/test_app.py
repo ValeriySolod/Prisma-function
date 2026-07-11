@@ -53,6 +53,33 @@ def test_failure_restores_button_without_false_success(monkeypatch):
     assert "driver missing" in showerror.call_args.args[1]
 
 
+def test_ui_allows_retry_after_failed_launch(monkeypatch):
+    browser = Mock()
+    browser.open.side_effect = [11, 12]
+    browser.get_launch_results.side_effect = [
+        [LaunchResult(11, False, "driver missing")],
+        [LaunchResult(12, True)],
+    ]
+    instance = make_app(browser)
+    monkeypatch.setattr(app.messagebox, "showerror", Mock())
+
+    instance.open_prisma()
+    instance._poll_browser_launch()
+    assert instance._active_browser_launch is None
+    assert instance.open_button.config.call_args == call(state="normal")
+
+    instance.open_prisma()
+    assert instance._active_browser_launch == 12
+    assert instance.open_button.config.call_args == call(state="disabled")
+    instance._poll_browser_launch()
+
+    assert instance._active_browser_launch is None
+    final_status = instance.status.set.call_args.args[0]
+    assert final_status.startswith("PRISMA ")
+    assert final_status.endswith(" Chrome")
+    assert browser.open.call_count == 2
+
+
 def test_stale_result_is_ignored_and_polling_continues():
     browser = Mock()
     browser.open.return_value = 9
