@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from browser import BrowserController, BrowserState, PrismaAuctionFilter
+from browser import BrowserController, BrowserState, LaunchResult, PrismaAuctionFilter
 
 
 class FakeLocator:
@@ -285,6 +285,41 @@ def test_browser_creation_error_reports_failure_and_cleans_resources(monkeypatch
     assert controller.state is BrowserState.IDLE
     assert not controller.is_running
     assert playwright.stopped.is_set()
+
+
+def test_browser_can_be_started_again_after_launch_error(monkeypatch):
+    controller = BrowserController(FakePageFilter())
+    successful_browser = FakeBrowser()
+    attempts = 0
+
+    def launch(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("driver missing")
+        return successful_browser
+
+    install_fake_playwright(monkeypatch, launch)
+
+    first_generation = controller.open("Chrome")
+    join_worker(controller)
+    first_result = controller.get_launch_results()[0]
+
+    assert first_result == LaunchResult(first_generation, False, "driver missing")
+    assert controller.state is BrowserState.IDLE
+
+    controller._results = SignallingQueue()
+    second_generation = controller.open("Chrome")
+    assert controller._results.ready.wait(2)
+    second_result = controller.get_launch_results()[0]
+
+    assert second_generation > first_generation
+    assert second_result == LaunchResult(second_generation, True)
+    assert controller.state is BrowserState.RUNNING
+    assert controller.last_error is None
+
+    controller.stop()
+    join_worker(controller)
 
 
 def test_navigation_error_reports_failure_and_closes_all_resources(monkeypatch):
