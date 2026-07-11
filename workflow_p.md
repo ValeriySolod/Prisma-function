@@ -509,7 +509,7 @@ Completion note: The Tkinter GUI was migrated to PySide6 while preserving applic
 
 ### P.21. Package the application as a Windows executable
 
-Status: **Planned — not started**.
+Status: **Completed**.
 
 Package the application as a Windows `.exe` after the Qt migration is complete.
 
@@ -517,6 +517,12 @@ Packaging tools to evaluate:
 
 - evaluate `PyInstaller` first;
 - retain `cx_Freeze` as an alternative.
+
+Completion note: Added a pinned PyInstaller build dependency, a version-controlled
+windowed `onedir` specification for `PrismaFunction.exe`, a clean Windows build
+script using the active Python environment, packaging documentation, Git ignores,
+and focused configuration tests. Clean-environment executable validation remains
+in P.22.
 
 ### P.22. Validate the packaged executable on a clean Windows environment
 
