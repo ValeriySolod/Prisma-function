@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import queue
 import re
+import sys
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -34,6 +36,18 @@ class LaunchResult:
 
 class _LaunchCancelled(Exception):
     """Internal control flow for a user-cancelled browser launch."""
+
+
+_NULL_STREAMS = []
+
+
+def _ensure_subprocess_output_streams() -> None:
+    """Give child processes valid output handles in windowed executables."""
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            stream = open(os.devnull, "w", encoding="utf-8")
+            _NULL_STREAMS.append(stream)
+            setattr(sys, name, stream)
 
 
 class DefaultBrowserDetector:
@@ -265,6 +279,7 @@ class BrowserController:
         announced_success = False
 
         try:
+            _ensure_subprocess_output_streams()
             from playwright.sync_api import sync_playwright
 
             executable = self._detector.detect_executable()

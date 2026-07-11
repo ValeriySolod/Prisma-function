@@ -6,6 +6,5 @@ data/*.db
 data/result/*.xlsx
 dist/
 build/
-*.spec
 
 .pytest_tmp/
