@@ -470,6 +470,52 @@ Final release checks:
 - release notes;
 - installation instructions.
 
+### P.17. Remove the manual browser selector from the UI
+
+Status: **Planned — not started**.
+
+Remove the manual Chrome/Edge selector and all UI state that exists only to support manual browser selection.
+
+### P.18. Use the operating system default browser automatically
+
+Status: **Planned — not started**.
+
+Automatically detect and use the browser configured as the operating system default, while preserving clear error handling for unsupported or invalid browser associations.
+
+### P.19. Evaluate and select the Qt GUI framework
+
+Status: **Planned — not started**.
+
+Evaluate the following Qt-based GUI frameworks:
+
+- `PySide6`;
+- `PyQt6`.
+
+Select the framework based on licensing, packaging, maintenance, documentation, and project compatibility before starting the GUI migration.
+
+### P.20. Migrate the Tkinter interface to the selected Qt framework
+
+Status: **Planned — not started**.
+
+Migrate the current Tkinter interface to the Qt-based framework selected in P.19 while preserving existing application behavior, UI states, error handling, and background-work safety.
+
+### P.21. Package the application as a Windows executable
+
+Status: **Planned — not started**.
+
+Package the application as a Windows `.exe` after the Qt migration is complete.
+
+Packaging tools to evaluate:
+
+- evaluate `PyInstaller` first;
+- retain `cx_Freeze` as an alternative.
+
+### P.22. Validate the packaged executable on a clean Windows environment
+
+Status: **Planned — not started**.
+
+Validate the packaged executable on a clean Windows machine or VM without a project development environment or Python installation, including launch, default-browser use, CSV loading, monitoring, shutdown, and writable data paths.
+
 ## 5. Git workflow для кожного етапу
 
 1. Оновити `main`.
