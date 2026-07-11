@@ -53,7 +53,7 @@ class PrismaAuctionFilter:
             input_element.fill("1000", timeout=self.TIMEOUT_MS)
         except Exception as exc:
             self._check_cancelled(cancel_event)
-            raise RuntimeError("Не вдалося встановити значення 1000") from exc
+            raise RuntimeError("Failed to set the value to 1000") from exc
         self._click_apply(container, cancel_event)
 
     def _find_marketed_capacity_container(self, page):
@@ -66,7 +66,7 @@ class PrismaAuctionFilter:
                     "or contains(@aria-label, 'Marketed Capacity')][1]"
                 ),
             ),
-            "Не знайдено контейнер фільтра Marketed Capacity",
+            "Marketed Capacity filter container was not found",
         )
 
     def _find_operator_dropdown(self, container):
@@ -78,7 +78,7 @@ class PrismaAuctionFilter:
                 lambda: container.get_by_role("combobox").first,
                 lambda: container.locator("select").first,
             ),
-            "Не знайдено operator dropdown у фільтрі Marketed Capacity",
+            "Operator dropdown was not found in the Marketed Capacity filter",
         )
 
     def _find_value_input(self, container):
@@ -93,7 +93,7 @@ class PrismaAuctionFilter:
                     "input[type='number'], input[inputmode='numeric']"
                 ).first,
             ),
-            "Не знайдено поле значення у фільтрі Marketed Capacity",
+            "Value field was not found in the Marketed Capacity filter",
         )
 
     def _first_visible(self, factories, error_message: str):
@@ -130,23 +130,22 @@ class PrismaAuctionFilter:
         except Exception as exc:
             self._check_cancelled(cancel_event)
             raise RuntimeError(
-                "Не підтримується жоден варіант operator option "
-                "'більше або дорівнює'"
+                "No supported 'greater than or equal to' operator option was found"
             ) from exc
 
     def _click_apply(self, container, cancel_event: threading.Event) -> None:
         self._check_cancelled(cancel_event)
         try:
             button = container.get_by_role(
-                "button", name=re.compile(r"apply|застосувати", re.IGNORECASE)
+                "button", name=re.compile(r"apply", re.IGNORECASE)
             ).first
             button.wait_for(state="visible", timeout=self.TIMEOUT_MS)
             button.click(timeout=self.TIMEOUT_MS)
         except Exception as exc:
             self._check_cancelled(cancel_event)
             raise RuntimeError(
-                "Не знайдено або не вдалося натиснути Apply "
-                "у фільтрі Marketed Capacity"
+                "Apply was not found or could not be clicked in the "
+                "Marketed Capacity filter"
             ) from exc
         self._check_cancelled(cancel_event)
 
@@ -183,7 +182,7 @@ class BrowserController:
     def open(self, browser_name: str) -> int:
         with self._lock:
             if self._state is not BrowserState.IDLE:
-                raise RuntimeError("Браузерна сесія вже запущена або зупиняється.")
+                raise RuntimeError("The browser session is already running or stopping.")
 
             self._generation += 1
             generation = self._generation
@@ -248,7 +247,7 @@ class BrowserController:
             except Exception as exc:
                 reason = str(exc).strip() or exc.__class__.__name__
                 raise RuntimeError(
-                    "Не вдалося встановити фільтр "
+                    "Failed to set the filter "
                     f"Marketed Capacity >= 1000: {reason}"
                 ) from exc
 

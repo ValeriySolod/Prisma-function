@@ -120,22 +120,22 @@ class AuctionStorage:
             frame = pd.read_sql_query(
                 """
                 SELECT
-                    auction_date AS "Дата аукціону",
-                    exit_market AS "Ринок виходу/Сховище",
-                    entry_market AS "Ринок входу/Сховище",
-                    direction AS "Тип потужності",
-                    network_point AS "Назва точки",
-                    product_type AS "Тип продукту",
-                    flow_start AS "Початок потоку",
-                    flow_end AS "Кінець потоку",
-                    booked_capacity_kwh_h AS "Заброньовано, kWh/h",
-                    runtime_hours AS "Кількість годин",
-                    tariff_eur_mwh_h AS "Тариф, EUR/MWh/h",
-                    premium_eur_mwh_h AS "Премія, EUR/MWh/h",
+                    auction_date AS "Auction Date",
+                    exit_market AS "Exit Market/Storage",
+                    entry_market AS "Entry Market/Storage",
+                    direction AS "Capacity Type",
+                    network_point AS "Network Point Name",
+                    product_type AS "Product Type",
+                    flow_start AS "Flow Start",
+                    flow_end AS "Flow End",
+                    booked_capacity_kwh_h AS "Booked Capacity, kWh/h",
+                    runtime_hours AS "Runtime Hours",
+                    tariff_eur_mwh_h AS "Tariff, EUR/MWh/h",
+                    premium_eur_mwh_h AS "Premium, EUR/MWh/h",
                     auction_id AS "Auction ID",
                     tso_exit AS "TSO Exit",
                     tso_entry AS "TSO Entry",
-                    state AS "Статус"
+                    state AS "Status"
                 FROM auctions
                 ORDER BY auction_date, auction_id
                 """,
