@@ -2,7 +2,29 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 import app
+from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
+
+
+class FakeTree:
+    def __init__(self):
+        self.rows = []
+
+    def get_children(self):
+        return tuple(range(len(self.rows)))
+
+    def delete(self, *items):
+        self.rows = []
+
+    def insert(self, parent, index, values):
+        self.rows.append(values)
+
+
+def record(auction_id="A1", enabled=True, item_name="Item"):
+    return AuctionCsvRecord(
+        auction_id, "https://example.com", "L1", item_name,
+        "Open", "Scheduled", 30, enabled,
+    )
 
 
 def make_app(browser):
@@ -11,6 +33,7 @@ def make_app(browser):
     instance.browser_name = SimpleNamespace(get=lambda: "Chrome")
     instance.csv_path = Mock()
     instance.status = Mock()
+    instance.csv_table = FakeTree()
     instance.open_button = Mock()
     instance.after = Mock()
     instance.destroy = Mock()
@@ -41,7 +64,7 @@ def test_valid_csv_updates_path_and_shows_record_count(monkeypatch):
     instance = make_app(Mock())
     selected = "C:/data/Auction_overview.csv"
     monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(return_value=selected))
-    monkeypatch.setattr(app, "load_auction_csv", Mock(return_value=[object(), object()]))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(return_value=[record(), record("A2")]))
 
     instance.select_csv()
 
@@ -68,7 +91,7 @@ def test_invalid_csv_shows_error_and_preserves_previous_selection(monkeypatch):
 def test_csv_selection_can_be_retried_after_error(monkeypatch):
     instance = make_app(Mock())
     monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(side_effect=["bad.csv", "good.csv"]))
-    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=[app.CsvValidationError("bad"), [object()]]))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=[app.CsvValidationError("bad"), [record()]]))
     monkeypatch.setattr(app.messagebox, "showerror", Mock())
 
     instance.select_csv()
@@ -92,6 +115,83 @@ def test_unexpected_csv_error_uses_english_fallback(monkeypatch):
     )
     instance.csv_path.set.assert_not_called()
     instance.status.set.assert_not_called()
+
+
+def test_display_records_in_order_and_formats_enabled():
+    instance = make_app(Mock())
+    records = [record("A1", True, "First"), record("A2", False, "Second")]
+
+    instance._display_csv_records(records)
+
+    assert instance.csv_table.rows == [
+        ("A1", "L1", "First", "Open", "Scheduled", 30, "Yes"),
+        ("A2", "L1", "Second", "Open", "Scheduled", 30, "No"),
+    ]
+
+
+def test_second_successful_load_replaces_existing_rows(monkeypatch):
+    instance = make_app(Mock())
+    monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(side_effect=["one.csv", "two.csv"]))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=[[record("A1")], [record("A2", False)]]))
+
+    instance.select_csv()
+    instance.select_csv()
+
+    assert [row[0] for row in instance.csv_table.rows] == ["A2"]
+
+
+def test_cancel_and_load_errors_preserve_complete_valid_state(monkeypatch):
+    instance = make_app(Mock())
+    instance.csv_table.rows = [("existing",)]
+    monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(side_effect=["", "bad.csv", "broken.csv"]))
+    monkeypatch.setattr(
+        app, "load_auction_csv",
+        Mock(side_effect=[app.CsvValidationError("bad"), RuntimeError("disk")]),
+    )
+    monkeypatch.setattr(app.messagebox, "showerror", Mock())
+
+    instance.select_csv()
+    instance.select_csv()
+    instance.select_csv()
+
+    assert instance.csv_table.rows == [("existing",)]
+    instance.csv_path.set.assert_not_called()
+    instance.status.set.assert_not_called()
+
+
+def test_ui_creates_table_with_expected_columns(monkeypatch):
+    created = {}
+
+    class Widget:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+        def grid(self, *args, **kwargs): pass
+        def pack(self, *args, **kwargs): pass
+        def columnconfigure(self, *args, **kwargs): pass
+        def rowconfigure(self, *args, **kwargs): pass
+        def heading(self, *args, **kwargs): pass
+        def column(self, *args, **kwargs): pass
+        def configure(self, *args, **kwargs): pass
+        def yview(self, *args, **kwargs): pass
+        def set(self, *args, **kwargs): pass
+
+    class Tree(Widget):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created["tree"] = self
+
+    for name in ("Frame", "Label", "Combobox", "Button", "Entry", "Separator", "Scrollbar"):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, "Treeview", Tree)
+    instance = make_app(Mock())
+    instance.protocol = Mock()
+
+    instance._build_ui()
+
+    assert created["tree"].kwargs["columns"] == (
+        "auction_id", "lot_number", "item_name", "expected_status",
+        "last_known_status", "check_interval_seconds", "enabled",
+    )
 
 
 def test_success_result_is_handled_only_when_main_loop_polls():
