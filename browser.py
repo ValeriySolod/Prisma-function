@@ -5,6 +5,12 @@ import re
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - exercised only on non-Windows hosts
+    winreg = None
 
 PRISMA_AUCTIONS_URL = (
     "https://app.prisma-capacity.eu/reporting/auctions/"
@@ -28,6 +34,43 @@ class LaunchResult:
 
 class _LaunchCancelled(Exception):
     """Internal control flow for a user-cancelled browser launch."""
+
+
+class DefaultBrowserDetector:
+    """Resolves the supported browser registered for HTTP URLs on Windows."""
+
+    USER_CHOICE = (
+        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations"
+        r"\http\UserChoice"
+    )
+
+    def detect_executable(self) -> Path:
+        if winreg is None:
+            raise RuntimeError("Default browser detection is only supported on Windows.")
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.USER_CHOICE) as key:
+                prog_id = winreg.QueryValueEx(key, "ProgId")[0]
+            with winreg.OpenKey(
+                winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command"
+            ) as key:
+                command = winreg.QueryValueEx(key, None)[0]
+        except OSError as exc:
+            raise RuntimeError(
+                "The Windows default browser association could not be read."
+            ) from exc
+
+        match = re.match(r'^\s*"([^"]+)"|^\s*([^\s]+)', command or "")
+        if not match:
+            raise RuntimeError("The Windows default browser association is invalid.")
+        executable = Path(match.group(1) or match.group(2))
+        name = executable.name.lower()
+        if name not in {"chrome.exe", "msedge.exe"}:
+            raise RuntimeError(
+                "The default browser is not supported. Use Google Chrome or Microsoft Edge."
+            )
+        if not executable.is_file():
+            raise RuntimeError(f"The default browser executable was not found: {executable}")
+        return executable
 
 
 class PrismaAuctionFilter:
@@ -156,9 +199,9 @@ class PrismaAuctionFilter:
 
 
 class BrowserController:
-    """Opens PRISMA in installed Chrome or Edge and owns that session."""
+    """Opens PRISMA in the supported Windows default browser."""
 
-    def __init__(self, page_filter: PrismaAuctionFilter | None = None) -> None:
+    def __init__(self, page_filter: PrismaAuctionFilter | None = None, detector=None) -> None:
         self._playwright = None
         self._browser = None
         self._thread: threading.Thread | None = None
@@ -169,6 +212,7 @@ class BrowserController:
         self._results: queue.SimpleQueue[LaunchResult] = queue.SimpleQueue()
         self.last_error: str | None = None
         self._page_filter = page_filter or PrismaAuctionFilter()
+        self._detector = detector or DefaultBrowserDetector()
 
     @property
     def state(self) -> BrowserState:
@@ -179,7 +223,7 @@ class BrowserController:
     def is_running(self) -> bool:
         return self.state is BrowserState.RUNNING
 
-    def open(self, browser_name: str) -> int:
+    def open(self) -> int:
         with self._lock:
             if self._state is not BrowserState.IDLE:
                 raise RuntimeError("The browser session is already running or stopping.")
@@ -192,7 +236,7 @@ class BrowserController:
             self._state = BrowserState.STARTING
             thread = threading.Thread(
                 target=self._run,
-                args=(browser_name, generation, cancel_event),
+                args=(generation, cancel_event),
                 daemon=True,
             )
             self._thread = thread
@@ -212,7 +256,6 @@ class BrowserController:
 
     def _run(
         self,
-        browser_name: str,
         generation: int,
         cancel_event: threading.Event,
     ) -> None:
@@ -224,13 +267,14 @@ class BrowserController:
         try:
             from playwright.sync_api import sync_playwright
 
-            channels = {"Chrome": "chrome", "Edge": "msedge"}
-            channel = channels[browser_name]
+            executable = self._detector.detect_executable()
             playwright = sync_playwright().start()
             if cancel_event.is_set():
                 return
 
-            browser = playwright.chromium.launch(channel=channel, headless=False)
+            browser = playwright.chromium.launch(
+                executable_path=str(executable), headless=False
+            )
             with self._lock:
                 if self._is_current(generation):
                     self._playwright = playwright

@@ -37,7 +37,6 @@ class PrismaMonitorApp(tk.Tk):
         self._monitoring_thread: threading.Thread | None = None
         self._monitoring_stop_event: threading.Event | None = None
         self.csv_path = tk.StringVar()
-        self.browser_name = tk.StringVar(value="Chrome")
         self.status = tk.StringVar(value="Ready")
 
         self._build_ui()
@@ -50,19 +49,10 @@ class PrismaMonitorApp(tk.Tk):
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 18)
         )
 
-        ttk.Label(frame, text="Browser:").grid(row=1, column=0, sticky="w")
-        ttk.Combobox(
-            frame,
-            textvariable=self.browser_name,
-            values=("Chrome", "Edge"),
-            state="readonly",
-            width=18,
-        ).grid(row=1, column=1, sticky="w")
-
         self.open_button = ttk.Button(
             frame, text="Open PRISMA", command=self.open_prisma
         )
-        self.open_button.grid(row=1, column=2, padx=(12, 0))
+        self.open_button.grid(row=1, column=0, columnspan=3, sticky="w")
 
         ttk.Label(frame, text="CSV file:").grid(row=2, column=0, sticky="w", pady=(16, 0))
         ttk.Entry(frame, textvariable=self.csv_path, width=52).grid(
@@ -172,11 +162,10 @@ class PrismaMonitorApp(tk.Tk):
             )
 
     def open_prisma(self) -> None:
-        browser_name = self.browser_name.get()
         try:
             self.open_button.config(state="disabled")
-            self.status.set(f"Starting PRISMA in {browser_name}...")
-            self._active_browser_launch = self.browser.open(browser_name)
+            self.status.set("Starting PRISMA in the default browser...")
+            self._active_browser_launch = self.browser.open()
             self.after(50, self._poll_browser_launch)
         except Exception as exc:
             self._browser_start_failed(exc)
@@ -194,18 +183,18 @@ class PrismaMonitorApp(tk.Tk):
                 continue
             self._active_browser_launch = None
             if result.success:
-                self._browser_started(self.browser_name.get())
+                self._browser_started()
             else:
                 self._browser_start_failed(result.error or "Unknown error")
             return
 
         self.after(50, self._poll_browser_launch)
 
-    def _browser_started(self, browser_name: str) -> None:
+    def _browser_started(self) -> None:
         if self._is_closing:
             return
         self.open_button.config(state="normal")
-        self.status.set(f"PRISMA opened in {browser_name}")
+        self.status.set("PRISMA opened in the default browser")
 
     def _browser_start_failed(self, exc: Exception | str) -> None:
         if self._is_closing:
