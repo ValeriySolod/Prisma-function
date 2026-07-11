@@ -8,13 +8,16 @@ from tkinter import filedialog, messagebox, ttk
 
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
+from monitoring import MonitoringEngine
 from processor import process_csv
+from scheduler import MonitoringScheduler
 from storage import AuctionStorage
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 RESULT_DIR = DATA_DIR / "result"
 DATABASE_PATH = DATA_DIR / "prisma_monitor.db"
+DEFAULT_MONITORING_INTERVAL_SECONDS = 30.0
 
 
 class PrismaMonitorApp(tk.Tk):
@@ -30,6 +33,9 @@ class PrismaMonitorApp(tk.Tk):
         self.browser = BrowserController()
         self._is_closing = False
         self._active_browser_launch: int | None = None
+        self._auction_records: list[AuctionCsvRecord] = []
+        self._monitoring_thread: threading.Thread | None = None
+        self._monitoring_stop_event: threading.Event | None = None
         self.csv_path = tk.StringVar()
         self.browser_name = tk.StringVar(value="Chrome")
         self.status = tk.StringVar(value="Ready")
@@ -88,15 +94,29 @@ class PrismaMonitorApp(tk.Tk):
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
 
-        self.process_button = ttk.Button(frame, text="Process CSV", command=self.start_processing)
-        self.process_button.grid(row=5, column=0, sticky="w", pady=(18, 0))
+        controls = ttk.Frame(frame)
+        controls.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(18, 0))
+        self.process_button = ttk.Button(
+            controls, text="Process CSV", command=self.start_processing
+        )
+        self.process_button.grid(row=0, column=0, padx=(0, 8))
 
-        ttk.Button(frame, text="Open Result", command=self.open_result).grid(
-            row=5, column=1, sticky="w", padx=(8, 0), pady=(18, 0)
+        self.open_result_button = ttk.Button(
+            controls, text="Open Result", command=self.open_result
         )
-        ttk.Button(frame, text="Stop", command=self.stop_work).grid(
-            row=5, column=2, sticky="e", pady=(18, 0)
+        self.open_result_button.grid(row=0, column=1, padx=(0, 8))
+        self.start_monitoring_button = ttk.Button(
+            controls, text="Start Monitoring", command=self.start_monitoring
         )
+        self.start_monitoring_button.grid(row=0, column=2, padx=(0, 8))
+        self.stop_monitoring_button = ttk.Button(
+            controls, text="Stop Monitoring", command=self.stop_monitoring, state="disabled"
+        )
+        self.stop_monitoring_button.grid(row=0, column=3, padx=(0, 8))
+        self.stop_browser_button = ttk.Button(
+            controls, text="Stop Browser", command=self.stop_work
+        )
+        self.stop_browser_button.grid(row=0, column=4)
 
         ttk.Label(frame, text="Status:").grid(row=6, column=0, sticky="nw", pady=(22, 0))
         ttk.Label(
@@ -132,6 +152,7 @@ class PrismaMonitorApp(tk.Tk):
             return
 
         self._display_csv_records(records)
+        self._auction_records = records
         self.csv_path.set(selected)
         self.status.set(f"Loaded {Path(selected).name}: {len(records)} records")
 
@@ -235,6 +256,91 @@ class PrismaMonitorApp(tk.Tk):
             return
         os.startfile(result)  # Windows only
 
+    def create_monitoring_engine(self) -> MonitoringEngine:
+        """Create the engine; override this factory when supplying a live checker."""
+        return MonitoringEngine(lambda record: record.last_known_status)
+
+    def create_monitoring_scheduler(
+        self, records: list[AuctionCsvRecord]
+    ) -> MonitoringScheduler:
+        return MonitoringScheduler(self.create_monitoring_engine(), lambda: records)
+
+    def start_monitoring(self) -> None:
+        if self._monitoring_thread is not None:
+            return
+
+        records = [record for record in self._auction_records if record.enabled]
+        if not records:
+            self._set_monitoring_idle()
+            messagebox.showerror(
+                "Monitoring Error", "No usable auction records are available."
+            )
+            return
+
+        stop_event = threading.Event()
+        scheduler = self.create_monitoring_scheduler(records)
+        thread = threading.Thread(
+            target=self._monitoring_worker,
+            args=(scheduler, stop_event),
+            daemon=True,
+            name="prisma-monitoring",
+        )
+        self._monitoring_stop_event = stop_event
+        self._monitoring_thread = thread
+        self.start_monitoring_button.config(state="disabled")
+        self.stop_monitoring_button.config(state="normal")
+        self.status.set("Monitoring started")
+        try:
+            thread.start()
+        except Exception as exc:
+            self._set_monitoring_idle()
+            reason = str(exc).strip() or exc.__class__.__name__
+            self.status.set("Failed to start monitoring")
+            messagebox.showerror(
+                "Monitoring Error", f"Failed to start monitoring: {reason}"
+            )
+
+    def stop_monitoring(self) -> None:
+        if self._monitoring_stop_event is not None:
+            self._monitoring_stop_event.set()
+
+    def _monitoring_worker(
+        self, scheduler: MonitoringScheduler, stop_event: threading.Event
+    ) -> None:
+        error: Exception | None = None
+        try:
+            scheduler.run_forever(stop_event, DEFAULT_MONITORING_INTERVAL_SECONDS)
+        except Exception as exc:
+            error = exc
+        self._schedule_monitoring_finished(error)
+
+    def _schedule_monitoring_finished(self, error: Exception | None) -> None:
+        if self._is_closing:
+            return
+        try:
+            self.after(0, lambda: self._monitoring_finished(error))
+        except (RuntimeError, tk.TclError):
+            return
+
+    def _monitoring_finished(self, error: Exception | None = None) -> None:
+        if self._is_closing:
+            return
+        self._set_monitoring_idle()
+        if error is not None:
+            reason = str(error).strip() or error.__class__.__name__
+            self.status.set("Monitoring failed")
+            messagebox.showerror(
+                "Monitoring Error", f"Monitoring stopped because of an error: {reason}"
+            )
+        else:
+            self.status.set("Monitoring stopped")
+
+    def _set_monitoring_idle(self) -> None:
+        self._monitoring_thread = None
+        self._monitoring_stop_event = None
+        self.start_monitoring_button.config(state="normal")
+        self.stop_monitoring_button.config(state="disabled")
+
     def stop_work(self) -> None:
         self.browser.stop()
         self._active_browser_launch = None
@@ -244,6 +350,8 @@ class PrismaMonitorApp(tk.Tk):
     def close_app(self) -> None:
         self._is_closing = True
         self._active_browser_launch = None
+        if self._monitoring_stop_event is not None:
+            self._monitoring_stop_event.set()
         self.browser.stop()
         self.destroy()
 

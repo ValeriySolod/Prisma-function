@@ -16,7 +16,9 @@ def test_key_ui_labels_and_initial_status_are_english():
         'text="Select"',
         'text="Process CSV"',
         'text="Open Result"',
-        'text="Stop"',
+        'text="Start Monitoring"',
+        'text="Stop Monitoring"',
+        'text="Stop Browser"',
         'text="Status:"',
         'text="Close Application"',
     )
@@ -58,7 +60,146 @@ def make_app(browser):
     instance.destroy = Mock()
     instance._is_closing = False
     instance._active_browser_launch = None
+    instance._auction_records = []
+    instance._monitoring_thread = None
+    instance._monitoring_stop_event = None
+    instance.start_monitoring_button = Mock()
+    instance.stop_monitoring_button = Mock()
     return instance
+
+
+class FakeThread:
+    created = []
+    start_errors = []
+
+    def __init__(self, *, target, args, daemon, name):
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+        self.name = name
+        self.started = False
+        self.__class__.created.append(self)
+
+    def start(self):
+        if self.__class__.start_errors:
+            error = self.__class__.start_errors.pop(0)
+            if error is not None:
+                raise error
+        self.started = True
+
+    def run(self):
+        self.target(*self.args)
+
+
+def monitoring_app(monkeypatch, records=None):
+    instance = make_app(Mock())
+    instance._auction_records = records if records is not None else [record()]
+    instance.create_monitoring_scheduler = Mock()
+    FakeThread.created = []
+    FakeThread.start_errors = []
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    return instance
+
+
+def test_start_monitoring_creates_one_daemon_thread_and_sets_running_ui(monkeypatch):
+    instance = monitoring_app(monkeypatch)
+
+    instance.start_monitoring()
+    instance.start_monitoring()
+
+    assert len(FakeThread.created) == 1
+    assert FakeThread.created[0].started and FakeThread.created[0].daemon
+    instance.start_monitoring_button.config.assert_called_once_with(state="disabled")
+    instance.stop_monitoring_button.config.assert_called_once_with(state="normal")
+    instance.status.set.assert_called_once_with("Monitoring started")
+
+
+def test_thread_start_failure_restores_idle_shows_reason_and_allows_retry(monkeypatch):
+    instance = monitoring_app(monkeypatch)
+    FakeThread.start_errors = [RuntimeError("thread unavailable"), None]
+    showerror = Mock()
+    monkeypatch.setattr(app.messagebox, "showerror", showerror)
+
+    instance.start_monitoring()
+
+    assert instance._monitoring_thread is None
+    assert instance._monitoring_stop_event is None
+    instance.start_monitoring_button.config.assert_called_with(state="normal")
+    instance.stop_monitoring_button.config.assert_called_with(state="disabled")
+    instance.status.set.assert_called_with("Failed to start monitoring")
+    assert "thread unavailable" in showerror.call_args.args[1]
+
+    instance.start_monitoring()
+
+    assert len(FakeThread.created) == 2
+    assert FakeThread.created[1].started
+
+
+def test_start_without_enabled_records_stays_idle_and_shows_error(monkeypatch):
+    instance = monitoring_app(monkeypatch, [record(enabled=False)])
+    showerror = Mock()
+    monkeypatch.setattr(app.messagebox, "showerror", showerror)
+
+    instance.start_monitoring()
+
+    assert FakeThread.created == []
+    instance.create_monitoring_scheduler.assert_not_called()
+    showerror.assert_called_once_with(
+        "Monitoring Error", "No usable auction records are available."
+    )
+
+
+def test_stop_sets_active_event(monkeypatch):
+    instance = monitoring_app(monkeypatch)
+    instance.start_monitoring()
+    event = instance._monitoring_stop_event
+
+    instance.stop_monitoring()
+
+    assert event.is_set()
+
+
+def test_worker_completion_is_routed_through_after_and_restores_idle(monkeypatch):
+    instance = monitoring_app(monkeypatch)
+    instance.start_monitoring()
+    FakeThread.created[0].run()
+
+    instance.after.assert_called_once()
+    callback = instance.after.call_args.args[1]
+    callback()
+
+    assert instance._monitoring_thread is None
+    instance.start_monitoring_button.config.assert_called_with(state="normal")
+    instance.stop_monitoring_button.config.assert_called_with(state="disabled")
+    instance.status.set.assert_called_with("Monitoring stopped")
+
+
+def test_scheduler_failure_restores_idle_shows_error_and_allows_retry(monkeypatch):
+    instance = monitoring_app(monkeypatch)
+    scheduler = Mock()
+    scheduler.run_forever.side_effect = RuntimeError("scheduler broke")
+    instance.create_monitoring_scheduler.return_value = scheduler
+    showerror = Mock()
+    monkeypatch.setattr(app.messagebox, "showerror", showerror)
+
+    instance.start_monitoring()
+    FakeThread.created[0].run()
+    instance.after.call_args.args[1]()
+    instance.start_monitoring()
+
+    assert len(FakeThread.created) == 2
+    assert "scheduler broke" in showerror.call_args.args[1]
+
+
+def test_close_signals_monitoring_without_joining(monkeypatch):
+    instance = monitoring_app(monkeypatch)
+    instance.start_monitoring()
+    event = instance._monitoring_stop_event
+
+    instance.close_app()
+
+    assert event.is_set()
+    instance.destroy.assert_called_once()
 
 
 def test_cancel_csv_selection_keeps_current_state(monkeypatch):
@@ -211,6 +352,49 @@ def test_ui_creates_table_with_expected_columns(monkeypatch):
         "auction_id", "lot_number", "item_name", "expected_status",
         "last_known_status", "check_interval_seconds", "enabled",
     )
+
+
+def test_controls_have_distinct_grid_cells_and_browser_stop_command(monkeypatch):
+    buttons = {}
+
+    class Widget:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+            self.grid_args = None
+        def grid(self, *args, **kwargs): self.grid_args = kwargs
+        def pack(self, *args, **kwargs): pass
+        def columnconfigure(self, *args, **kwargs): pass
+        def rowconfigure(self, *args, **kwargs): pass
+        def heading(self, *args, **kwargs): pass
+        def column(self, *args, **kwargs): pass
+        def configure(self, *args, **kwargs): pass
+        def yview(self, *args, **kwargs): pass
+        def set(self, *args, **kwargs): pass
+
+    class Button(Widget):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            buttons[kwargs["text"]] = self
+
+    for name in ("Frame", "Label", "Combobox", "Entry", "Separator", "Scrollbar", "Treeview"):
+        monkeypatch.setattr(app.ttk, name, Widget)
+    monkeypatch.setattr(app.ttk, "Button", Button)
+    instance = make_app(Mock())
+    instance.protocol = Mock()
+
+    instance._build_ui()
+
+    control_names = (
+        "Process CSV", "Open Result", "Start Monitoring",
+        "Stop Monitoring", "Stop Browser",
+    )
+    cells = {
+        (buttons[name].grid_args["row"], buttons[name].grid_args["column"])
+        for name in control_names
+    }
+    assert len(cells) == len(control_names)
+    assert buttons["Open Result"].grid_args != buttons["Start Monitoring"].grid_args
+    assert buttons["Stop Browser"].kwargs["command"] == instance.stop_work
 
 
 def test_success_result_is_handled_only_when_main_loop_polls():
