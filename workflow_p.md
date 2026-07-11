@@ -472,19 +472,23 @@ Final release checks:
 
 ### P.17. Remove the manual browser selector from the UI
 
-Status: **Planned — not started**.
+Status: **Completed**.
 
 Remove the manual Chrome/Edge selector and all UI state that exists only to support manual browser selection.
 
+Completion note: The manual Chrome/Edge selector and its UI-only state were removed.
+
 ### P.18. Use the operating system default browser automatically
 
-Status: **Planned — not started**.
+Status: **Completed**.
 
 Automatically detect and use the browser configured as the operating system default, while preserving clear error handling for unsupported or invalid browser associations.
 
+Completion note: The application now detects and uses the operating system default browser, with handling for unsupported or invalid browser associations.
+
 ### P.19. Evaluate and select the Qt GUI framework
 
-Status: **Planned — not started**.
+Status: **Completed**.
 
 Evaluate the following Qt-based GUI frameworks:
 
@@ -493,11 +497,15 @@ Evaluate the following Qt-based GUI frameworks:
 
 Select the framework based on licensing, packaging, maintenance, documentation, and project compatibility before starting the GUI migration.
 
+Completion note: PySide6 was selected as the Qt framework.
+
 ### P.20. Migrate the Tkinter interface to the selected Qt framework
 
-Status: **Planned — not started**.
+Status: **Completed**.
 
 Migrate the current Tkinter interface to the Qt-based framework selected in P.19 while preserving existing application behavior, UI states, error handling, and background-work safety.
+
+Completion note: The Tkinter GUI was migrated to PySide6 while preserving application behavior, background-work safety, error handling, and tests. The full test suite passed with `125 passed`.
 
 ### P.21. Package the application as a Windows executable
 
