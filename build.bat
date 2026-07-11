@@ -2,12 +2,12 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Virtual environment not found. Run setup.bat first.
-    exit /b 1
-)
+if exist "build" rmdir /s /q "build"
+if errorlevel 1 exit /b %errorlevel%
+if exist "dist" rmdir /s /q "dist"
+if errorlevel 1 exit /b %errorlevel%
 
-".venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm PrismaFunction.spec
+python -m PyInstaller --clean --noconfirm PrismaFunction.spec
 if errorlevel 1 exit /b %errorlevel%
 
 echo Build complete: dist\PrismaFunction\PrismaFunction.exe
