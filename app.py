@@ -6,6 +6,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from auction_csv import CsvValidationError, load_auction_csv
 from browser import BrowserController
 from processor import process_csv
 from storage import AuctionStorage
@@ -94,12 +95,23 @@ class PrismaMonitorApp(tk.Tk):
 
     def select_csv(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Виберіть Auction_overview.csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Select Auction_overview.csv",
+            filetypes=[("CSV files", "*.csv")],
         )
-        if selected:
-            self.csv_path.set(selected)
-            self.status.set(f"Вибрано: {Path(selected).name}")
+        if not selected:
+            return
+
+        try:
+            records = load_auction_csv(selected)
+        except CsvValidationError as exc:
+            messagebox.showerror("CSV Error", str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("CSV Error", f"Failed to load CSV: {exc}")
+            return
+
+        self.csv_path.set(selected)
+        self.status.set(f"Loaded {Path(selected).name}: {len(records)} records")
 
     def open_prisma(self) -> None:
         browser_name = self.browser_name.get()

@@ -9,6 +9,7 @@ def make_app(browser):
     instance = app.PrismaMonitorApp.__new__(app.PrismaMonitorApp)
     instance.browser = browser
     instance.browser_name = SimpleNamespace(get=lambda: "Chrome")
+    instance.csv_path = Mock()
     instance.status = Mock()
     instance.open_button = Mock()
     instance.after = Mock()
@@ -16,6 +17,81 @@ def make_app(browser):
     instance._is_closing = False
     instance._active_browser_launch = None
     return instance
+
+
+def test_cancel_csv_selection_keeps_current_state(monkeypatch):
+    instance = make_app(Mock())
+    askopenfilename = Mock(return_value="")
+    monkeypatch.setattr(app.filedialog, "askopenfilename", askopenfilename)
+    load = Mock()
+    monkeypatch.setattr(app, "load_auction_csv", load)
+
+    instance.select_csv()
+
+    askopenfilename.assert_called_once_with(
+        title="Select Auction_overview.csv",
+        filetypes=[("CSV files", "*.csv")],
+    )
+    load.assert_not_called()
+    instance.csv_path.set.assert_not_called()
+    instance.status.set.assert_not_called()
+
+
+def test_valid_csv_updates_path_and_shows_record_count(monkeypatch):
+    instance = make_app(Mock())
+    selected = "C:/data/Auction_overview.csv"
+    monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(return_value=selected))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(return_value=[object(), object()]))
+
+    instance.select_csv()
+
+    instance.csv_path.set.assert_called_once_with(selected)
+    instance.status.set.assert_called_once_with(
+        "Loaded Auction_overview.csv: 2 records"
+    )
+
+
+def test_invalid_csv_shows_error_and_preserves_previous_selection(monkeypatch):
+    instance = make_app(Mock())
+    monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(return_value="C:/data/bad.csv"))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=app.CsvValidationError("bad data")))
+    showerror = Mock()
+    monkeypatch.setattr(app.messagebox, "showerror", showerror)
+
+    instance.select_csv()
+
+    showerror.assert_called_once_with("CSV Error", "bad data")
+    instance.csv_path.set.assert_not_called()
+    instance.status.set.assert_not_called()
+
+
+def test_csv_selection_can_be_retried_after_error(monkeypatch):
+    instance = make_app(Mock())
+    monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(side_effect=["bad.csv", "good.csv"]))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=[app.CsvValidationError("bad"), [object()]]))
+    monkeypatch.setattr(app.messagebox, "showerror", Mock())
+
+    instance.select_csv()
+    instance.select_csv()
+
+    instance.csv_path.set.assert_called_once_with("good.csv")
+    assert "1" in instance.status.set.call_args.args[0]
+
+
+def test_unexpected_csv_error_uses_english_fallback(monkeypatch):
+    instance = make_app(Mock())
+    monkeypatch.setattr(app.filedialog, "askopenfilename", Mock(return_value="bad.csv"))
+    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=RuntimeError("disk failure")))
+    showerror = Mock()
+    monkeypatch.setattr(app.messagebox, "showerror", showerror)
+
+    instance.select_csv()
+
+    showerror.assert_called_once_with(
+        "CSV Error", "Failed to load CSV: disk failure"
+    )
+    instance.csv_path.set.assert_not_called()
+    instance.status.set.assert_not_called()
 
 
 def test_success_result_is_handled_only_when_main_loop_polls():

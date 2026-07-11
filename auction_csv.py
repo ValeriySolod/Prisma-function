@@ -103,6 +103,8 @@ def _parse_row(row: list[str], row_number: int) -> AuctionCsvRecord:
 def load_auction_csv(path: str | Path) -> list[AuctionCsvRecord]:
     """Read and validate an auction CSV, returning typed records atomically."""
     csv_path = Path(path)
+    if csv_path.suffix.lower() != ".csv":
+        raise CsvValidationError("Selected file must have a .csv extension.")
     if not csv_path.is_file():
         raise CsvValidationError("CSV file does not exist.")
 
