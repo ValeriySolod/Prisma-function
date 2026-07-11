@@ -526,9 +526,17 @@ in P.22.
 
 ### P.22. Validate the packaged executable on a clean Windows environment
 
-Status: **Planned — not started**.
+Status: **In progress — development-host validation completed 2026-07-11**.
 
 Validate the packaged executable on a clean Windows machine or VM without a project development environment or Python installation, including launch, default-browser use, CSV loading, monitoring, shutdown, and writable data paths.
+
+Progress note: the documented windowed onedir build succeeded and package
+contents, direct non-admin process launch, launch from a path containing spaces,
+and writes beside the package were checked on the Windows development host.
+This host is not a clean machine, its sandbox user has no configured HTTP default
+browser, and its packaged GUI was not interactively accessible. The clean-machine
+GUI, CSV, monitoring, browser, graceful-shutdown, cleanup, retry, and protected
+install-location checks remain. See `P22_VALIDATION.md`.
 
 ## 5. Git workflow для кожного етапу
 
