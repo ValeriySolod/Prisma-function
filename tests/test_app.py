@@ -80,6 +80,29 @@ def test_ui_allows_retry_after_failed_launch(monkeypatch):
     assert browser.open.call_count == 2
 
 
+def test_synchronous_open_error_restores_ui_and_allows_retry(monkeypatch):
+    browser = Mock()
+    browser.open.side_effect = [RuntimeError("sync launch failed"), 14]
+    instance = make_app(browser)
+    showerror = Mock()
+    monkeypatch.setattr(app.messagebox, "showerror", showerror)
+
+    instance.open_prisma()
+
+    assert instance._active_browser_launch is None
+    assert instance.open_button.config.call_args == call(state="normal")
+    assert "sync launch failed" in showerror.call_args.args[1]
+    assert instance.status.set.call_count == 2
+    instance.after.assert_not_called()
+
+    instance.open_prisma()
+
+    assert browser.open.call_count == 2
+    assert instance._active_browser_launch == 14
+    assert instance.open_button.config.call_args == call(state="disabled")
+    instance.after.assert_called_once_with(50, instance._poll_browser_launch)
+
+
 def test_stale_result_is_ignored_and_polling_continues():
     browser = Mock()
     browser.open.return_value = 9

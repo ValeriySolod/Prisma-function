@@ -129,11 +129,17 @@ class FakeFilterPage(FakePage):
 
 
 class FakeBrowser:
-    def __init__(self, page=None):
+    def __init__(self, page=None, *, new_page_error=None, new_page_block=None):
         self.page = page or FakePage()
+        self.new_page_error = new_page_error
+        self.new_page_block = new_page_block
         self.closed = threading.Event()
 
     def new_page(self):
+        if self.new_page_block:
+            self.new_page_block()
+        if self.new_page_error:
+            raise self.new_page_error
         return self.page
 
     def close(self):
@@ -336,6 +342,99 @@ def test_navigation_error_reports_failure_and_closes_all_resources(monkeypatch):
     assert browser.closed.is_set()
     assert playwright.stopped.is_set()
     assert controller.state is BrowserState.IDLE
+
+
+def test_page_creation_error_reports_failure_and_closes_all_resources(monkeypatch):
+    controller = BrowserController(FakePageFilter())
+    browser = FakeBrowser(new_page_error=RuntimeError("page creation failed"))
+    playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    generation = controller.open("Chrome")
+    join_worker(controller)
+
+    assert controller.get_launch_results() == [
+        LaunchResult(generation, False, "page creation failed")
+    ]
+    assert controller.last_error == "page creation failed"
+    assert controller.state is BrowserState.IDLE
+    assert not controller.is_running
+    assert controller._browser is None
+    assert controller._playwright is None
+    assert controller._cancel_event is None
+    assert browser.closed.is_set()
+    assert playwright.stopped.is_set()
+
+
+def test_stale_generation_completion_does_not_disturb_active_generation(monkeypatch):
+    old_page_entered = threading.Event()
+    release_old_page = threading.Event()
+    new_page_entered = threading.Event()
+    release_new_page = threading.Event()
+
+    def block_old_page():
+        old_page_entered.set()
+        assert release_old_page.wait(2)
+
+    def block_new_page():
+        new_page_entered.set()
+        assert release_new_page.wait(2)
+
+    old_browser = FakeBrowser(
+        new_page_error=RuntimeError("old failure"), new_page_block=block_old_page
+    )
+    new_browser = FakeBrowser(
+        new_page_error=RuntimeError("new failure"), new_page_block=block_new_page
+    )
+    playwrights = iter(
+        (
+            FakePlaywright(lambda **kwargs: old_browser),
+            FakePlaywright(lambda **kwargs: new_browser),
+        )
+    )
+    api = SimpleNamespace(
+        sync_playwright=lambda: SimpleNamespace(start=lambda: next(playwrights))
+    )
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", api)
+    controller = BrowserController(FakePageFilter())
+    old_cancel = threading.Event()
+    new_cancel = threading.Event()
+
+    controller._generation = 1
+    controller._state = BrowserState.STARTING
+    old_thread = threading.Thread(
+        target=controller._run, args=("Chrome", 1, old_cancel), daemon=True
+    )
+    old_thread.start()
+    assert old_page_entered.wait(2)
+
+    controller._generation = 2
+    controller._cancel_event = new_cancel
+    new_thread = threading.Thread(
+        target=controller._run, args=("Chrome", 2, new_cancel), daemon=True
+    )
+    controller._thread = new_thread
+    new_thread.start()
+    assert new_page_entered.wait(2)
+
+    release_old_page.set()
+    old_thread.join(timeout=2)
+    assert not old_thread.is_alive()
+    assert controller.state is BrowserState.STARTING
+    assert controller._generation == 2
+    assert controller._browser is new_browser
+    assert controller._cancel_event is new_cancel
+    assert controller.get_launch_results() == []
+
+    release_new_page.set()
+    new_thread.join(timeout=2)
+    assert not new_thread.is_alive()
+    assert controller.get_launch_results() == [
+        LaunchResult(2, False, "new failure")
+    ]
+    assert controller.last_error == "new failure"
+    assert controller.state is BrowserState.IDLE
+    assert old_browser.closed.is_set()
+    assert new_browser.closed.is_set()
 
 
 def test_open_twice_is_rejected_while_starting(monkeypatch):
