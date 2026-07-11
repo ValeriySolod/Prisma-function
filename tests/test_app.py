@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 import app
@@ -10,7 +9,6 @@ def test_key_ui_labels_and_initial_status_are_english():
     source = app.Path(app.__file__).read_text(encoding="utf-8")
     expected_texts = (
         'value="Ready"',
-        'text="Browser:"',
         'text="Open PRISMA"',
         'text="CSV file:"',
         'text="Select"',
@@ -25,6 +23,10 @@ def test_key_ui_labels_and_initial_status_are_english():
 
     for expected in expected_texts:
         assert expected in source
+
+    assert 'text="Browser:"' not in source
+    assert "browser_name" not in source
+    assert "ttk.Combobox" not in source
 
 
 class FakeTree:
@@ -51,7 +53,6 @@ def record(auction_id="A1", enabled=True, item_name="Item"):
 def make_app(browser):
     instance = app.PrismaMonitorApp.__new__(app.PrismaMonitorApp)
     instance.browser = browser
-    instance.browser_name = SimpleNamespace(get=lambda: "Chrome")
     instance.csv_path = Mock()
     instance.status = Mock()
     instance.csv_table = FakeTree()
@@ -405,10 +406,11 @@ def test_success_result_is_handled_only_when_main_loop_polls():
 
     instance.open_prisma()
 
-    assert instance.status.set.call_args_list == [call("Starting PRISMA in Chrome...")]
+    assert instance.status.set.call_args_list == [call("Starting PRISMA in the default browser...")]
+    browser.open.assert_called_once_with()
     assert instance.open_button.config.call_args == call(state="disabled")
     instance._poll_browser_launch()
-    assert instance.status.set.call_args == call("PRISMA opened in Chrome")
+    assert instance.status.set.call_args == call("PRISMA opened in the default browser")
     assert instance.open_button.config.call_args == call(state="normal")
 
 
@@ -426,7 +428,7 @@ def test_failure_restores_button_without_false_success(monkeypatch):
     instance._poll_browser_launch()
 
     statuses = [item.args[0] for item in instance.status.set.call_args_list]
-    assert "PRISMA opened in Chrome" not in statuses
+    assert "PRISMA opened in the default browser" not in statuses
     assert statuses[-1] == "Failed to open the browser"
     assert instance.open_button.config.call_args == call(state="normal")
     assert "driver missing" in showerror.call_args.args[1]
@@ -455,7 +457,7 @@ def test_ui_allows_retry_after_failed_launch(monkeypatch):
     assert instance._active_browser_launch is None
     final_status = instance.status.set.call_args.args[0]
     assert final_status.startswith("PRISMA ")
-    assert final_status.endswith(" Chrome")
+    assert final_status == "PRISMA opened in the default browser"
     assert browser.open.call_count == 2
 
 
@@ -492,7 +494,7 @@ def test_stale_result_is_ignored_and_polling_continues():
     instance._poll_browser_launch()
 
     statuses = [item.args[0] for item in instance.status.set.call_args_list]
-    assert "PRISMA opened in Chrome" not in statuses
+    assert "PRISMA opened in the default browser" not in statuses
     assert instance._active_browser_launch == 9
     assert instance.after.call_count == 2
 

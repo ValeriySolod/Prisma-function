@@ -2,10 +2,70 @@ import queue
 import sys
 import threading
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
-from browser import BrowserController, BrowserState, LaunchResult, PrismaAuctionFilter
+from browser import (
+    BrowserController, BrowserState, DefaultBrowserDetector, LaunchResult,
+    PrismaAuctionFilter,
+)
+import browser as browser_module
+
+ORIGINAL_DETECT_EXECUTABLE = DefaultBrowserDetector.detect_executable
+
+
+@pytest.fixture(autouse=True)
+def default_browser(monkeypatch):
+    monkeypatch.setattr(
+        DefaultBrowserDetector, "detect_executable",
+        lambda self: Path("C:/Browsers/default.exe"),
+    )
+
+
+class RegistryKey:
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+def test_detector_resolves_registered_supported_executable(monkeypatch):
+    monkeypatch.setattr(
+        DefaultBrowserDetector, "detect_executable", ORIGINAL_DETECT_EXECUTABLE
+    )
+    values = iter(("ChromeHTML", '"C:\\Apps\\Chrome\\chrome.exe" -- "%1"'))
+    registry = SimpleNamespace(
+        HKEY_CURRENT_USER=object(), HKEY_CLASSES_ROOT=object(),
+        OpenKey=lambda *args: RegistryKey(next(values)),
+        QueryValueEx=lambda key, name: (key.value, None),
+    )
+    monkeypatch.setattr(browser_module, "winreg", registry)
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+
+    assert DefaultBrowserDetector().detect_executable() == Path(
+        "C:/Apps/Chrome/chrome.exe"
+    )
+
+
+def test_detector_rejects_unsupported_default_browser(monkeypatch):
+    monkeypatch.setattr(
+        DefaultBrowserDetector, "detect_executable", ORIGINAL_DETECT_EXECUTABLE
+    )
+    values = iter(("FirefoxURL", '"C:\\Apps\\Firefox\\firefox.exe" -osint'))
+    registry = SimpleNamespace(
+        HKEY_CURRENT_USER=object(), HKEY_CLASSES_ROOT=object(),
+        OpenKey=lambda *args: RegistryKey(next(values)),
+        QueryValueEx=lambda key, name: (key.value, None),
+    )
+    monkeypatch.setattr(browser_module, "winreg", registry)
+
+    with pytest.raises(RuntimeError, match="not supported"):
+        DefaultBrowserDetector().detect_executable()
 
 
 class FakeLocator:
@@ -208,7 +268,7 @@ def test_apply_click_error_reports_failure_and_cleans_resources(monkeypatch):
     controller = BrowserController()
     playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
-    controller.open("Chrome")
+    controller.open()
     join_worker(controller)
 
     result = controller.get_launch_results()[0]
@@ -227,7 +287,7 @@ def test_cancellation_during_apply_does_not_report_failure(monkeypatch):
     browser = FakeBrowser(FakeFilterPage(FakeFilterContainer(apply_button=apply_button)))
     playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
-    controller.open("Edge")
+    controller.open()
     join_worker(controller)
 
     assert controller.get_launch_results() == []
@@ -237,13 +297,7 @@ def test_cancellation_during_apply_does_not_report_failure(monkeypatch):
     assert playwright.stopped.is_set()
 
 
-@pytest.mark.parametrize(
-    ("browser_name", "expected_channel"),
-    [("Chrome", "chrome"), ("Edge", "msedge")],
-)
-def test_successful_start_uses_expected_channel(
-    monkeypatch, browser_name, expected_channel
-):
+def test_successful_start_uses_system_default_browser_executable(monkeypatch):
     page_filter = FakePageFilter()
     controller = BrowserController(page_filter)
     controller._results = SignallingQueue()
@@ -254,7 +308,7 @@ def test_successful_start_uses_expected_channel(
         lambda **kwargs: launches.append(kwargs) or browser,
     )
 
-    generation = controller.open(browser_name)
+    generation = controller.open()
     assert controller._results.ready.wait(2)
 
     assert controller.state is BrowserState.RUNNING
@@ -262,7 +316,9 @@ def test_successful_start_uses_expected_channel(
     result = controller.get_launch_results()[0]
     assert result.generation == generation
     assert result.success
-    assert launches[0]["channel"] == expected_channel
+    assert launches == [{
+        "executable_path": "C:\\Browsers\\default.exe", "headless": False
+    }]
     assert page_filter.pages == [browser.page]
 
     controller.stop()
@@ -281,7 +337,7 @@ def test_browser_creation_error_reports_failure_and_cleans_resources(monkeypatch
         raise RuntimeError("driver missing")
 
     playwright = install_fake_playwright(monkeypatch, fail_launch)
-    controller.open("Chrome")
+    controller.open()
     join_worker(controller)
 
     result = controller.get_launch_results()[0]
@@ -307,7 +363,7 @@ def test_browser_can_be_started_again_after_launch_error(monkeypatch):
 
     install_fake_playwright(monkeypatch, launch)
 
-    first_generation = controller.open("Chrome")
+    first_generation = controller.open()
     join_worker(controller)
     first_result = controller.get_launch_results()[0]
 
@@ -315,7 +371,7 @@ def test_browser_can_be_started_again_after_launch_error(monkeypatch):
     assert controller.state is BrowserState.IDLE
 
     controller._results = SignallingQueue()
-    second_generation = controller.open("Chrome")
+    second_generation = controller.open()
     assert controller._results.ready.wait(2)
     second_result = controller.get_launch_results()[0]
 
@@ -333,7 +389,7 @@ def test_navigation_error_reports_failure_and_closes_all_resources(monkeypatch):
     browser = FakeBrowser(FakePage(RuntimeError("navigation failed")))
     playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
-    controller.open("Edge")
+    controller.open()
     join_worker(controller)
 
     result = controller.get_launch_results()[0]
@@ -349,7 +405,7 @@ def test_page_creation_error_reports_failure_and_closes_all_resources(monkeypatc
     browser = FakeBrowser(new_page_error=RuntimeError("page creation failed"))
     playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
-    generation = controller.open("Chrome")
+    generation = controller.open()
     join_worker(controller)
 
     assert controller.get_launch_results() == [
@@ -402,7 +458,7 @@ def test_stale_generation_completion_does_not_disturb_active_generation(monkeypa
     controller._generation = 1
     controller._state = BrowserState.STARTING
     old_thread = threading.Thread(
-        target=controller._run, args=("Chrome", 1, old_cancel), daemon=True
+        target=controller._run, args=(1, old_cancel), daemon=True
     )
     old_thread.start()
     assert old_page_entered.wait(2)
@@ -410,7 +466,7 @@ def test_stale_generation_completion_does_not_disturb_active_generation(monkeypa
     controller._generation = 2
     controller._cancel_event = new_cancel
     new_thread = threading.Thread(
-        target=controller._run, args=("Chrome", 2, new_cancel), daemon=True
+        target=controller._run, args=(2, new_cancel), daemon=True
     )
     controller._thread = new_thread
     new_thread.start()
@@ -448,12 +504,12 @@ def test_open_twice_is_rejected_while_starting(monkeypatch):
         return FakeBrowser()
 
     install_fake_playwright(monkeypatch, blocked_launch)
-    controller.open("Chrome")
+    controller.open()
     assert launch_entered.wait(2)
     assert controller.state is BrowserState.STARTING
 
     with pytest.raises(RuntimeError):
-        controller.open("Edge")
+        controller.open()
 
     controller.stop()
     release_launch.set()
@@ -472,7 +528,7 @@ def test_stop_during_startup_suppresses_success_and_cleans_resources(monkeypatch
         return browser
 
     playwright = install_fake_playwright(monkeypatch, blocked_launch)
-    controller.open("Chrome")
+    controller.open()
     assert launch_entered.wait(2)
 
     controller.stop()
@@ -493,7 +549,7 @@ def test_filter_error_reports_clear_failure_and_returns_to_idle(monkeypatch):
     browser = FakeBrowser()
     install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
-    controller.open("Chrome")
+    controller.open()
     join_worker(controller)
 
     result = controller.get_launch_results()[0]
@@ -518,7 +574,7 @@ def test_stop_while_filter_is_configured_does_not_report_filter_failure(monkeypa
     browser = FakeBrowser()
     install_fake_playwright(monkeypatch, lambda **kwargs: browser)
 
-    controller.open("Edge")
+    controller.open()
     assert filter_entered.wait(2)
     assert controller.state is BrowserState.STARTING
     controller.stop()
