@@ -488,7 +488,7 @@ def test_stop_during_startup_suppresses_success_and_cleans_resources(monkeypatch
 
 
 def test_filter_error_reports_clear_failure_and_returns_to_idle(monkeypatch):
-    page_filter = FakePageFilter(RuntimeError("поле введення не знайдено"))
+    page_filter = FakePageFilter(RuntimeError("input field not found"))
     controller = BrowserController(page_filter)
     browser = FakeBrowser()
     install_fake_playwright(monkeypatch, lambda **kwargs: browser)
@@ -499,7 +499,7 @@ def test_filter_error_reports_clear_failure_and_returns_to_idle(monkeypatch):
     result = controller.get_launch_results()[0]
     assert not result.success
     assert "Marketed Capacity >= 1000" in result.error
-    assert "поле введення не знайдено" in result.error
+    assert "input field not found" in result.error
     assert controller.last_error == result.error
     assert controller.state is BrowserState.IDLE
     assert browser.closed.is_set()

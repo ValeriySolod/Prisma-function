@@ -6,6 +6,25 @@ from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
 
 
+def test_key_ui_labels_and_initial_status_are_english():
+    source = app.Path(app.__file__).read_text(encoding="utf-8")
+    expected_texts = (
+        'value="Ready"',
+        'text="Browser:"',
+        'text="Open PRISMA"',
+        'text="CSV file:"',
+        'text="Select"',
+        'text="Process CSV"',
+        'text="Open Result"',
+        'text="Stop"',
+        'text="Status:"',
+        'text="Close Application"',
+    )
+
+    for expected in expected_texts:
+        assert expected in source
+
+
 class FakeTree:
     def __init__(self):
         self.rows = []
@@ -202,10 +221,10 @@ def test_success_result_is_handled_only_when_main_loop_polls():
 
     instance.open_prisma()
 
-    assert instance.status.set.call_args_list == [call("Запуск PRISMA у Chrome...")]
+    assert instance.status.set.call_args_list == [call("Starting PRISMA in Chrome...")]
     assert instance.open_button.config.call_args == call(state="disabled")
     instance._poll_browser_launch()
-    assert instance.status.set.call_args == call("PRISMA відкрито у Chrome")
+    assert instance.status.set.call_args == call("PRISMA opened in Chrome")
     assert instance.open_button.config.call_args == call(state="normal")
 
 
@@ -223,8 +242,8 @@ def test_failure_restores_button_without_false_success(monkeypatch):
     instance._poll_browser_launch()
 
     statuses = [item.args[0] for item in instance.status.set.call_args_list]
-    assert "PRISMA відкрито у Chrome" not in statuses
-    assert statuses[-1] == "Не вдалося відкрити браузер"
+    assert "PRISMA opened in Chrome" not in statuses
+    assert statuses[-1] == "Failed to open the browser"
     assert instance.open_button.config.call_args == call(state="normal")
     assert "driver missing" in showerror.call_args.args[1]
 
@@ -289,7 +308,7 @@ def test_stale_result_is_ignored_and_polling_continues():
     instance._poll_browser_launch()
 
     statuses = [item.args[0] for item in instance.status.set.call_args_list]
-    assert "PRISMA відкрито у Chrome" not in statuses
+    assert "PRISMA opened in Chrome" not in statuses
     assert instance._active_browser_launch == 9
     assert instance.after.call_count == 2
 
