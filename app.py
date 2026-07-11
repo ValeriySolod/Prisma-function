@@ -6,7 +6,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from auction_csv import CsvValidationError, load_auction_csv
+from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
 from processor import process_csv
 from storage import AuctionStorage
@@ -21,7 +21,7 @@ class PrismaMonitorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("PRISMA Monitor")
-        self.geometry("620x330")
+        self.geometry("940x540")
         self.resizable(False, False)
 
         DATA_DIR.mkdir(exist_ok=True)
@@ -68,29 +68,50 @@ class PrismaMonitorApp(tk.Tk):
 
         ttk.Separator(frame).grid(row=3, column=0, columnspan=3, sticky="ew", pady=18)
 
+        table_frame = ttk.Frame(frame)
+        table_frame.grid(row=4, column=0, columnspan=3, sticky="nsew")
+        columns = (
+            "auction_id", "lot_number", "item_name", "expected_status",
+            "last_known_status", "check_interval_seconds", "enabled",
+        )
+        self.csv_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
+        widths = (105, 80, 220, 115, 120, 145, 65)
+        for column, width in zip(columns, widths, strict=True):
+            self.csv_table.heading(column, text=column)
+            self.csv_table.column(
+                column, width=width, minwidth=55, stretch=column == "item_name"
+            )
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.csv_table.yview)
+        self.csv_table.configure(yscrollcommand=scrollbar.set)
+        self.csv_table.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+
         self.process_button = ttk.Button(frame, text="Обробити CSV", command=self.start_processing)
-        self.process_button.grid(row=4, column=0, sticky="w")
+        self.process_button.grid(row=5, column=0, sticky="w", pady=(18, 0))
 
         ttk.Button(frame, text="Відкрити результат", command=self.open_result).grid(
-            row=4, column=1, sticky="w", padx=(8, 0)
+            row=5, column=1, sticky="w", padx=(8, 0), pady=(18, 0)
         )
         ttk.Button(frame, text="Зупинити", command=self.stop_work).grid(
-            row=4, column=2, sticky="e"
+            row=5, column=2, sticky="e", pady=(18, 0)
         )
 
-        ttk.Label(frame, text="Статус:").grid(row=5, column=0, sticky="nw", pady=(22, 0))
+        ttk.Label(frame, text="Статус:").grid(row=6, column=0, sticky="nw", pady=(22, 0))
         ttk.Label(
             frame,
             textvariable=self.status,
             wraplength=455,
             justify="left",
-        ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(22, 0))
+        ).grid(row=6, column=1, columnspan=2, sticky="w", pady=(22, 0))
 
         ttk.Button(frame, text="Закрити програму", command=self.close_app).grid(
-            row=6, column=0, columnspan=3, pady=(28, 0)
+            row=7, column=0, columnspan=3, pady=(22, 0)
         )
 
         frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(4, weight=1)
         self.protocol("WM_DELETE_WINDOW", self.close_app)
 
     def select_csv(self) -> None:
@@ -110,8 +131,24 @@ class PrismaMonitorApp(tk.Tk):
             messagebox.showerror("CSV Error", f"Failed to load CSV: {exc}")
             return
 
+        self._display_csv_records(records)
         self.csv_path.set(selected)
         self.status.set(f"Loaded {Path(selected).name}: {len(records)} records")
+
+    def _display_csv_records(self, records: list[AuctionCsvRecord]) -> None:
+        self.csv_table.delete(*self.csv_table.get_children())
+        for record in records:
+            self.csv_table.insert(
+                "", "end", values=(
+                    record.auction_id,
+                    record.lot_number,
+                    record.item_name,
+                    record.expected_status,
+                    record.last_known_status,
+                    record.check_interval_seconds,
+                    "Yes" if record.enabled else "No",
+                )
+            )
 
     def open_prisma(self) -> None:
         browser_name = self.browser_name.get()
