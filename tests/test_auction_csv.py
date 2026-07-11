@@ -39,6 +39,19 @@ def test_missing_file(tmp_path):
     assert_error(tmp_path / "missing.csv", "CSV file does not exist.")
 
 
+def test_wrong_extension_is_rejected(tmp_path):
+    path = tmp_path / "auctions.txt"
+    path.write_text("content", encoding="utf-8")
+    assert_error(path, "Selected file must have a .csv extension.")
+
+
+def test_uppercase_csv_extension_is_allowed(tmp_path):
+    original = write_csv(tmp_path, [VALID_ROW])
+    path = original.with_suffix(".CSV")
+    original.rename(path)
+    assert len(load_auction_csv(path)) == 1
+
+
 def test_empty_file(tmp_path):
     path = tmp_path / "empty.csv"
     path.write_bytes(b"")
