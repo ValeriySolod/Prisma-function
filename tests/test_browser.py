@@ -330,6 +330,36 @@ def test_successful_start_uses_system_default_browser_executable(monkeypatch):
     assert playwright.stopped.is_set()
 
 
+def test_windowed_runtime_supplies_output_handles_before_playwright_start(monkeypatch):
+    controller = BrowserController(FakePageFilter())
+    browser = FakeBrowser()
+    streams_at_start = []
+    playwright = FakePlaywright(lambda **kwargs: browser)
+
+    def start():
+        streams_at_start.append((sys.stdout, sys.stderr))
+        return playwright
+
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.sync_api",
+        SimpleNamespace(sync_playwright=lambda: SimpleNamespace(start=start)),
+    )
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    controller.open()
+    while controller.state is BrowserState.STARTING:
+        threading.Event().wait(0.01)
+
+    assert len(streams_at_start) == 1
+    assert all(stream is not None for stream in streams_at_start[0])
+    assert all(stream.fileno() >= 0 for stream in streams_at_start[0])
+
+    controller.stop()
+    join_worker(controller)
+
+
 def test_browser_creation_error_reports_failure_and_cleans_resources(monkeypatch):
     controller = BrowserController(FakePageFilter())
 
