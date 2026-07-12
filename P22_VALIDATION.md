@@ -1,5 +1,11 @@
 # P.22 packaged executable validation
 
+Status: **Development-host validation completed; clean-Windows validation pending.**
+
+Use `P22_CLEAN_WINDOWS_CHECKLIST.md` to execute and record the remaining manual
+validation on a clean Windows 10 or Windows 11 machine or VM. No clean-machine
+result is currently available.
+
 Build identity: 2026-07-11, SHA-256
 `9DE470B81A7F591BC261FAB5BE8EF9B21AF70F5972A52C244A640FAD25D0E137`.
 
@@ -42,11 +48,7 @@ files. `dist\PrismaFunction\PrismaFunction.exe` (14,048,940 bytes),
 
 ## Remaining clean-machine work
 
-Copy this exact onedir package to a Windows machine or VM with no Python and no
-project environment. With Chrome or Edge configured as the default browser,
-visibly confirm Qt startup, graceful close, valid/invalid/empty CSV dialogs,
-monitoring start/stop on an approved reachable target, browser failure then
-retry, browser and worker cleanup, and database/result writes from the intended
-installation location. Repeat the default-browser check for each supported
-browser where release acceptance requires both. Confirm any expected log path;
-the current application does not implement file logging.
+Complete `P22_CLEAN_WINDOWS_CHECKLIST.md` against this exact onedir package and
+attach the recorded environment, outcomes, and evidence here. Until that work is
+performed, clean-Windows validation remains pending. The current application
+does not implement file logging.
