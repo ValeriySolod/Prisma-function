@@ -1,6 +1,6 @@
 # P.22 clean-Windows package validation checklist
 
-Use this checklist on a clean Windows 10 or Windows 11 machine or VM. The test account must be a standard, non-administrator account, and the machine must not have Python, the project virtual environment, or developer tools installed. Test the existing complete `dist\PrismaFunction` onedir package; do not rebuild it on the clean machine.
+Use this checklist on a separate physical Windows 10 or Windows 11 computer when one is available. VirtualBox validation was discontinued because the VM setup was unreliable and repeatedly returned to Windows installation; virtual machines are no longer part of the planned validation approach. The test account must be a standard, non-administrator account, and the computer must not have Python, the project virtual environment, or developer tools installed. Test the existing complete `dist\PrismaFunction` onedir package; do not rebuild it on the clean computer.
 
 ## Test record
 
@@ -58,4 +58,3 @@ Record the default-browser setting and browser version for each applicable run.
 - [ ] Record every failed or blocked item with the checklist item, expected result, actual result, exact reproduction steps, frequency, relevant paths/settings, evidence, and error text copied exactly.
 - [ ] Record whether Chrome, Edge, and unsupported-default-browser cases were each tested; list every outstanding case.
 - [ ] Attach the completed checklist and evidence to the P.22 validation record.
-

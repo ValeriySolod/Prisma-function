@@ -1,10 +1,13 @@
 # P.22 packaged executable validation
 
-Status: **Development-host validation completed; clean-Windows validation pending.**
+Status: **In progress — development-host validation completed; physical clean-Windows validation deferred.**
 
 Use `P22_CLEAN_WINDOWS_CHECKLIST.md` to execute and record the remaining manual
-validation on a clean Windows 10 or Windows 11 machine or VM. No clean-machine
-result is currently available.
+validation when a separate physical Windows 10 or Windows 11 computer is
+available. A VirtualBox validation attempt was discontinued because the VM setup
+was unreliable and repeatedly returned to Windows installation. Virtual machines
+are no longer part of the planned validation approach. No clean-machine result is
+currently available.
 
 Build identity: 2026-07-11, SHA-256
 `9DE470B81A7F591BC261FAB5BE8EF9B21AF70F5972A52C244A640FAD25D0E137`.
@@ -48,7 +51,8 @@ files. `dist\PrismaFunction\PrismaFunction.exe` (14,048,940 bytes),
 
 ## Remaining clean-machine work
 
-Complete `P22_CLEAN_WINDOWS_CHECKLIST.md` against this exact onedir package and
-attach the recorded environment, outcomes, and evidence here. Until that work is
-performed, clean-Windows validation remains pending. The current application
-does not implement file logging.
+Complete `P22_CLEAN_WINDOWS_CHECKLIST.md` against this exact onedir package on a
+separate physical Windows computer and attach the recorded environment, outcomes,
+and evidence here. This work is deferred until that computer is available. P.22
+remains in progress because its acceptance criteria require a genuinely clean
+Windows environment. The current application does not implement file logging.
