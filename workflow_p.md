@@ -534,7 +534,8 @@ Progress note: the documented windowed onedir build succeeded and package
 contents, direct non-admin process launch, launch from a path containing spaces,
 and writes beside the package were checked on the Windows development host.
 This host is not a clean machine, its sandbox user has no configured HTTP default
-browser, and its packaged GUI was not interactively accessible. The clean-machine
+browser, and its packaged GUI was not interactively accessible. Use
+`P22_CLEAN_WINDOWS_CHECKLIST.md` for the remaining validation. The clean-machine
 GUI, CSV, monitoring, browser, graceful-shutdown, cleanup, retry, and protected
 install-location checks remain. See `P22_VALIDATION.md`.
 
