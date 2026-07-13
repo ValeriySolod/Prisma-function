@@ -21,8 +21,8 @@
 | P.7 | Monitoring engine foundation | ✅ Completed | Core monitoring abstractions and execution flow exist. | Live status retrieval is tracked under P.23. |
 | P.8 | Monitoring scheduler | ✅ Completed | Interval-based monitoring scheduling exists. | None for this stage. |
 | P.9 | Monitoring lifecycle integration | ✅ Completed | Start, stop, and lifecycle coordination are integrated. | None for this stage. |
-| P.10 | Error handling and resource cleanup | 🟡 In progress / partially completed | Core failures and cleanup paths are handled. | Complete live-page, session, timeout, DOM-change, and manual-closure handling. |
-| P.11 | Automated test coverage | 🟡 In progress / partially completed | Automated coverage exists for implemented foundations. | Extend coverage for live monitoring, persistence, migration completion, and packaging behavior. |
+| P.10 | Error handling and resource cleanup | 🟡 In progress / partially completed | Core failures and typed live-adapter failure boundaries are handled. | Complete session, timeout, DOM-change, unavailable-page, and manual-closure recovery. |
+| P.11 | Automated test coverage | 🟡 In progress / partially completed | Automated coverage includes live status parsing, deterministic row matching, mocked page extraction, and browser-thread dispatch. | Extend coverage for authentication, recovery, persistence, migration completion, and packaging behavior. |
 | P.17 | Remove the manual browser selector | ✅ Completed | Manual browser selection has been removed. | None. |
 | P.18 | Use the Windows default browser automatically | ✅ Completed | The Windows default browser is selected automatically. | None. |
 | P.19 | Select Qt GUI framework | ✅ Completed | PySide6 was selected. | None. |
@@ -31,8 +31,8 @@
 | P.20.2 | Complete PySide6 integration and UI state management | ⬜ Planned | Foundation is available from P.20.1. | Complete lifecycle integration, state transitions, and Qt-safe UI updates. |
 | P.22 | Validate the packaged executable on a clean Windows environment | 🟡 In progress | A second physical PC exposed an intermittent packaged-browser runtime crash. Clean-Windows validation has not passed. | Reproduce with P.22.1 diagnostics and complete all physical-PC checks. |
 | P.22.1 | Add persistent packaged-browser runtime diagnostics | ✅ Completed | Persistent startup and generation-scoped browser lifecycle logging was added for evidence collection; root cause is not yet determined. | Collect and analyze logs from the affected physical PC. |
-| P.23 | Live PRISMA auction monitoring | 🟡 In progress / partially completed | The monitoring lifecycle and adapter boundary exist. | Retrieve real status from PRISMA and harden live-page behavior. |
-| P.23.1 | Implement live PRISMA page adapter | ⬜ Planned | The default adapter currently uses CSV state. | Read and normalize the current status from the live PRISMA page. |
+| P.23 | Live PRISMA auction monitoring | 🟡 In progress / partially completed | The default monitoring source reads and normalizes status through the active Playwright PRISMA page. | Verify the semantic table contract on the live site, then complete authentication if required and live-page recovery. |
+| P.23.1 | Implement live PRISMA page adapter | 🟡 Implemented; live-site verification pending | The default adapter uses the existing browser lifecycle, semantic table roles, deterministic Auction ID matching, typed failures, domain status normalization, and generation-isolated request queues; automated tests pass. | Confirm the semantic table roles and the `Auction ID` plus `State`/`Status` headers in a real PRISMA browser session before marking this increment completed. |
 | P.23.2 | Add authentication/session handling if required | ⬜ Planned | Authentication requirements are not yet integrated. | Detect requirements and add safe session handling if needed. |
 | P.23.3 | Handle timeout, unavailable page, changed DOM, and manual browser closure | ⬜ Planned | General lifecycle handling exists. | Add live-page-specific recovery and clear error reporting. |
 | P.24 | Persist monitoring results and status changes | ⬜ Planned | Persistence is not complete. | Store checks and detected status transitions safely. |
@@ -45,11 +45,16 @@
 
 ## Current key limitation
 
-The monitoring lifecycle exists, but the default monitoring adapter currently returns `last_known_status` from the CSV instead of reading the current status from the live PRISMA page.
+The live adapter is implemented and is the default monitoring source, but its
+semantic `Auction ID` plus `State`/`Status` table contract has not yet been
+validated against a real PRISMA browser session. Authentication and full
+live-page recovery remain planned under P.23.2 and P.23.3.
 
 ## Next recommended increment
 
-**P.23.1 — Implement live PRISMA page adapter.**
+**Verify P.23.1 against a real PRISMA browser session**, including the semantic
+table roles and the `Auction ID` plus `State`/`Status` headers. P.23.2 and P.23.3
+remain planned until this adapter contract is confirmed.
 
 ## Release target
 

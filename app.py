@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
 from monitoring import MonitoringEngine
+from prisma_page import LivePrismaStatusAdapter
 from processor import process_csv
 from scheduler import MonitoringScheduler
 from storage import AuctionStorage
@@ -203,7 +204,7 @@ class PrismaMonitorApp(QMainWindow):
         os.startfile(result)
 
     def create_monitoring_engine(self) -> MonitoringEngine:
-        return MonitoringEngine(lambda record: record.last_known_status)
+        return MonitoringEngine(LivePrismaStatusAdapter(self.browser))
 
     def create_monitoring_scheduler(self, records: list[AuctionCsvRecord]) -> MonitoringScheduler:
         return MonitoringScheduler(self.create_monitoring_engine(), lambda: records)
