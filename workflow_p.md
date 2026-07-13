@@ -555,6 +555,44 @@ changing launch flags, browser selection, retry/relaunch behavior, lifecycle
 synchronization, generation protection, cleanup, or UI result semantics. This
 does not mark clean-Windows validation complete.
 
+### P.23. Live PRISMA auction monitoring
+
+Status: **In progress — P.23.1 is implemented with live-site verification pending; P.23.2 and P.23.3 remain planned**.
+
+Use the Playwright page owned by the existing browser lifecycle as the live
+monitoring source. Authentication/session support and complete recovery for
+timeouts, unavailable pages, DOM changes, and manual browser closure are separate
+follow-up increments.
+
+#### P.23.1. Implement live PRISMA page adapter
+
+Status: **Implemented; live-site verification pending**.
+
+Implementation note: the default monitoring adapter now dispatches semantic
+table reads to the active browser lifecycle thread, matches normalized CSV
+records by the stable `Auction ID`, reads `State`/`Status`, and normalizes the
+value into the existing monitoring status domain. Parsing and deterministic
+missing/ambiguous-match handling are independent of Playwright and covered by
+unit tests. Extraction failures are typed and never fall back to CSV state.
+The complete automated suite passed. Final completion requires confirming the
+semantic table roles and the `Auction ID` plus `State`/`Status` headers in a real
+PRISMA browser session. That contract has not been validated against the live
+site, and no clean-Windows or final live-site validation is claimed.
+
+#### P.23.2. Add authentication/session handling if required
+
+Status: **Planned**.
+
+Determine the real PRISMA session requirements and add safe authentication or
+session handling only if live-site evidence requires it.
+
+#### P.23.3. Harden live-page failure and recovery behavior
+
+Status: **Planned**.
+
+Handle live-page timeouts, unavailable pages, DOM changes, and manually closed
+browsers with complete recovery and user-visible lifecycle behavior.
+
 ### P.29. Add project-wide Windows CI
 
 Status: **Completed**.

@@ -3,13 +3,16 @@ import sys
 import threading
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from browser import (
     BrowserController, BrowserState, DefaultBrowserDetector, LaunchResult,
-    PrismaAuctionFilter,
+    PrismaAuctionFilter, _PageRequest,
 )
+from auction_csv import AuctionCsvRecord
+from prisma_page import PrismaPageUnavailableError
 import browser as browser_module
 
 ORIGINAL_DETECT_EXECUTABLE = DefaultBrowserDetector.detect_executable
@@ -274,6 +277,12 @@ def join_worker(controller):
     assert not controller._thread.is_alive()
 
 
+def monitoring_record(auction_id="A-001"):
+    return AuctionCsvRecord(
+        auction_id, "https://example.com", "1", "Item", "Open", "Open", 60, True
+    )
+
+
 def test_operator_dropdown_is_resolved_only_inside_marketed_capacity_container():
     container = FakeFilterContainer()
     page = FakeFilterPage(container)
@@ -373,6 +382,67 @@ def test_successful_start_uses_system_default_browser_executable(monkeypatch):
     assert not controller.is_running
     assert browser.closed.is_set()
     assert playwright.stopped.is_set()
+
+
+def test_live_status_read_runs_on_browser_lifecycle_thread(monkeypatch):
+    lifecycle_thread = []
+    reader = Mock()
+    reader.read_status.side_effect = lambda page, item: (
+        lifecycle_thread.append(threading.current_thread()) or "Completed"
+    )
+    controller = BrowserController(FakePageFilter(), page_reader=reader)
+    controller._results = SignallingQueue()
+    browser = FakeBrowser()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._results.ready.wait(2)
+    caller_thread = threading.current_thread()
+    assert controller.read_live_auction_status(monitoring_record()) == "Completed"
+
+    reader.read_status.assert_called_once_with(browser.page, monitoring_record())
+    assert lifecycle_thread == [controller._thread]
+    assert lifecycle_thread[0] is not caller_thread
+    controller.stop()
+    join_worker(controller)
+
+
+def test_live_status_read_requires_active_browser():
+    controller = BrowserController(FakePageFilter())
+    with pytest.raises(PrismaPageUnavailableError, match="not available"):
+        controller.read_live_auction_status(monitoring_record())
+
+
+def test_old_generation_cleanup_does_not_affect_new_generation_requests():
+    reader = Mock()
+    reader.read_status.return_value = "Completed"
+    controller = BrowserController(FakePageFilter(), page_reader=reader)
+    old_queue = queue.Queue()
+    new_queue = queue.Queue()
+    old_request = _PageRequest(1, monitoring_record("old"), threading.Event())
+    new_request = _PageRequest(2, monitoring_record("new"), threading.Event())
+    old_queue.put(old_request)
+    new_queue.put(new_request)
+    controller._page_requests = {1: old_queue, 2: new_queue}
+
+    controller._fail_pending_page_requests(1)
+
+    assert old_request.completed.is_set()
+    assert isinstance(old_request.error, PrismaPageUnavailableError)
+    assert 1 not in controller._page_requests
+    assert not new_request.completed.is_set()
+    assert new_request.error is None
+    assert controller._page_requests[2] is new_queue
+    assert new_queue.qsize() == 1
+
+    page = FakePage()
+    controller._process_page_requests(page, 2)
+
+    assert new_request.completed.is_set()
+    assert new_request.error is None
+    assert new_request.status == "Completed"
+    assert new_queue.empty()
+    reader.read_status.assert_called_once_with(page, new_request.record)
 
 
 def test_windowed_runtime_supplies_output_handles_before_playwright_start(monkeypatch):

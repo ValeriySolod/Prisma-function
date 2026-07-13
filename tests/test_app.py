@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 import app
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
+from prisma_page import LivePrismaStatusAdapter
 
 
 @pytest.fixture(scope="module")
@@ -115,6 +116,13 @@ def test_start_stop_monitoring_matches_existing_behavior(window, monkeypatch):
     event = widget._monitoring_stop_event
     widget.stop_monitoring()
     assert event.is_set()
+
+
+def test_default_monitoring_engine_uses_live_browser_adapter(window):
+    widget, browser = window
+    engine = widget.create_monitoring_engine()
+    assert isinstance(engine._status_checker, LivePrismaStatusAdapter)
+    assert engine._status_checker._browser_controller is browser
 
 
 def test_start_without_records_shows_existing_error(window, monkeypatch):

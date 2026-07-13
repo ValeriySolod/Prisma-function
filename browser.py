@@ -11,6 +11,9 @@ from enum import Enum
 from pathlib import Path
 
 from runtime_logging import LOGGER_NAME, safe_log
+from prisma_page import (
+    PrismaPageAdapterError, PrismaPageReader, PrismaPageUnavailableError,
+)
 
 try:
     import winreg
@@ -35,6 +38,15 @@ class LaunchResult:
     generation: int
     success: bool
     error: str | None = None
+
+
+@dataclass
+class _PageRequest:
+    generation: int
+    record: object
+    completed: threading.Event
+    status: str | None = None
+    error: Exception | None = None
 
 
 class _LaunchCancelled(Exception):
@@ -219,7 +231,8 @@ class BrowserController:
     """Opens PRISMA in the supported Windows default browser."""
 
     def __init__(
-        self, page_filter: PrismaAuctionFilter | None = None, detector=None, logger=None
+        self, page_filter: PrismaAuctionFilter | None = None, detector=None, logger=None,
+        page_reader: PrismaPageReader | None = None,
     ) -> None:
         self._playwright = None
         self._browser = None
@@ -229,10 +242,12 @@ class BrowserController:
         self._generation = 0
         self._cancel_event: threading.Event | None = None
         self._results: queue.SimpleQueue[LaunchResult] = queue.SimpleQueue()
+        self._page_requests: dict[int, queue.Queue[_PageRequest]] = {}
         self.last_error: str | None = None
         self._page_filter = page_filter or PrismaAuctionFilter()
         self._detector = detector or DefaultBrowserDetector()
         self._logger = logger or logging.getLogger(LOGGER_NAME)
+        self._page_reader = page_reader or PrismaPageReader()
 
     def _log(self, level: int, message: str, *args, **kwargs) -> None:
         safe_log(self._logger, level, message, *args, **kwargs)
@@ -253,6 +268,7 @@ class BrowserController:
 
             self._generation += 1
             generation = self._generation
+            self._page_requests[generation] = queue.Queue()
             cancel_event = threading.Event()
             self._cancel_event = cancel_event
             self.last_error = None
@@ -277,6 +293,92 @@ class BrowserController:
 
     def _is_current(self, generation: int) -> bool:
         return generation == self._generation
+
+    def read_live_auction_status(self, record, timeout_seconds: float = 15.0) -> str:
+        with self._lock:
+            if self._state is not BrowserState.RUNNING:
+                raise PrismaPageUnavailableError(
+                    "The active PRISMA browser page is not available."
+                )
+            generation = self._generation
+            request_queue = self._page_requests.get(generation)
+            if request_queue is None:
+                raise PrismaPageUnavailableError(
+                    "The active PRISMA browser request queue is not available."
+                )
+            request = _PageRequest(generation, record, threading.Event())
+            request_queue.put(request)
+        self._log(
+            logging.INFO,
+            "Live status request queued: generation=%s auction_id=%s",
+            generation, record.auction_id,
+        )
+        if not request.completed.wait(timeout_seconds):
+            raise PrismaPageUnavailableError(
+                "The active PRISMA page did not complete the status request."
+            )
+        if request.error is not None:
+            raise request.error
+        if request.status is None:
+            raise PrismaPageUnavailableError(
+                "The active PRISMA page returned no auction status."
+            )
+        return request.status
+
+    def _process_page_requests(self, page, generation: int) -> None:
+        with self._lock:
+            request_queue = self._page_requests.get(generation)
+        if request_queue is None:
+            return
+        while True:
+            try:
+                request = request_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if request.generation != generation:
+                    raise PrismaPageUnavailableError(
+                        "The PRISMA browser generation changed before the status request ran."
+                    )
+                request.status = self._page_reader.read_status(page, request.record)
+                self._log(
+                    logging.INFO,
+                    "Live status request completed: generation=%s auction_id=%s status=%s",
+                    generation, request.record.auction_id, request.status,
+                )
+            except PrismaPageAdapterError as exc:
+                request.error = exc
+                self._log(
+                    logging.WARNING,
+                    "Live status request failed: generation=%s auction_id=%s reason=%s",
+                    generation, request.record.auction_id, exc,
+                )
+            except Exception as exc:
+                request.error = PrismaPageUnavailableError(
+                    "The active PRISMA page failed while reading auction status."
+                )
+                self._log(
+                    logging.ERROR,
+                    "Unexpected live status exception: generation=%s auction_id=%s",
+                    generation, request.record.auction_id, exc_info=True,
+                )
+            finally:
+                request.completed.set()
+
+    def _fail_pending_page_requests(self, generation: int) -> None:
+        with self._lock:
+            request_queue = self._page_requests.pop(generation, None)
+        if request_queue is None:
+            return
+        while True:
+            try:
+                request = request_queue.get_nowait()
+            except queue.Empty:
+                return
+            request.error = PrismaPageUnavailableError(
+                "The active PRISMA page closed before the status request completed."
+            )
+            request.completed.set()
 
     def _run(
         self,
@@ -369,7 +471,8 @@ class BrowserController:
             if not announced_success:
                 return
 
-            cancel_event.wait()
+            while not cancel_event.wait(0.05):
+                self._process_page_requests(page, generation)
         except _LaunchCancelled:
             self._log(logging.INFO, "Browser launch cancelled: generation=%s", generation)
         except Exception as exc:
@@ -378,6 +481,7 @@ class BrowserController:
         finally:
             state_before_cleanup = self.state
             cleanup_started.set()
+            self._fail_pending_page_requests(generation)
             self._log(logging.INFO, "Cleanup starting: generation=%s state=%s cancelled=%s", generation, self.state.value, cancel_event.is_set())
             if browser is not None:
                 try:
