@@ -215,6 +215,51 @@ class FakePlaywright:
         self.stopped.set()
 
 
+class EventEmitter:
+    def __init__(self):
+        self.listeners = {}
+
+    def on(self, event, callback):
+        self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback):
+        self.listeners[event].remove(callback)
+
+    def emit(self, event):
+        for callback in self.listeners.get(event, [])[:]:
+            callback()
+
+
+class EventPage(FakePage, EventEmitter):
+    def __init__(self):
+        FakePage.__init__(self)
+        EventEmitter.__init__(self)
+        self.context = EventEmitter()
+
+
+class EventBrowser(FakeBrowser, EventEmitter):
+    def __init__(self, page):
+        FakeBrowser.__init__(self, page)
+        EventEmitter.__init__(self)
+
+    def close(self):
+        self.page.emit("close")
+        self.page.context.emit("close")
+        self.emit("disconnected")
+        super().close()
+
+
+class ListLogger:
+    def __init__(self, fail=False):
+        self.messages = []
+        self.fail = fail
+
+    def log(self, level, message, *args, **kwargs):
+        if self.fail:
+            raise OSError("logging unavailable")
+        self.messages.append(message % args if args else message)
+
+
 def install_fake_playwright(monkeypatch, launch):
     playwright = FakePlaywright(launch)
     api = SimpleNamespace(
@@ -614,3 +659,65 @@ def test_stop_while_filter_is_configured_does_not_report_filter_failure(monkeypa
     assert controller.get_launch_results() == []
     assert controller.last_error is None
     assert controller.state is BrowserState.IDLE
+
+
+def test_lifecycle_events_distinguish_unexpected_and_requested_shutdown(monkeypatch):
+    logger = ListLogger()
+    page = EventPage()
+    browser = EventBrowser(page)
+    controller = BrowserController(FakePageFilter(), logger=logger)
+    controller._results = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._results.ready.wait(2)
+    page.emit("crash")
+    browser.emit("disconnected")
+    assert any("Page crash event" in message and "classification=unexpected" in message for message in logger.messages)
+    assert any("Browser disconnected event" in message and "classification=unexpected" in message for message in logger.messages)
+
+    controller.stop()
+    join_worker(controller)
+    assert any("classification=user-requested shutdown" in message for message in logger.messages)
+    assert any("Page close event" in message for message in logger.messages)
+    assert any("Context close event" in message for message in logger.messages)
+
+
+def test_repeated_launches_remove_handlers_and_do_not_duplicate_events(monkeypatch):
+    logger = ListLogger()
+    page = EventPage()
+    browser = EventBrowser(page)
+    controller = BrowserController(FakePageFilter(), logger=logger)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    for _ in range(2):
+        controller._results = SignallingQueue()
+        controller.open()
+        assert controller._results.ready.wait(2)
+        page.emit("crash")
+        controller.stop()
+        join_worker(controller)
+        assert all(not callbacks for callbacks in browser.listeners.values())
+        assert all(not callbacks for callbacks in page.listeners.values())
+        assert all(not callbacks for callbacks in page.context.listeners.values())
+
+    crashes = [message for message in logger.messages if "Page crash event" in message]
+    assert len(crashes) == 2
+    assert "generation=1" in crashes[0]
+    assert "generation=2" in crashes[1]
+
+
+def test_logging_failure_does_not_break_startup_or_cleanup(monkeypatch):
+    browser = FakeBrowser()
+    controller = BrowserController(FakePageFilter(), logger=ListLogger(fail=True))
+    controller._results = SignallingQueue()
+    playwright = install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._results.ready.wait(2)
+    controller.stop()
+    join_worker(controller)
+
+    assert controller.state is BrowserState.IDLE
+    assert browser.closed.is_set()
+    assert playwright.stopped.is_set()

@@ -18,6 +18,7 @@ from monitoring import MonitoringEngine
 from processor import process_csv
 from scheduler import MonitoringScheduler
 from storage import AuctionStorage
+from runtime_logging import initialize_runtime_logging
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
@@ -262,6 +263,11 @@ class PrismaMonitorApp(QMainWindow):
 
 
 def main() -> int:
+    try:
+        initialize_runtime_logging()
+    except Exception:
+        # Diagnostics must never prevent the windowed application from starting.
+        pass
     application = QApplication.instance() or QApplication(sys.argv)
     window = PrismaMonitorApp(); window.show()
     return application.exec()
