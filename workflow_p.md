@@ -557,7 +557,7 @@ does not mark clean-Windows validation complete.
 
 ### P.23. Live PRISMA auction monitoring
 
-Status: **In progress — P.23.1 is implemented with live-site verification pending; P.23.2 and P.23.3 remain planned**.
+Status: **In progress — P.23.1 is Completed; P.23.2 and P.23.3 remain planned**.
 
 Use the Playwright page owned by the existing browser lifecycle as the live
 monitoring source. Authentication/session support and complete recovery for
@@ -566,18 +566,24 @@ follow-up increments.
 
 #### P.23.1. Implement live PRISMA page adapter
 
-Status: **Implemented; live-site verification pending**.
+Status: **Completed**.
 
-Implementation note: the default monitoring adapter now dispatches semantic
-table reads to the active browser lifecycle thread, matches normalized CSV
-records by the stable `Auction ID`, reads `State`/`Status`, and normalizes the
-value into the existing monitoring status domain. Parsing and deterministic
-missing/ambiguous-match handling are independent of Playwright and covered by
-unit tests. Extraction failures are typed and never fall back to CSV state.
-The complete automated suite passed. Final completion requires confirming the
-semantic table roles and the `Auction ID` plus `State`/`Status` headers in a real
-PRISMA browser session. That contract has not been validated against the live
-site, and no clean-Windows or final live-site validation is claimed.
+Completion note: validated the source application against the real public PRISMA
+short-and-long-term auctions page in system-default Chrome. The live page loaded
+with its research-consent banner untouched, the existing Start of Auction date
+filter remained active, and the current filter panel accepted `Marketed >= 1000`.
+The adapter inspected the rendered table, matched auction `62255317` by the live
+`Auction ID` column, read live status `Finished`, and normalized it to `Completed`
+on repeated scheduled checks. Live-site differences were corrected by supporting
+the collapsed current-design filter panel (`Marketed` plus `Filter`) and selecting
+the rendered header row instead of PRISMA's empty sorting-header row. Missing rows
+remained typed failures, delayed loading completed safely, stopping monitoring
+restored the UI, and stopping the application-managed browser closed only its
+PRISMA page while unrelated Chrome remained open. Runtime logs recorded lifecycle,
+filter, public auction ID, result, and cleanup diagnostics without cookies,
+credentials, or account data. Focused regression tests were added for both live
+DOM corrections. Authentication and broader recovery remain scoped to P.23.2 and
+P.23.3; clean-Windows validation is not claimed by this increment.
 
 #### P.23.2. Add authentication/session handling if required
 

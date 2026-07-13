@@ -129,6 +129,36 @@ class Table:
         raise AssertionError(role)
 
 
+class DomTextRow:
+    def __init__(self, selector, texts):
+        self.selector = selector
+        self.texts = texts
+
+    def locator(self, selector):
+        assert selector in ("th", "td")
+        return TextCollection(self.texts)
+
+
+class DomLocator:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+class LiveDomTable(Table):
+    def locator(self, selector):
+        if selector == "thead tr":
+            return DomLocator([
+                DomTextRow("th", ["", ""]),
+                DomTextRow("th", self.headers),
+            ])
+        if selector == "tbody tr":
+            return DomLocator([DomTextRow("td", cells) for cells in self.rows])
+        raise AssertionError(selector)
+
+
 class Page:
     def __init__(self, tables):
         self.tables = tables
@@ -144,6 +174,15 @@ def test_mocked_page_successfully_extracts_and_normalizes_live_status():
         [[], ["62247546", "Zone UGS", "Finished"]],
     )])
     assert PrismaPageReader().read_status(page, record()) == "Completed"
+
+
+def test_live_dom_uses_rendered_header_row_instead_of_empty_sorting_headers():
+    page = Page([LiveDomTable(
+        ["Start of Auction", "Auction ID", "Status"],
+        [["20.07.2026, 09:00", "61550499", "Cancelled"]],
+    )])
+
+    assert PrismaPageReader().read_status(page, record("61550499")) == "Cancelled"
 
 
 def test_page_without_table_fails_clearly():

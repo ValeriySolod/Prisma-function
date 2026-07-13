@@ -111,10 +111,14 @@ class PrismaAuctionFilter:
         r"greater\s+than\s+or\s+equal|more\s+than\s+or\s+equal|>=|≥",
         re.IGNORECASE,
     )
+    ACTIVE_FILTER = re.compile(r"^Active\s+Filter:", re.IGNORECASE)
+    MARKETED = re.compile(r"^Marketed$", re.IGNORECASE)
 
     def apply(self, page, cancel_event: threading.Event) -> None:
         self._check_cancelled(cancel_event)
         page.wait_for_load_state("domcontentloaded", timeout=self.TIMEOUT_MS)
+        if self._apply_current_design(page, cancel_event):
+            return
         container = self._find_marketed_capacity_container(page)
         self._check_cancelled(cancel_event)
         operator = self._find_operator_dropdown(container)
@@ -127,6 +131,35 @@ class PrismaAuctionFilter:
             self._check_cancelled(cancel_event)
             raise RuntimeError("Failed to set the value to 1000") from exc
         self._click_apply(container, cancel_event)
+
+    def _apply_current_design(self, page, cancel_event: threading.Event) -> bool:
+        """Apply the lower Marketed bound in PRISMA's current filter panel."""
+        try:
+            toggle = page.get_by_role("button", name=self.ACTIVE_FILTER).first
+            toggle.wait_for(state="visible", timeout=self.TIMEOUT_MS)
+        except Exception:
+            return False
+
+        self._check_cancelled(cancel_event)
+        try:
+            toggle.click(timeout=self.TIMEOUT_MS)
+            marketed = page.get_by_role(
+                "spinbutton", name=self.MARKETED
+            ).first
+            marketed.wait_for(state="visible", timeout=self.TIMEOUT_MS)
+            marketed.fill("1000", timeout=self.TIMEOUT_MS)
+            filter_button = page.get_by_role(
+                "button", name=re.compile(r"^Filter$", re.IGNORECASE)
+            ).first
+            filter_button.wait_for(state="visible", timeout=self.TIMEOUT_MS)
+            filter_button.click(timeout=self.TIMEOUT_MS)
+        except Exception as exc:
+            self._check_cancelled(cancel_event)
+            raise RuntimeError(
+                "Failed to set the current PRISMA Marketed lower bound to 1000"
+            ) from exc
+        self._check_cancelled(cancel_event)
+        return True
 
     def _find_marketed_capacity_container(self, page):
         return self._first_visible(
@@ -454,9 +487,9 @@ class BrowserController:
                 reason = str(exc).strip() or exc.__class__.__name__
                 raise RuntimeError(
                     "Failed to set the filter "
-                    f"Marketed Capacity >= 1000: {reason}"
+                    f"Marketed >= 1000: {reason}"
                 ) from exc
-            self._log(logging.INFO, "Filter completed: generation=%s filter=Marketed Capacity >= 1000", generation)
+            self._log(logging.INFO, "Filter completed: generation=%s filter=Marketed >= 1000", generation)
 
             with self._lock:
                 if (

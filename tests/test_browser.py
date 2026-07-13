@@ -191,6 +191,27 @@ class FakeFilterPage(FakePage):
         raise AssertionError("group strategy should find the container first")
 
 
+class CurrentFilterPage(FakePage):
+    def __init__(self):
+        super().__init__()
+        self.active_filter = FakeLocator()
+        self.marketed = FakeLocator()
+        self.filter_button = FakeLocator()
+
+    def wait_for_load_state(self, state, *, timeout):
+        pass
+
+    def get_by_role(self, role, name=None):
+        pattern = getattr(name, "pattern", "")
+        if role == "button" and pattern.startswith("^Active"):
+            return self.active_filter
+        if role == "spinbutton" and pattern == "^Marketed$":
+            return self.marketed
+        if role == "button" and pattern == "^Filter$":
+            return self.filter_button
+        raise AssertionError((role, pattern))
+
+
 class FakeBrowser:
     def __init__(self, page=None, *, new_page_error=None, new_page_block=None):
         self.page = page or FakePage()
@@ -292,6 +313,16 @@ def test_operator_dropdown_is_resolved_only_inside_marketed_capacity_container()
     assert container.operator.selected_labels == ["Greater than or equal"]
     assert "combobox" not in page.global_role_calls
     assert page.other_filter_dropdown.selected_labels == []
+
+
+def test_current_design_expands_filters_and_sets_marketed_lower_bound():
+    page = CurrentFilterPage()
+
+    PrismaAuctionFilter().apply(page, threading.Event())
+
+    assert page.active_filter.clicks == 1
+    assert page.marketed.filled_values == ["1000"]
+    assert page.filter_button.clicks == 1
 
 
 def test_value_input_is_resolved_only_inside_marketed_capacity_container():
@@ -699,7 +730,7 @@ def test_filter_error_reports_clear_failure_and_returns_to_idle(monkeypatch):
 
     result = controller.get_launch_results()[0]
     assert not result.success
-    assert "Marketed Capacity >= 1000" in result.error
+    assert "Marketed >= 1000" in result.error
     assert "input field not found" in result.error
     assert controller.last_error == result.error
     assert controller.state is BrowserState.IDLE
