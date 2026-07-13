@@ -1,6 +1,21 @@
 # P.22 packaged executable validation
 
-Status: **In progress — development-host validation completed; physical clean-Windows validation deferred.**
+Status: **In progress — physical-PC validation exposed an intermittent browser runtime crash; clean-Windows validation has not passed.**
+
+## P.22.1 runtime diagnostic increment
+
+On a second physical Windows PC, the packaged executable launched successfully,
+its SHA-256 matched the original build, and Playwright opened the configured
+Chrome or Edge default browser. After several minutes, or sometimes when the
+window was maximized, the browser closed unexpectedly and the application
+reported a browser-closed error. The root cause is not yet determined.
+
+Persistent rotating diagnostics were added for evidence collection. They record
+startup/runtime identity, default-browser resolution and non-secret launch
+options, generation-scoped browser/page/context lifecycle events, navigation and
+filter completion, exceptions with tracebacks, shutdown classification, and
+cleanup state. This is diagnostic-only: no browser flags, channels, retry,
+relaunch, synchronization, generation protection, or UI semantics were changed.
 
 Use `P22_CLEAN_WINDOWS_CHECKLIST.md` to execute and record the remaining manual
 validation when a separate physical Windows 10 or Windows 11 computer is
@@ -44,7 +59,7 @@ files. `dist\PrismaFunction\PrismaFunction.exe` (14,048,940 bytes),
 | Invalid and empty CSV handling | Blocked | Same interactive limitation. |
 | Monitoring start/stop against a safely available target | Blocked | Same interactive limitation; no live target workflow was exercised. |
 | Cleanup after shutdown | Blocked | Graceful packaged shutdown was not observable. Validation processes were forcibly stopped and no process was intentionally left running. |
-| Writable database/result/log paths | Pass (current location only) | Created `data\result` and a probe file beside the copied package as the non-admin user. The application has database/result paths but no implemented application log path. Protected install locations such as Program Files remain unverified. |
+| Writable database/result/log paths | Pass (development-host location only) | Created `data\result` and a probe file beside the copied package as the non-admin user. P.22.1 adds logs under `%LOCALAPPDATA%\PrismaFunction\logs`, with a `%TEMP%\PrismaFunction\logs` fallback; physical-PC verification of the new diagnostic build and protected install locations remains outstanding. |
 | Retry after recoverable failure | Blocked | Packaged UI retry was not exercised; unit tests cover retry behavior but do not replace this manual check. |
 | Currently configured default browser | Blocked | This sandbox user's `HKCU\...\http\UserChoice` key is absent, so no supported default browser is configured for the executable to launch. |
 | No-Python/no-development-environment machine | Blocked | This machine has Python and the project environment installed. |
@@ -55,4 +70,5 @@ Complete `P22_CLEAN_WINDOWS_CHECKLIST.md` against this exact onedir package on a
 separate physical Windows computer and attach the recorded environment, outcomes,
 and evidence here. This work is deferred until that computer is available. P.22
 remains in progress because its acceptance criteria require a genuinely clean
-Windows environment. The current application does not implement file logging.
+Windows environment. Collect the P.22.1 persistent log during reproduction; the
+diagnostic increment itself does not establish a passing clean-Windows result.

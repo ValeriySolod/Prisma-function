@@ -526,7 +526,7 @@ in P.22.
 
 ### P.22. Validate the packaged executable on a clean Windows environment
 
-Status: **In progress — development-host validation completed; physical clean-Windows validation deferred**.
+Status: **In progress — physical-PC validation exposed an intermittent browser runtime crash; clean-Windows validation has not passed**.
 
 Validate the packaged executable on a clean physical Windows computer without a project development environment or Python installation, including launch, default-browser use, CSV loading, monitoring, shutdown, and writable data paths.
 
@@ -541,6 +541,19 @@ of the planned validation approach. Use `P22_CLEAN_WINDOWS_CHECKLIST.md` when a
 separate physical Windows computer is available. The clean-machine GUI, CSV,
 monitoring, browser, graceful-shutdown, cleanup, retry, and protected
 install-location checks remain. See `P22_VALIDATION.md`.
+
+#### P.22.1. Add persistent packaged-browser runtime diagnostics
+
+Status: **Completed (diagnostic increment only); P.22 remains In progress**.
+
+Validation on a second physical Windows PC confirmed package launch, matching
+executable SHA-256, and default Chrome/Edge launch through Playwright, but exposed
+an intermittent browser closure after several minutes or sometimes on window
+maximize. The root cause is not yet determined. Persistent, generation-scoped
+runtime and browser lifecycle diagnostics were added to collect evidence without
+changing launch flags, browser selection, retry/relaunch behavior, lifecycle
+synchronization, generation protection, cleanup, or UI result semantics. This
+does not mark clean-Windows validation complete.
 
 ## 5. Git workflow для кожного етапу
 

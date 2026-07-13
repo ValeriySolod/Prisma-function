@@ -48,7 +48,7 @@ Record the default-browser setting and browser version for each applicable run.
 ## Local storage and shutdown
 
 - [ ] Verify the application can create and update `data\prisma_monitor.db` and `data\result\prisma_auctions.xlsx` beside the packaged executable when the related actions are performed.
-- [ ] Confirm files are written only where current behavior expects them. No application log file is expected because this build does not implement file logging; record any unexpected file or system change.
+- [ ] Confirm the diagnostic log is written to `%LOCALAPPDATA%\PrismaFunction\logs\prisma-function.log` (or `%TEMP%\PrismaFunction\logs\prisma-function.log` if the preferred location is unavailable), and record any other unexpected file or system change.
 - [ ] Close normally, including once after monitoring has run. Confirm the window closes cleanly and Task Manager shows no remaining `PrismaFunction.exe` or browser process started by the application.
 - [ ] Relaunch after shutdown and confirm the application remains usable.
 

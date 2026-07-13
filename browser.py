@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import queue
 import re
 import sys
@@ -8,6 +9,8 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+from runtime_logging import LOGGER_NAME, safe_log
 
 try:
     import winreg
@@ -215,7 +218,9 @@ class PrismaAuctionFilter:
 class BrowserController:
     """Opens PRISMA in the supported Windows default browser."""
 
-    def __init__(self, page_filter: PrismaAuctionFilter | None = None, detector=None) -> None:
+    def __init__(
+        self, page_filter: PrismaAuctionFilter | None = None, detector=None, logger=None
+    ) -> None:
         self._playwright = None
         self._browser = None
         self._thread: threading.Thread | None = None
@@ -227,6 +232,10 @@ class BrowserController:
         self.last_error: str | None = None
         self._page_filter = page_filter or PrismaAuctionFilter()
         self._detector = detector or DefaultBrowserDetector()
+        self._logger = logger or logging.getLogger(LOGGER_NAME)
+
+    def _log(self, level: int, message: str, *args, **kwargs) -> None:
+        safe_log(self._logger, level, message, *args, **kwargs)
 
     @property
     def state(self) -> BrowserState:
@@ -248,6 +257,7 @@ class BrowserController:
             self._cancel_event = cancel_event
             self.last_error = None
             self._state = BrowserState.STARTING
+            self._log(logging.INFO, "Browser launch requested: generation=%s state=%s", generation, self._state.value)
             thread = threading.Thread(
                 target=self._run,
                 args=(generation, cancel_event),
@@ -277,19 +287,47 @@ class BrowserController:
         browser = None
         launch_error: str | None = None
         announced_success = False
+        cleanup_started = threading.Event()
+        listeners = []
+        state_before_cleanup = BrowserState.IDLE
+
+        def lifecycle_reason() -> str:
+            if cancel_event.is_set():
+                return "user-requested shutdown"
+            if cleanup_started.is_set():
+                return "controller cleanup"
+            return "unexpected"
+
+        def attach(emitter, event: str, label: str) -> None:
+            if emitter is None or not callable(getattr(emitter, "on", None)):
+                return
+            def callback(*_args) -> None:
+                self._log(
+                    logging.WARNING,
+                    "%s event: generation=%s classification=%s state=%s",
+                    label, generation, lifecycle_reason(), self.state.value,
+                )
+            try:
+                emitter.on(event, callback)
+                listeners.append((emitter, event, callback))
+            except Exception:
+                self._log(logging.WARNING, "Could not attach %s handler: generation=%s", label, generation, exc_info=True)
 
         try:
             _ensure_subprocess_output_streams()
             from playwright.sync_api import sync_playwright
 
             executable = self._detector.detect_executable()
+            self._log(logging.INFO, "Default browser detected: generation=%s browser=%s executable=%s", generation, executable.name, executable)
             playwright = sync_playwright().start()
             if cancel_event.is_set():
                 return
 
-            browser = playwright.chromium.launch(
-                executable_path=str(executable), headless=False
-            )
+            launch_options = {"executable_path": str(executable), "headless": False}
+            self._log(logging.INFO, "Playwright launch options: generation=%s options=%s", generation, launch_options)
+            browser = playwright.chromium.launch(**launch_options)
+            self._log(logging.INFO, "Browser created: generation=%s", generation)
+            attach(browser, "disconnected", "Browser disconnected")
             with self._lock:
                 if self._is_current(generation):
                     self._playwright = playwright
@@ -298,7 +336,14 @@ class BrowserController:
                 return
 
             page = browser.new_page()
+            context = getattr(page, "context", None)
+            self._log(logging.INFO, "Browser context created: generation=%s", generation)
+            self._log(logging.INFO, "Page created: generation=%s", generation)
+            attach(page, "crash", "Page crash")
+            attach(page, "close", "Page close")
+            attach(context, "close", "Context close")
             page.goto(PRISMA_AUCTIONS_URL, wait_until="domcontentloaded")
+            self._log(logging.INFO, "Navigation completed: generation=%s url=%s", generation, PRISMA_AUCTIONS_URL)
             try:
                 self._page_filter.apply(page, cancel_event)
             except _LaunchCancelled:
@@ -309,6 +354,7 @@ class BrowserController:
                     "Failed to set the filter "
                     f"Marketed Capacity >= 1000: {reason}"
                 ) from exc
+            self._log(logging.INFO, "Filter completed: generation=%s filter=Marketed Capacity >= 1000", generation)
 
             with self._lock:
                 if (
@@ -325,20 +371,32 @@ class BrowserController:
 
             cancel_event.wait()
         except _LaunchCancelled:
-            pass
+            self._log(logging.INFO, "Browser launch cancelled: generation=%s", generation)
         except Exception as exc:
             launch_error = str(exc).strip() or exc.__class__.__name__
+            self._log(logging.ERROR, "Unexpected browser exception: generation=%s", generation, exc_info=True)
         finally:
+            state_before_cleanup = self.state
+            cleanup_started.set()
+            self._log(logging.INFO, "Cleanup starting: generation=%s state=%s cancelled=%s", generation, self.state.value, cancel_event.is_set())
             if browser is not None:
                 try:
                     browser.close()
                 except Exception:
-                    pass
+                    self._log(logging.WARNING, "Browser cleanup failed: generation=%s", generation, exc_info=True)
             if playwright is not None:
                 try:
                     playwright.stop()
                 except Exception:
-                    pass
+                    self._log(logging.WARNING, "Playwright cleanup failed: generation=%s", generation, exc_info=True)
+
+            for emitter, event, callback in listeners:
+                try:
+                    remove = getattr(emitter, "remove_listener", None)
+                    if callable(remove):
+                        remove(event, callback)
+                except Exception:
+                    self._log(logging.WARNING, "Could not remove lifecycle handler: generation=%s event=%s", generation, event, exc_info=True)
 
             with self._lock:
                 is_current = self._is_current(generation)
@@ -355,11 +413,16 @@ class BrowserController:
                         self._results.put(
                             LaunchResult(generation, False, launch_error)
                         )
+                final_state = self._state.value
+            self._log(logging.INFO, "Cleanup completed: generation=%s state_before=%s state_after=%s cancelled=%s", generation, state_before_cleanup.value, final_state, was_cancelled)
 
     def stop(self) -> None:
         with self._lock:
             if self._state is BrowserState.IDLE:
+                self._log(logging.INFO, "Stop requested: generation=%s state=%s no_action=true", self._generation, self._state.value)
                 return
+            previous_state = self._state
             self._state = BrowserState.STOPPING
+            self._log(logging.INFO, "Stop requested: generation=%s state_before=%s state_after=%s classification=user-requested shutdown", self._generation, previous_state.value, self._state.value)
             if self._cancel_event is not None:
                 self._cancel_event.set()
