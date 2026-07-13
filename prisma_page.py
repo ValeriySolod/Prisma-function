@@ -147,6 +147,38 @@ class PrismaPageReader:
 
     TIMEOUT_MS = 10_000
 
+    def _read_table_headers(self, table) -> list[str]:
+        """Use rendered header rows; PRISMA keeps empty ARIA sorting headers."""
+        try:
+            header_rows = table.locator("thead tr").all()
+        except Exception:
+            header_rows = []
+        for row in header_rows:
+            headers = row.locator("th").all_inner_texts()
+            try:
+                resolve_required_columns(headers)
+                return headers
+            except PrismaPageStructureError:
+                continue
+
+        headers = table.get_by_role("columnheader").all_inner_texts()
+        resolve_required_columns(headers)
+        return headers
+
+    @staticmethod
+    def _read_table_rows(table) -> list[list[str]]:
+        try:
+            body_rows = table.locator("tbody tr").all()
+            rows = [row.locator("td").all_inner_texts() for row in body_rows]
+            if rows:
+                return rows
+        except Exception:
+            pass
+        return [
+            row.get_by_role("cell").all_inner_texts()
+            for row in table.get_by_role("row").all()
+        ]
+
     def read_rows(self, page) -> list[PrismaAuctionRow]:
         try:
             tables = page.get_by_role("table")
@@ -161,7 +193,7 @@ class PrismaPageReader:
             table = tables.nth(index)
             try:
                 table.wait_for(state="visible", timeout=self.TIMEOUT_MS)
-                headers = table.get_by_role("columnheader").all_inner_texts()
+                headers = self._read_table_headers(table)
                 columns = resolve_required_columns(headers)
             except PrismaPageStructureError as exc:
                 structure_errors.append(exc)
@@ -172,10 +204,7 @@ class PrismaPageReader:
                 ) from exc
 
             try:
-                raw_rows = [
-                    row.get_by_role("cell").all_inner_texts()
-                    for row in table.get_by_role("row").all()
-                ]
+                raw_rows = self._read_table_rows(table)
                 data_rows = [cells for cells in raw_rows if cells]
                 # Reuse the pure parser; resolving above ensures this is the
                 # intended table and keeps DOM access separate from parsing.
