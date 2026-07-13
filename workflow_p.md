@@ -555,6 +555,30 @@ changing launch flags, browser selection, retry/relaunch behavior, lifecycle
 synchronization, generation protection, cleanup, or UI result semantics. This
 does not mark clean-Windows validation complete.
 
+### P.29. Add project-wide Windows CI
+
+Status: **Completed**.
+
+Run project-wide validation on GitHub Actions using `windows-latest` and pinned
+project dependencies. The workflow runs for pushes to `main`, pull requests
+targeting `main`, and manual dispatches. It executes the complete pytest suite
+with headless Qt settings, compiles the project Python sources and tests, and
+builds the existing PyInstaller specification as a packaging validation without
+publishing a release or uploading build artifacts. Concurrent runs for the same
+branch or pull request are cancelled when superseded.
+
+Completion note: The Windows CI workflow and local reproduction instructions
+were added and all relevant local validation passed. CI does not install
+Playwright browser binaries and does not require secrets or interactive desktop
+access.
+
+### P.30. Final release readiness and versioned release archive
+
+Status: **Planned**.
+
+Release preparation is not complete. Finalize documentation, metadata, checks,
+and the versioned archive.
+
 ## 5. Git workflow для кожного етапу
 
 1. Оновити `main`.

@@ -40,7 +40,8 @@
 | P.26 | Move writable runtime data to the user data directory | ⬜ Planned | Runtime path migration is not complete. | Use an appropriate writable Windows user-data location. |
 | P.27 | Package the application with PyInstaller | ⬜ Planned | No completed application package is claimed. | Create and verify a PyInstaller `onedir` build. |
 | P.28 | Validate the executable on a clean Windows environment | ⬜ Planned | Clean-machine validation has not been completed. | Validate launch and core workflows without a development environment. |
-| P.29 | Final release readiness and versioned release archive | ⬜ Planned | Release preparation is not complete. | Finalize documentation, metadata, checks, and the versioned archive. |
+| P.29 | Add project-wide Windows CI | ✅ Completed | Windows CI runs the full pytest suite, Python compilation, and PyInstaller packaging validation on pushes and pull requests for `main`, with manual dispatch support. | None. |
+| P.30 | Final release readiness and versioned release archive | ⬜ Planned | Release preparation is not complete. | Finalize documentation, metadata, checks, and the versioned archive. |
 
 ## Current key limitation
 
