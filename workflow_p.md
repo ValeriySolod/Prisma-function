@@ -692,6 +692,32 @@ neither is claimed by this increment.
 14. Видалити локальну та remote feature branch.
 15. Наступний етап почати в новому чаті.
 
+### P.31. Modern PySide6 monitoring dashboard
+
+Status: **Completed**.
+
+The desktop interface now uses a responsive monitoring-dashboard layout with a
+graphite workflow sidebar and a light main workspace. It provides explicit
+browser and monitoring state badges, context-aware controls, truthful summary
+counters, and a model-backed auction table with search, status filtering, and
+incremental live-result updates. Recent user-relevant activity is visible
+without replacing rotating diagnostic logs, and the log directory can be
+opened through Qt. Presentation code, filtering, table state, status delegates,
+and the centralized theme are separated from browser and monitoring logic.
+
+Completion note: Focused offscreen Qt coverage verifies initial state, CSV and
+browser transitions, stale generations, monitoring prerequisites and lifecycle,
+incremental counters and rows, search/filter behavior, activity handling,
+stable error wording, and managed-resource shutdown. Manual visual checks at
+Windows display scaling levels from 125% through 200% remain recommended.
+
+### P.32. Windows installer and uninstaller using Inno Setup
+
+Status: **Planned**.
+
+Create and validate an Inno Setup installer and uninstaller for the packaged
+Windows application. This work is intentionally not included in P.31.
+
 ## 6. Definition of Done
 
 Етап вважається завершеним, коли:
