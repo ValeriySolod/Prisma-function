@@ -5,6 +5,7 @@ import pytest
 
 from auction_csv import AuctionCsvRecord
 from monitoring import MonitoringEngine
+from prisma_page import PrismaAuctionNotFoundError
 
 
 def record(auction_id="A-001", status="Open", enabled=True):
@@ -74,6 +75,24 @@ def test_failed_record_does_not_block_later_records_and_order_is_preserved():
     assert [item.auction_id for item in results] == ["A-001", "A-002"]
     assert [item.result for item in results] == ["Error", "Changed"]
     assert len(results) == len(records)
+
+
+def test_missing_auction_is_nonfatal_and_later_live_record_is_checked():
+    def checker(item):
+        if item.auction_id == "A-001":
+            raise PrismaAuctionNotFoundError(
+                "No live auction row matches Auction ID A-001."
+            )
+        return "Completed"
+
+    results = MonitoringEngine(checker).check_records(
+        [record("A-001"), record("A-002")]
+    )
+
+    assert results[0].result == "Error"
+    assert "No live auction row matches Auction ID A-001" in results[0].error_message
+    assert results[1].result == "Changed"
+    assert results[1].current_status == "Completed"
 
 
 def test_stop_during_batch_skips_all_remaining_records():

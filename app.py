@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -15,11 +16,15 @@ from PySide6.QtWidgets import (
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
 from monitoring import MonitoringEngine
-from prisma_page import LivePrismaStatusAdapter
+from prisma_page import (
+    LivePrismaStatusAdapter, PrismaAuctionNotFoundError,
+    PrismaLookupTimeoutError, PrismaPageStructureError,
+    PrismaPageUnavailableError,
+)
 from processor import process_csv
 from scheduler import MonitoringScheduler
 from storage import AuctionStorage
-from runtime_logging import initialize_runtime_logging
+from runtime_logging import LOGGER_NAME, initialize_runtime_logging, safe_log
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
@@ -47,6 +52,7 @@ class PrismaMonitorApp(QMainWindow):
         DATA_DIR.mkdir(exist_ok=True)
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
         self.browser = BrowserController()
+        self._logger = logging.getLogger(LOGGER_NAME)
         self._is_closing = False
         self._active_browser_launch: int | None = None
         self._auction_records: list[AuctionCsvRecord] = []
@@ -153,12 +159,20 @@ class PrismaMonitorApp(QMainWindow):
         for result in self.browser.get_launch_results():
             if result.generation != self._active_browser_launch:
                 continue
-            self._active_browser_launch = None; self._browser_timer.stop()
             if result.success:
                 self.open_button.setEnabled(True)
                 self.status.setText("PRISMA opened in the default browser")
             else:
-                self._browser_start_failed(result.error or "Unknown error")
+                if result.kind == "launch":
+                    self._browser_start_failed(result.error or "Unknown error")
+                    return
+                self._active_browser_launch = None; self._browser_timer.stop()
+                if self._monitoring_stop_event is not None:
+                    self._monitoring_stop_event.set()
+                self.open_button.setEnabled(True)
+                self.status.setText(
+                    "The managed PRISMA page or browser was closed. Open it again to retry."
+                )
             return
 
     def _browser_start_failed(self, exc: Exception | str) -> None:
@@ -235,14 +249,36 @@ class PrismaMonitorApp(QMainWindow):
         except Exception as exc: error = exc
         self.signals.monitoring_finished.emit(error)
 
+    @staticmethod
+    def _monitoring_failure_message(error: object) -> str:
+        if isinstance(error, PrismaLookupTimeoutError):
+            return "The live PRISMA status lookup timed out. Reopen the browser and retry."
+        if isinstance(error, PrismaPageUnavailableError):
+            return "The PRISMA page is unavailable or closed. Reopen the browser and retry."
+        if isinstance(error, PrismaPageStructureError):
+            return "The PRISMA page structure could not be read. Reopen the browser or retry."
+        if isinstance(error, PrismaAuctionNotFoundError):
+            return str(error)
+        return f"Monitoring stopped because of an error: {str(error).strip() or error.__class__.__name__}"
+
     def _monitoring_finished(self, error: object = None) -> None:
         if self._is_closing: return
         self._set_monitoring_idle()
         if error is not None:
-            reason = str(error).strip() or error.__class__.__name__
-            self.status.setText("Monitoring failed")
-            QMessageBox.critical(self, "Monitoring Error", f"Monitoring stopped because of an error: {reason}")
+            message = self._monitoring_failure_message(error)
+            safe_log(
+                self._logger, logging.WARNING,
+                "Monitoring terminated by live failure: failure_type=%s retryable=true",
+                error.__class__.__name__,
+            )
+            self.status.setText(message)
+            QMessageBox.critical(self, "Monitoring Error", message)
         else: self.status.setText("Monitoring stopped")
+        safe_log(
+            self._logger, logging.INFO,
+            "Monitoring UI recovered: running=false retryable=true browser_state=%s",
+            getattr(getattr(self.browser, "state", None), "value", "unknown"),
+        )
 
     def _set_monitoring_idle(self) -> None:
         self._monitoring_thread = None; self._monitoring_stop_event = None

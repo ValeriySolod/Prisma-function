@@ -13,7 +13,8 @@ from browser import (
 )
 from auction_csv import AuctionCsvRecord
 from prisma_page import (
-    PrismaAuthenticationRequiredError, PrismaPageUnavailableError,
+    PrismaAuthenticationRequiredError, PrismaLookupTimeoutError,
+    PrismaPageUnavailableError,
     PrismaSessionState, PrismaSessionValidator,
 )
 import browser as browser_module
@@ -513,6 +514,73 @@ def test_live_status_read_requires_active_browser():
         controller.read_live_auction_status(monitoring_record())
 
 
+def test_live_lookup_timeout_is_typed_stops_generation_and_allows_new_attempt():
+    reader = Mock()
+    reader.read_status.return_value = "Completed"
+    controller = BrowserController(FakePageFilter(), page_reader=reader)
+    controller._generation = 1
+    controller._state = BrowserState.RUNNING
+    controller._cancel_event = threading.Event()
+    controller._page_requests = {1: queue.Queue()}
+
+    with pytest.raises(PrismaLookupTimeoutError, match="timed out"):
+        controller.read_live_auction_status(monitoring_record(), timeout_seconds=0.01)
+
+    assert controller.state is BrowserState.STOPPING
+    assert controller._cancel_event.is_set()
+    timed_out_request = controller._page_requests[1].get_nowait()
+    assert timed_out_request.abandoned
+
+    controller._generation = 2
+    controller._state = BrowserState.RUNNING
+    controller._cancel_event = threading.Event()
+    controller._page_requests[2] = queue.Queue()
+    result = []
+    worker = threading.Thread(target=lambda: result.append(
+        controller.read_live_auction_status(monitoring_record("new"), 1)
+    ))
+    worker.start()
+    while controller._page_requests[2].empty():
+        threading.Event().wait(0.001)
+    controller._process_page_requests(FakePage(), 2)
+    worker.join(timeout=1)
+
+    assert result == ["Completed"]
+    assert controller.state is BrowserState.RUNNING
+
+
+def test_page_already_closed_before_lookup_is_typed_and_stops_generation():
+    page = FakePage()
+    page.is_closed = lambda: True
+    controller = BrowserController(FakePageFilter())
+    controller._generation = 1
+    controller._state = BrowserState.RUNNING
+    controller._cancel_event = threading.Event()
+    request = _PageRequest(1, monitoring_record(), threading.Event())
+    requests = queue.Queue()
+    requests.put(request)
+    controller._page_requests = {1: requests}
+
+    controller._process_page_requests(page, 1)
+
+    assert isinstance(request.error, PrismaPageUnavailableError)
+    assert request.completed.is_set()
+    assert controller.state is BrowserState.STOPPING
+    assert controller._cancel_event.is_set()
+
+
+def test_stale_lifecycle_failure_cannot_stop_new_generation():
+    controller = BrowserController(FakePageFilter())
+    controller._generation = 2
+    controller._state = BrowserState.RUNNING
+    current_cancel = threading.Event()
+    controller._cancel_event = current_cancel
+
+    assert not controller._stop_generation(1, "stale-page-close")
+    assert controller.state is BrowserState.RUNNING
+    assert not current_cancel.is_set()
+
+
 def test_old_generation_cleanup_does_not_affect_new_generation_requests():
     reader = Mock()
     reader.read_status.return_value = "Completed"
@@ -846,9 +914,13 @@ def test_lifecycle_events_distinguish_unexpected_and_requested_shutdown(monkeypa
     assert any("Page crash event" in message and "classification=unexpected" in message for message in logger.messages)
     assert any("Browser disconnected event" in message and "classification=unexpected" in message for message in logger.messages)
 
-    controller.stop()
     join_worker(controller)
-    assert any("classification=user-requested shutdown" in message for message in logger.messages)
+    results = controller.get_launch_results()
+    assert results[-1] == LaunchResult(
+        1, False, "The managed PRISMA page or browser was closed.", "closed"
+    )
+
+    controller.stop()
     assert any("Page close event" in message for message in logger.messages)
     assert any("Context close event" in message for message in logger.messages)
 

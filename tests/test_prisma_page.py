@@ -4,7 +4,8 @@ import pytest
 
 from auction_csv import AuctionCsvRecord
 from prisma_page import (
-    LivePrismaStatusAdapter, PrismaAuctionMatchError, PrismaAuctionRow,
+    LivePrismaStatusAdapter, PrismaAuctionAmbiguousError,
+    PrismaAuctionMatchError, PrismaAuctionNotFoundError, PrismaAuctionRow,
     PrismaAuthenticationRequiredError, PrismaInvalidSessionError,
     PrismaPageReader, PrismaPageStructureError, PrismaPageUnavailableError,
     PrismaSessionValidator,
@@ -174,12 +175,12 @@ def test_matching_uses_normalized_auction_id_deterministically():
 
 
 def test_missing_match_is_explicit():
-    with pytest.raises(PrismaAuctionMatchError, match="No live auction row"):
+    with pytest.raises(PrismaAuctionNotFoundError, match="No live auction row"):
         match_auction_row(record("missing"), [PrismaAuctionRow("other", "Open")])
 
 
 def test_ambiguous_match_is_explicit():
-    with pytest.raises(PrismaAuctionMatchError, match="Multiple live auction rows"):
+    with pytest.raises(PrismaAuctionAmbiguousError, match="Multiple live auction rows"):
         match_auction_row(
             record("A1"),
             [PrismaAuctionRow("A1", "Open"), PrismaAuctionRow(" a1 ", "Finished")],
@@ -292,6 +293,18 @@ def test_live_dom_uses_rendered_header_row_instead_of_empty_sorting_headers():
 def test_page_without_table_fails_clearly():
     with pytest.raises(PrismaPageStructureError, match="No live auction table"):
         PrismaPageReader().read_status(Page([]), record())
+
+
+def test_page_with_missing_required_header_is_structure_failure():
+    page = Page([Table(["Auction ID", "Capacity"], [["62247546", "1000"]])])
+    with pytest.raises(PrismaPageStructureError, match="required Auction ID and State"):
+        PrismaPageReader().read_status(page, record())
+
+
+def test_unreadable_status_cell_is_distinct_from_missing_auction():
+    page = Page([Table(["Auction ID", "State"], [["62247546", ""]])])
+    with pytest.raises(PrismaStatusParseError, match="empty status"):
+        PrismaPageReader().read_status(page, record())
 
 
 def test_page_with_unavailable_matching_row_fails_clearly():

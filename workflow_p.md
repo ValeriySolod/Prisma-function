@@ -557,7 +557,7 @@ does not mark clean-Windows validation complete.
 
 ### P.23. Live PRISMA auction monitoring
 
-Status: **In progress — P.23.1 and P.23.2 are Completed; P.23.3 remains planned**.
+Status: **Completed — P.23.1, P.23.2, and P.23.3 are Completed**.
 
 Use the Playwright page owned by the existing browser lifecycle as the live
 monitoring source. Authentication/session support and complete recovery for
@@ -605,10 +605,34 @@ complete.
 
 #### P.23.3. Harden live-page failure and recovery behavior
 
-Status: **Planned**.
+Status: **Completed**.
 
 Handle live-page timeouts, unavailable pages, DOM changes, and manually closed
 browsers with complete recovery and user-visible lifecycle behavior.
+
+Completion note: every live lookup now has a bounded controller wait and reports
+a typed timeout instead of blocking a monitoring cycle indefinitely. A timeout
+stops only its owning browser generation, abandons the stale request, and returns
+the UI to a retryable non-monitoring state without automatic relaunch or an
+unbounded retry loop. Closed or unusable pages, contexts, and browser disconnects
+are converted to stable application-level failures; generation-aware lifecycle
+callbacks stop active monitoring, perform idempotent managed-resource cleanup,
+and cannot overwrite a newer generation. Normal `Stop Browser` cleanup remains
+classified as user-requested and does not produce an unexpected-failure result.
+
+Missing tables or required headers, malformed rows, unreadable statuses, and
+ambiguous auction matches are typed page-structure failures. A genuinely absent
+auction ID remains a separate typed result from a valid table, and live monitoring
+never falls back to CSV data or fabricates a status. English UI messages distinguish
+timeout, unavailable/closed page, unreadable page structure, and a missing auction.
+Diagnostics record generation, lifecycle classification, termination type, and
+retryable recovery without cookies, credentials, storage state, or page HTML.
+
+Verification used deterministic fake pages and browsers only. The complete suite
+passed with 185 tests. Project source and tests compiled successfully, and the
+final diff passed whitespace validation. Manual validation with a real public
+PRISMA session is still recommended for browser-close, disconnect, and live DOM
+timing behavior; no new real-site validation is claimed by this increment.
 
 ### P.29. Add project-wide Windows CI
 

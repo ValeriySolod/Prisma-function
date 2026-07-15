@@ -29,6 +29,18 @@ class PrismaPageUnavailableError(PrismaPageAdapterError):
     """The active browser page cannot service a live status request."""
 
 
+class PrismaLookupTimeoutError(PrismaPageAdapterError):
+    """A bounded live status lookup did not finish in time."""
+
+
+class PrismaAuctionNotFoundError(PrismaAuctionMatchError):
+    """A valid auction table does not contain the requested auction ID."""
+
+
+class PrismaAuctionAmbiguousError(PrismaAuctionMatchError, PrismaPageStructureError):
+    """A valid-looking table contains more than one requested auction row."""
+
+
 class PrismaAuthenticationRequiredError(PrismaPageAdapterError):
     """The public workflow was redirected to or replaced by authentication."""
 
@@ -240,11 +252,11 @@ def match_auction_row(
         if normalize_page_text(row.auction_id).casefold() == key
     ]
     if not matches:
-        raise PrismaAuctionMatchError(
+        raise PrismaAuctionNotFoundError(
             f"No live auction row matches Auction ID {record.auction_id}."
         )
     if len(matches) > 1:
-        raise PrismaAuctionMatchError(
+        raise PrismaAuctionAmbiguousError(
             f"Multiple live auction rows match Auction ID {record.auction_id}."
         )
     return matches[0]

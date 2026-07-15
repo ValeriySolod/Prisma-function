@@ -11,6 +11,7 @@ import app
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
 from prisma_page import LivePrismaStatusAdapter
+from prisma_page import PrismaLookupTimeoutError, PrismaPageStructureError
 
 
 @pytest.fixture(scope="module")
@@ -91,6 +92,32 @@ def test_browser_result_is_polled_on_gui_thread(window, monkeypatch):
     widget._poll_browser_launch()
     assert widget.open_button.isEnabled()
     assert widget.status.text() == "PRISMA opened in the default browser"
+
+
+def test_manual_browser_closure_stops_monitoring_and_restores_retry_ui(window):
+    widget, browser = window
+    widget._active_browser_launch = 7
+    stop_event = threading.Event()
+    widget._monitoring_stop_event = stop_event
+    browser.get_launch_results.return_value = [LaunchResult(
+        7, False, "The managed PRISMA page or browser was closed.", "closed"
+    )]
+
+    widget._poll_browser_launch()
+
+    assert stop_event.is_set()
+    assert widget.open_button.isEnabled()
+    assert "Open it again to retry" in widget.status.text()
+
+
+@pytest.mark.parametrize(("error", "expected"), [
+    (PrismaLookupTimeoutError("raw playwright timeout"), "status lookup timed out"),
+    (PrismaPageStructureError("raw selector"), "page structure could not be read"),
+])
+def test_monitoring_failure_messages_are_stable_and_actionable(error, expected):
+    message = app.PrismaMonitorApp._monitoring_failure_message(error)
+    assert expected in message
+    assert "raw" not in message
 
 
 def test_monitoring_worker_emits_signal_instead_of_touching_widgets(window, monkeypatch):
