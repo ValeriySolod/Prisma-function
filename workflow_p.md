@@ -653,10 +653,23 @@ access.
 
 ### P.30. Final release readiness and versioned release archive
 
-Status: **Planned**.
+Status: **Completed (repository-side)**.
 
-Release preparation is not complete. Finalize documentation, metadata, checks,
-and the versioned archive.
+Version 1.0.0 is now authoritative in `version.py` and is exposed through Qt,
+the compact window title, and PyInstaller Windows executable metadata. The
+deterministic PowerShell release workflow validates the onedir executable,
+creates `PrismaFunction-v1.0.0-windows-x64.zip` with `PrismaFunction` as its
+top-level directory, filters runtime and development artifacts, and writes a
+SHA-256 checksum. Automated metadata and script contracts, exact build and
+verification instructions, v1.0.0 release notes, and the final release
+checklist are included.
+
+Completion note: Repository-side deliverables and automated validation for
+this increment are complete. Actual package launch and functional validation,
+archive inspection, checksum verification, and validation on a second Windows
+PC remain checklist items unless explicitly recorded after running them. The
+`v1.0.0` Git tag and GitHub Release publication are manual post-merge actions;
+neither is claimed by this increment.
 
 ## 5. Git workflow для кожного етапу
 

@@ -41,7 +41,7 @@
 | P.27 | Package the application with PyInstaller | ⬜ Planned | No completed application package is claimed. | Create and verify a PyInstaller `onedir` build. |
 | P.28 | Validate the executable on a clean Windows environment | ⬜ Planned | Clean-machine validation has not been completed. | Validate launch and core workflows without a development environment. |
 | P.29 | Add project-wide Windows CI | ✅ Completed | Windows CI runs the full pytest suite, Python compilation, and PyInstaller packaging validation on pushes and pull requests for `main`, with manual dispatch support. | None. |
-| P.30 | Final release readiness and versioned release archive | ⬜ Planned | Release preparation is not complete. | Finalize documentation, metadata, checks, and the versioned archive. |
+| P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
 
 ## Current key limitation
 
@@ -54,8 +54,10 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.30 remains the next planned release-readiness increment.** Earlier planned
-feature and packaging stages remain tracked separately in the roadmap.
+**P.30 repository preparation is complete.** Manual final package validation,
+second-PC validation, tagging, and GitHub Release publication remain release
+operations, not completed repository work. Earlier planned feature and
+packaging stages remain tracked separately in the roadmap.
 
 ## Release target
 

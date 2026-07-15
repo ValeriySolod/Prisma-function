@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import app
+from version import APP_DISPLAY_NAME, __version__
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
 from prisma_page import LivePrismaStatusAdapter
@@ -36,7 +37,7 @@ def record(auction_id="A1", enabled=True, item_name="Item"):
 
 def test_core_controls_and_english_status(window):
     widget, _ = window
-    assert widget.windowTitle() == "PRISMA Monitor"
+    assert widget.windowTitle() == f"{APP_DISPLAY_NAME} v{__version__}"
     assert widget.status.text() == "Ready"
     assert [button.text() for button in (
         widget.open_button, widget.process_button, widget.open_result_button,
