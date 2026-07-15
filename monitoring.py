@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Callable, Iterable, Protocol
 
 from auction_csv import AuctionCsvRecord
+from prisma_page import PrismaAuctionNotFoundError, PrismaPageAdapterError
 
 
 class StatusChecker(Protocol):
@@ -67,6 +68,19 @@ class MonitoringEngine:
             current_status = self._status_checker(record).strip()
             if not current_status:
                 raise ValueError("The status checker returned an empty status.")
+        except PrismaAuctionNotFoundError as error:
+            reason = str(error).strip() or error.__class__.__name__
+            return self._result(
+                record,
+                current_status=record.last_known_status,
+                status_changed=False,
+                result="Error",
+                error_message=f"Unable to check auction status: {reason}",
+            )
+        except PrismaPageAdapterError:
+            # Live page failures terminate the run so lifecycle recovery can
+            # restore a retryable UI instead of continuing against a bad page.
+            raise
         except Exception as error:
             reason = str(error).strip() or error.__class__.__name__
             return self._result(

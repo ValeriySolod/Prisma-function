@@ -31,10 +31,10 @@
 | P.20.2 | Complete PySide6 integration and UI state management | ⬜ Planned | Foundation is available from P.20.1. | Complete lifecycle integration, state transitions, and Qt-safe UI updates. |
 | P.22 | Validate the packaged executable on a clean Windows environment | 🟡 In progress | A second physical PC exposed an intermittent packaged-browser runtime crash. Clean-Windows validation has not passed. | Reproduce with P.22.1 diagnostics and complete all physical-PC checks. |
 | P.22.1 | Add persistent packaged-browser runtime diagnostics | ✅ Completed | Persistent startup and generation-scoped browser lifecycle logging was added for evidence collection; root cause is not yet determined. | Collect and analyze logs from the affected physical PC. |
-| P.23 | Live PRISMA auction monitoring | 🟡 In progress / partially completed | P.23.1 and P.23.2 are complete: live retrieval is validated and the public page/session is safely classified before reads without credential handling or login automation. | Complete live-page recovery under P.23.3. |
+| P.23 | Live PRISMA auction monitoring | ✅ Completed | P.23.1-P.23.3 provide live retrieval, public-session classification, bounded lookups, typed DOM/unavailable failures, and generation-safe manual-closure recovery. | None for this stage. |
 | P.23.1 | Implement live PRISMA page adapter | ✅ Completed | Real-session validation confirmed navigation, delayed table loading, active date filtering, `Marketed >= 1000`, rendered `Auction ID`/`Status` headers, deterministic row matching, `Finished` to `Completed` normalization, typed filtered-row failures, diagnostics, and managed-browser cleanup. Live DOM corrections support the current collapsed filter panel and PRISMA's rendered header row. | None for this increment. |
 | P.23.2 | Add authentication/session handling if required | ✅ Completed | The current PRISMA auctions workflow is public. Generation-scoped validation accepts delayed public readiness and the harmless consent banner, detects login redirects/DOM signals, sanitizes diagnostics, and returns typed authentication-required or invalid-session failures. Credential persistence and login automation were intentionally not added. | None for this increment. |
-| P.23.3 | Handle timeout, unavailable page, changed DOM, and manual browser closure | ⬜ Planned | General lifecycle handling exists. | Add live-page-specific recovery and clear error reporting. |
+| P.23.3 | Handle timeout, unavailable page, changed DOM, and manual browser closure | ✅ Completed | Bounded live lookups, typed timeout/unavailable/DOM results, lifecycle-driven monitoring termination, idempotent cleanup, stable English UI messages, and stale-generation protection are covered by deterministic tests. | Manual real-session closure/disconnect timing validation remains recommended; no additional implementation is required for this increment. |
 | P.24 | Persist monitoring results and status changes | ⬜ Planned | Persistence is not complete. | Store checks and detected status transitions safely. |
 | P.25 | Add user-visible status-change notifications | ⬜ Planned | Notifications are not implemented. | Surface meaningful status changes to the user. |
 | P.26 | Move writable runtime data to the user data directory | ⬜ Planned | Runtime path migration is not complete. | Use an appropriate writable Windows user-data location. |
@@ -47,13 +47,15 @@
 
 The live adapter is implemented, is the default monitoring source, and has passed
 a real public PRISMA session in system-default Chrome. Public-session validation
-and safe authentication-required detection are complete. Full live-page recovery
-remains planned under P.23.3.
+and safe authentication-required detection are complete. Live-page recovery is
+implemented with bounded lookups, typed failures, and generation-safe cleanup.
+Manual real-session validation remains recommended for browser closure,
+disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**Continue with P.23.3 timeout, unavailable-page, DOM-change, and manual-closure
-recovery.**
+**P.30 remains the next planned release-readiness increment.** Earlier planned
+feature and packaging stages remain tracked separately in the roadmap.
 
 ## Release target
 

@@ -13,7 +13,8 @@ from pathlib import Path
 from runtime_logging import LOGGER_NAME, safe_log
 from prisma_page import (
     PrismaAuthenticationRequiredError, PrismaInvalidSessionError,
-    PrismaPageAdapterError, PrismaPageReader, PrismaPageUnavailableError,
+    PrismaLookupTimeoutError, PrismaPageAdapterError, PrismaPageReader,
+    PrismaPageUnavailableError,
     PrismaSessionValidator,
 )
 
@@ -40,6 +41,7 @@ class LaunchResult:
     generation: int
     success: bool
     error: str | None = None
+    kind: str = "launch"
 
 
 @dataclass
@@ -49,6 +51,7 @@ class _PageRequest:
     completed: threading.Event
     status: str | None = None
     error: Exception | None = None
+    abandoned: bool = False
 
 
 class _LaunchCancelled(Exception):
@@ -351,8 +354,15 @@ class BrowserController:
             generation, record.auction_id,
         )
         if not request.completed.wait(timeout_seconds):
-            raise PrismaPageUnavailableError(
-                "The active PRISMA page did not complete the status request."
+            request.abandoned = True
+            self._log(
+                logging.WARNING,
+                "Live status lookup timed out: generation=%s auction_id=%s timeout_seconds=%s",
+                generation, record.auction_id, timeout_seconds,
+            )
+            self._stop_generation(generation, "lookup-timeout")
+            raise PrismaLookupTimeoutError(
+                "The live PRISMA status lookup timed out. Reopen the browser and retry."
             )
         if request.error is not None:
             raise request.error
@@ -373,9 +383,16 @@ class BrowserController:
             except queue.Empty:
                 return
             try:
+                if request.abandoned:
+                    continue
                 if request.generation != generation:
                     raise PrismaPageUnavailableError(
                         "The PRISMA browser generation changed before the status request ran."
+                    )
+                is_closed = getattr(page, "is_closed", None)
+                if callable(is_closed) and is_closed():
+                    raise PrismaPageUnavailableError(
+                        "The managed PRISMA page is closed."
                     )
                 state = self._session_validator.validate(page)
                 self._log(logging.INFO, "Public session validated: generation=%s classification=%s location=%s", generation, state.classification, state.location)
@@ -391,6 +408,14 @@ class BrowserController:
             except PrismaInvalidSessionError as exc:
                 request.error = exc
                 self._log(logging.WARNING, "Session validation failed: generation=%s classification=invalid-or-unavailable", generation)
+            except PrismaPageUnavailableError as exc:
+                request.error = exc
+                self._log(
+                    logging.WARNING,
+                    "Live page unavailable: generation=%s auction_id=%s",
+                    generation, request.record.auction_id,
+                )
+                self._stop_generation(generation, "live-page-unavailable")
             except PrismaPageAdapterError as exc:
                 request.error = exc
                 self._log(
@@ -402,6 +427,7 @@ class BrowserController:
                 request.error = PrismaPageUnavailableError(
                     "The active PRISMA page failed while reading auction status."
                 )
+                self._stop_generation(generation, "unexpected-live-page-failure")
                 self._log(
                     logging.ERROR,
                     "Unexpected live status exception: generation=%s auction_id=%s",
@@ -409,6 +435,23 @@ class BrowserController:
                 )
             finally:
                 request.completed.set()
+
+    def _stop_generation(self, generation: int, classification: str) -> bool:
+        """Stop only the generation that reported a lifecycle failure."""
+        with self._lock:
+            if not self._is_current(generation) or self._state is BrowserState.IDLE:
+                return False
+            previous_state = self._state
+            self._state = BrowserState.STOPPING
+            cancel_event = self._cancel_event
+            if cancel_event is not None:
+                cancel_event.set()
+        self._log(
+            logging.INFO,
+            "Generation stop requested: generation=%s state_before=%s classification=%s",
+            generation, previous_state.value, classification,
+        )
+        return True
 
     def _fail_pending_page_requests(self, generation: int) -> None:
         with self._lock:
@@ -435,25 +478,32 @@ class BrowserController:
         launch_error: str | None = None
         announced_success = False
         cleanup_started = threading.Event()
+        lifecycle_failure = threading.Event()
         listeners = []
         state_before_cleanup = BrowserState.IDLE
 
         def lifecycle_reason() -> str:
-            if cancel_event.is_set():
-                return "user-requested shutdown"
             if cleanup_started.is_set():
                 return "controller cleanup"
+            if lifecycle_failure.is_set():
+                return "unexpected"
+            if cancel_event.is_set():
+                return "user-requested shutdown"
             return "unexpected"
 
         def attach(emitter, event: str, label: str) -> None:
             if emitter is None or not callable(getattr(emitter, "on", None)):
                 return
             def callback(*_args) -> None:
+                classification = lifecycle_reason()
                 self._log(
-                    logging.WARNING,
+                    logging.INFO if classification != "unexpected" else logging.WARNING,
                     "%s event: generation=%s classification=%s state=%s",
-                    label, generation, lifecycle_reason(), self.state.value,
+                    label, generation, classification, self.state.value,
                 )
+                if classification == "unexpected" and not lifecycle_failure.is_set():
+                    lifecycle_failure.set()
+                    self._stop_generation(generation, "managed-browser-unavailable")
             try:
                 emitter.on(event, callback)
                 listeners.append((emitter, event, callback))
@@ -571,6 +621,11 @@ class BrowserController:
                         self._results.put(
                             LaunchResult(generation, False, launch_error)
                         )
+                    elif lifecycle_failure.is_set() and announced_success:
+                        self.last_error = "The managed PRISMA page or browser was closed."
+                        self._results.put(LaunchResult(
+                            generation, False, self.last_error, "closed"
+                        ))
                 final_state = self._state.value
             self._log(logging.INFO, "Cleanup completed: generation=%s state_before=%s state_after=%s cancelled=%s", generation, state_before_cleanup.value, final_state, was_cancelled)
 
