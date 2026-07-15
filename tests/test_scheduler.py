@@ -97,6 +97,43 @@ def test_run_forever_runs_immediately_then_after_each_interruptible_wait():
     assert event.wait_calls == [5.0, 5.0]
 
 
+def test_run_forever_passes_each_exact_result_list_to_callback():
+    event = ControlledEvent(stop_after_waits=2)
+    first_results = [Mock(spec=MonitoringResult)]
+    second_results = [Mock(spec=MonitoringResult), Mock(spec=MonitoringResult)]
+    scheduler = MonitoringScheduler(Mock(), Mock())
+    scheduler.run_once = Mock(side_effect=[first_results, second_results])
+    callback = Mock()
+
+    scheduler.run_forever(event, 5.0, callback)
+
+    assert callback.call_args_list[0].args[0] is first_results
+    assert callback.call_args_list[1].args[0] is second_results
+
+
+def test_run_forever_without_callback_remains_backward_compatible():
+    event = ControlledEvent(stop_after_waits=1)
+    results = [Mock(spec=MonitoringResult)]
+    scheduler = MonitoringScheduler(Mock(), Mock())
+    scheduler.run_once = Mock(return_value=results)
+
+    assert scheduler.run_forever(event, 2.0) is None
+    scheduler.run_once.assert_called_once_with(event)
+
+
+def test_run_forever_does_not_hide_callback_exception():
+    event = ControlledEvent(stop_after_waits=1)
+    expected = RuntimeError("callback failed")
+    scheduler = MonitoringScheduler(Mock(), Mock())
+    scheduler.run_once = Mock(return_value=[])
+
+    with pytest.raises(RuntimeError) as caught:
+        scheduler.run_forever(event, 2.0, Mock(side_effect=expected))
+
+    assert caught.value is expected
+    assert event.wait_calls == []
+
+
 def test_run_forever_does_not_start_cycle_when_already_stopped():
     event = ControlledEvent(initially_set=True)
     provider = Mock()

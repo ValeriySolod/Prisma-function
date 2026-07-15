@@ -30,11 +30,18 @@ class MonitoringScheduler:
         records = self._records_provider()
         return self._engine.check_records(records, stop_event)
 
-    def run_forever(self, stop_event: StopEvent, interval_seconds: float) -> None:
+    def run_forever(
+        self,
+        stop_event: StopEvent,
+        interval_seconds: float,
+        results_callback: Callable[[list[MonitoringResult]], None] | None = None,
+    ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be greater than zero.")
 
         while not stop_event.is_set():
-            self.run_once(stop_event)
+            results = self.run_once(stop_event)
+            if results_callback is not None:
+                results_callback(results)
             if stop_event.wait(interval_seconds):
                 return

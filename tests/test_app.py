@@ -1,22 +1,33 @@
 import os
 import threading
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QSignalSpy
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
 
 import app
-from version import APP_DISPLAY_NAME, __version__
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
-from prisma_page import LivePrismaStatusAdapter
-from prisma_page import PrismaLookupTimeoutError, PrismaPageStructureError
+from monitoring import MonitoringResult
+from prisma_page import (
+    LivePrismaStatusAdapter,
+    PrismaAuctionNotFoundError,
+    PrismaLookupTimeoutError,
+    PrismaPageStructureError,
+    PrismaPageUnavailableError,
+)
+from version import APP_DISPLAY_NAME, __version__
+from ui_components import APP_STYLE, ArrowComboBox
 
 
-@pytest.fixture(scope="module")
-def qt_app():
+@pytest.fixture(scope="session")
+def qt_app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
@@ -30,120 +41,414 @@ def window(qt_app, monkeypatch):
     widget.close()
 
 
-def record(auction_id="A1", enabled=True, item_name="Item"):
-    return AuctionCsvRecord(auction_id, "https://example.com", "L1", item_name,
-                            "Open", "Scheduled", 30, enabled)
+def record(
+    auction_id: str = "A1",
+    enabled: bool = True,
+    item_name: str = "Item",
+    status: str = "Scheduled",
+) -> AuctionCsvRecord:
+    return AuctionCsvRecord(
+        auction_id,
+        "https://example.com",
+        "L1",
+        item_name,
+        "Open",
+        status,
+        30,
+        enabled,
+    )
 
 
-def test_core_controls_and_english_status(window):
+def result(
+    auction_id: str,
+    status: str,
+    result_name: str = "Changed",
+) -> MonitoringResult:
+    return MonitoringResult(
+        auction_id,
+        datetime(2026, 1, 2, 3, 4, 5),
+        "Scheduled",
+        status,
+        True,
+        result_name,
+        "failure" if result_name == "Error" else "",
+    )
+
+
+def make_ready(widget: app.PrismaMonitorApp) -> None:
+    widget._browser_ready = True
+    widget._active_browser_launch = 7
+    widget._update_controls()
+
+
+def test_initial_dashboard_state_and_accessibility(window):
     widget, _ = window
     assert widget.windowTitle() == f"{APP_DISPLAY_NAME} v{__version__}"
+    assert widget.minimumWidth() >= 1080
     assert widget.status.text() == "Ready"
-    assert [button.text() for button in (
-        widget.open_button, widget.process_button, widget.open_result_button,
-        widget.start_monitoring_button, widget.stop_monitoring_button,
-        widget.stop_browser_button,
-    )] == ["Open PRISMA", "Process CSV", "Open Result", "Start Monitoring",
-           "Stop Monitoring", "Stop Browser"]
-    assert widget.csv_table.columnCount() == 7
+    assert widget.browser_badge.text() == "Disconnected"
+    assert not widget.start_monitoring_button.isEnabled()
+    assert widget.csv_table.accessibleName() == "Auctions"
+    assert [
+        widget.summary_cards[key].value.text()
+        for key in ("total", "active", "completed", "errors")
+    ] == ["0", "0", "0", "0"]
+
+
+def test_light_workspace_widgets_use_explicit_contrast_styles(window):
+    widget, _ = window
+    content = widget.findChild(QWidget, "contentArea")
+    subtitle = widget.findChild(QLabel, "dashboardSubtitle")
+    section_labels = widget.findChildren(QLabel, "contentSectionLabel")
+
+    assert content is not None
+    assert subtitle is not None
+    assert {label.text() for label in section_labels} == {"Recent activity", "Status:"}
+    assert widget.activity_list.objectName() == "activityList"
+    assert widget.status_filter.currentText() == "All statuses"
+
+    required_rules = (
+        "QWidget#contentArea QLabel { color: #243247; }",
+        "QLabel#dashboardSubtitle { color: #66758a; }",
+        "QLabel#contentSectionLabel { color: #314157; font-weight: 600; }",
+        "placeholder-text-color: #718096;",
+        "QLineEdit:disabled, QComboBox:disabled",
+        "QComboBox::drop-down",
+        "QComboBox QAbstractItemView",
+        "QListWidget { border: none; background: white; color: #243247;",
+        "QListWidget::item { color: #243247;",
+    )
+    for rule in required_rules:
+        assert rule in APP_STYLE
+
+    assert "QFrame#sidebar QLabel { color: #d8e1ee; }" in APP_STYLE
+    assert "QLabel#browserBadge, QLabel#monitorBadge" in APP_STYLE
+
+
+def test_status_filter_uses_packaging_safe_custom_arrow(window):
+    widget, _ = window
+
+    assert isinstance(widget.status_filter, ArrowComboBox)
+    assert widget.status_filter.property("arrowImplementation") == "custom-paint"
+    assert "QComboBox::down-arrow" not in APP_STYLE
+    assert widget.status_filter.accessibleName() == "Filter by status"
+
+
+def test_ordinary_table_cells_keep_model_text_and_explicit_contrast(window):
+    widget, _ = window
+    widget.table_model.set_records(
+        [record("AUCTION-42", item_name="North Market", status="Scheduled")]
+    )
+
+    expected = ("AUCTION-42", "L1", "North Market", "Open")
+    for column, text in enumerate(expected):
+        index = widget.table_model.index(0, column)
+        assert index.data(Qt.DisplayRole) == text
+        assert index.data(Qt.AccessibleTextRole) == text
+
+    required_rules = (
+        "QWidget#contentArea QTableView { border: none; background: white; color: #243247;",
+        "QWidget#contentArea QTableView::item { color: #243247; }",
+        "QWidget#contentArea QTableView::item:hover",
+        "QWidget#contentArea QTableView::item:selected { background: #dff3f8; color: #172235; }",
+        "QWidget#contentArea QTableView::item:selected:hover",
+        "QWidget#contentArea QTableView:focus { color: #243247; }",
+        "QWidget#contentArea QTableView:disabled",
+        "QWidget#contentArea QTableView::item:disabled",
+    )
+    for rule in required_rules:
+        assert rule in APP_STYLE
 
 
 def test_cancel_csv_dialog_preserves_state(window, monkeypatch):
     widget, _ = window
-    dialog = Mock(return_value=("", ""))
-    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", dialog)
-    load = Mock(); monkeypatch.setattr(app, "load_auction_csv", load)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=("", ""))
+    )
+    load = Mock()
+    monkeypatch.setattr(app, "load_auction_csv", load)
+
     widget.select_csv()
+
     load.assert_not_called()
-    assert widget.csv_path.text() == "" and widget.status.text() == "Ready"
+    assert widget.csv_path.text() == ""
 
 
-def test_valid_csv_populates_table(window, monkeypatch):
+def test_csv_loading_populates_model_counters_and_activity(window, monkeypatch):
     widget, _ = window
-    monkeypatch.setattr(app.QFileDialog, "getOpenFileName",
-                        Mock(return_value=("C:/data/Auction_overview.csv", "CSV")))
-    monkeypatch.setattr(app, "load_auction_csv",
-                        Mock(return_value=[record(), record("A2", False, "Second")]))
+    monkeypatch.setattr(
+        app.QFileDialog,
+        "getOpenFileName",
+        Mock(return_value=("C:/data/Auction_overview.csv", "CSV")),
+    )
+    monkeypatch.setattr(
+        app,
+        "load_auction_csv",
+        Mock(return_value=[record(), record("A2", False, "Second", "Completed")]),
+    )
+
     widget.select_csv()
-    assert widget.csv_path.text() == "C:/data/Auction_overview.csv"
-    assert widget.status.text() == "Loaded Auction_overview.csv: 2 records"
-    assert widget.csv_table.rowCount() == 2
-    assert widget.csv_table.item(1, 6).text() == "No"
+
+    assert widget.table_model.rowCount() == 2
+    assert widget.csv_filename.text() == "Auction_overview.csv"
+    assert widget.summary_cards["total"].value.text() == "2"
+    assert widget.summary_cards["completed"].value.text() == "0"
+    assert "CSV loaded" in widget.activity_list.item(0).text()
+    assert not widget.start_monitoring_button.isEnabled()
 
 
-def test_invalid_csv_uses_qmessagebox_and_preserves_selection(window, monkeypatch):
+def test_summary_semantics_are_truthful_and_disjoint(window):
+    widget, _ = window
+    widget.table_model.set_records(
+        [
+            record("DISABLED-SCHEDULED", enabled=False, status="Scheduled"),
+            record("DISABLED-COMPLETED", enabled=False, status="Completed"),
+            record("DISABLED-ERROR", enabled=False, status="Scheduled"),
+            record("ENABLED-COMPLETED", status="Completed"),
+            record("ENABLED-CANCELLED", status="Cancelled"),
+            record("CANCELLED-ERROR", status="Cancelled"),
+            record("ENABLED-ACTIVE", status="Open"),
+            record("ENABLED-ERROR", status="Error"),
+        ]
+    )
+    widget.table_model.apply_result(
+        result("DISABLED-ERROR", "Scheduled", "Error")
+    )
+    widget.table_model.apply_result(
+        result("CANCELLED-ERROR", "Cancelled", "Error")
+    )
+
+    assert widget.table_model.counts() == {
+        "total": 8,
+        "active": 1,
+        "completed": 1,
+        "errors": 2,
+    }
+
+
+def test_invalid_csv_has_clear_error_and_preserves_selection(window, monkeypatch):
     widget, _ = window
     widget.csv_path.setText("existing.csv")
-    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", Mock(return_value=("bad.csv", "CSV")))
-    monkeypatch.setattr(app, "load_auction_csv", Mock(side_effect=app.CsvValidationError("bad data")))
-    critical = Mock(); monkeypatch.setattr(QMessageBox, "critical", critical)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=("bad.csv", "CSV"))
+    )
+    monkeypatch.setattr(
+        app,
+        "load_auction_csv",
+        Mock(side_effect=app.CsvValidationError("bad data")),
+    )
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
     widget.select_csv()
-    assert widget.csv_path.text() == "existing.csv"
+
     critical.assert_called_once_with(widget, "CSV Error", "bad data")
+    assert widget.csv_path.text() == "existing.csv"
 
 
-def test_browser_result_is_polled_on_gui_thread(window, monkeypatch):
+def test_successful_browser_result_is_polled_on_gui_thread(window, monkeypatch):
     widget, browser = window
     browser.open.return_value = 7
     browser.get_launch_results.return_value = [LaunchResult(7, True)]
     monkeypatch.setattr(widget._browser_timer, "start", Mock())
     monkeypatch.setattr(widget._browser_timer, "stop", Mock())
+
     widget.open_prisma()
-    assert not widget.open_button.isEnabled()
     widget._poll_browser_launch()
-    assert widget.open_button.isEnabled()
-    assert widget.status.text() == "PRISMA opened in the default browser"
+
+    assert widget._browser_ready
+    assert widget.browser_badge.text() == "Ready"
+    assert widget.status.text() == "PRISMA browser session is ready"
+    assert not widget.open_button.isEnabled()
 
 
-def test_manual_browser_closure_stops_monitoring_and_restores_retry_ui(window):
+def test_stale_browser_result_does_not_change_dashboard(window, monkeypatch):
     widget, browser = window
-    widget._active_browser_launch = 7
+    browser.open.return_value = 7
+    browser.get_launch_results.return_value = [LaunchResult(6, True)]
+    monkeypatch.setattr(widget._browser_timer, "start", Mock())
+
+    widget.open_prisma()
+    widget._poll_browser_launch()
+
+    assert not widget._browser_ready
+    assert widget.browser_badge.text() == "Opening"
+
+
+def test_managed_browser_closure_stops_monitoring_and_restores_retry(window):
+    widget, browser = window
+    make_ready(widget)
     stop_event = threading.Event()
     widget._monitoring_stop_event = stop_event
-    browser.get_launch_results.return_value = [LaunchResult(
-        7, False, "The managed PRISMA page or browser was closed.", "closed"
-    )]
+    widget._monitoring_thread = Mock()
+    browser.get_launch_results.return_value = [
+        LaunchResult(7, False, "managed browser closed", "closed")
+    ]
 
     widget._poll_browser_launch()
 
     assert stop_event.is_set()
+    assert not widget._browser_ready
     assert widget.open_button.isEnabled()
+    assert not widget.start_monitoring_button.isEnabled()
     assert "Open it again to retry" in widget.status.text()
 
 
-@pytest.mark.parametrize(("error", "expected"), [
-    (PrismaLookupTimeoutError("raw playwright timeout"), "status lookup timed out"),
-    (PrismaPageStructureError("raw selector"), "page structure could not be read"),
-])
-def test_monitoring_failure_messages_are_stable_and_actionable(error, expected):
-    message = app.PrismaMonitorApp._monitoring_failure_message(error)
-    assert expected in message
-    assert "raw" not in message
+def test_browser_launch_failure_recovers_retry_controls(window, monkeypatch):
+    widget, browser = window
+    browser.open.return_value = 7
+    browser.get_launch_results.return_value = [
+        LaunchResult(7, False, "diagnostic detail", "launch")
+    ]
+    monkeypatch.setattr(widget._browser_timer, "start", Mock())
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget.open_prisma()
+    widget._poll_browser_launch()
+
+    assert widget.open_button.isEnabled()
+    assert not widget.stop_browser_button.isEnabled()
+    assert widget.browser_badge.text() == "Error"
+    critical.assert_called_once()
+    assert "diagnostic detail" not in critical.call_args.args[2]
 
 
-def test_monitoring_worker_emits_signal_instead_of_touching_widgets(window, monkeypatch):
+def test_search_and_status_changes_refresh_visible_rows_immediately(window):
     widget, _ = window
-    scheduler = Mock(); emitted = Mock()
-    widget.signals.monitoring_finished.connect(emitted)
-    widget._monitoring_worker(scheduler, threading.Event())
-    emitted.assert_called_once_with(None)
+    widget.table_model.set_records(
+        [
+            record("ALPHA", item_name="North"),
+            record("BETA", item_name="South", status="Completed"),
+        ]
+    )
+
+    widget.search_box.setText("north")
+    assert widget.proxy_model.rowCount() == 1
+    assert widget.proxy_model.index(0, 0).data() == "ALPHA"
+
+    widget.search_box.clear()
+    widget.status_filter.setCurrentText("Completed")
+    assert widget.proxy_model.rowCount() == 1
+    assert widget.proxy_model.index(0, 0).data() == "BETA"
 
 
-def test_start_stop_monitoring_matches_existing_behavior(window, monkeypatch):
+def test_result_update_is_correct_while_proxy_is_sorted_and_filtered(window):
+    widget, _ = window
+    widget.table_model.set_records([record("BETA"), record("ALPHA")])
+    widget.csv_table.sortByColumn(0, Qt.DescendingOrder)
+    widget.status_filter.setCurrentText("Completed")
+    reset = Mock()
+    widget.table_model.modelReset.connect(reset)
+
+    widget._monitoring_results([result("ALPHA", "Completed")])
+
+    reset.assert_not_called()
+    assert widget.proxy_model.rowCount() == 1
+    assert widget.proxy_model.index(0, 0).data() == "ALPHA"
+    source_row = widget.table_model._row_by_id["ALPHA"]
+    assert widget.table_model.index(source_row, 4).data() == "Completed"
+    assert widget.summary_cards["completed"].value.text() == "1"
+
+
+def test_model_rejects_duplicate_auction_ids(window):
+    widget, _ = window
+    with pytest.raises(ValueError, match="unique"):
+        widget.table_model.set_records([record("SAME"), record("SAME")])
+
+
+@pytest.mark.parametrize(
+    ("has_records", "browser_ready"), [(False, False), (True, False), (False, True)]
+)
+def test_monitoring_cannot_start_without_all_prerequisites(
+    window, monkeypatch, has_records, browser_ready
+):
+    widget, _ = window
+    widget._auction_records = [record()] if has_records else []
+    widget._browser_ready = browser_ready
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget.start_monitoring()
+
+    critical.assert_called_once_with(
+        widget,
+        "Monitoring Error",
+        "Open the browser and load a CSV with enabled auctions first.",
+    )
+    assert widget._monitoring_thread is None
+
+
+def test_monitoring_enablement_and_duplicate_prevention(window, monkeypatch):
     widget, _ = window
     widget._auction_records = [record()]
-    scheduler = Mock(); monkeypatch.setattr(widget, "create_monitoring_scheduler", Mock(return_value=scheduler))
+    make_ready(widget)
+    widget._update_controls()
+    monkeypatch.setattr(
+        widget, "create_monitoring_scheduler", Mock(return_value=Mock())
+    )
     created = []
+
     class FakeThread:
-        def __init__(self, **kwargs): self.kwargs = kwargs; self.started = False; created.append(self)
-        def start(self): self.started = True
-        def is_alive(self): return False
+        def __init__(self, **kwargs):
+            created.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
     monkeypatch.setattr(app.threading, "Thread", FakeThread)
+
     widget.start_monitoring()
-    assert created[0].started and not widget.start_monitoring_button.isEnabled()
+    widget.start_monitoring()
+
+    assert len(created) == 1
+    assert widget.stop_monitoring_button.isEnabled()
     event = widget._monitoring_stop_event
     widget.stop_monitoring()
     assert event.is_set()
+
+
+def test_monitoring_worker_delivers_completion_only_through_signals(window):
+    widget, _ = window
+    scheduler = Mock()
+    finished = QSignalSpy(widget.signals.monitoring_finished)
+    widget.signals.monitoring_finished.disconnect(widget._monitoring_finished)
+    widget.signals.monitoring_results.disconnect(widget._monitoring_results)
+    original_status = widget.status.text()
+    stop_event = threading.Event()
+
+    widget._monitoring_worker(scheduler, stop_event)
+
+    scheduler.run_forever.assert_called_once_with(
+        stop_event,
+        app.DEFAULT_MONITORING_INTERVAL_SECONDS,
+        widget.signals.monitoring_results.emit,
+    )
+    assert finished.count() == 1
+    assert finished.at(0) == [None]
+    assert widget.status.text() == original_status
+    widget.signals.monitoring_finished.connect(widget._monitoring_finished)
+    widget.signals.monitoring_results.connect(widget._monitoring_results)
+
+
+def test_monitoring_completion_restores_idle_state(window):
+    widget, _ = window
+    widget._auction_records = [record()]
+    make_ready(widget)
+    widget._monitoring_thread = Mock()
+    widget._monitoring_stop_event = threading.Event()
+
+    widget._monitoring_finished(None)
+
+    assert widget._monitoring_thread is None
+    assert widget._monitoring_stop_event is None
+    assert widget.monitor_badge.text() == "Monitoring idle"
+    assert widget.start_monitoring_button.isEnabled()
+    assert not widget.stop_monitoring_button.isEnabled()
+    assert widget.status.text() == "Monitoring stopped"
 
 
 def test_default_monitoring_engine_uses_live_browser_adapter(window):
@@ -153,20 +458,67 @@ def test_default_monitoring_engine_uses_live_browser_adapter(window):
     assert engine._status_checker._browser_controller is browser
 
 
-def test_start_without_records_shows_existing_error(window, monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (PrismaLookupTimeoutError("raw timeout"), "timed out"),
+        (PrismaPageUnavailableError("raw page"), "unavailable or closed"),
+        (PrismaPageStructureError("raw selector"), "structure could not be read"),
+        (PrismaAuctionNotFoundError("Auction A1 was not found."), "not found"),
+    ],
+)
+def test_known_monitoring_failure_messages_are_actionable(error, expected):
+    message = app.PrismaMonitorApp._monitoring_failure_message(error)
+    assert expected in message
+    assert "raw" not in message
+
+
+def test_processing_success_preserves_full_statistics(window, monkeypatch):
     widget, _ = window
-    critical = Mock(); monkeypatch.setattr(QMessageBox, "critical", critical)
-    widget.start_monitoring()
-    critical.assert_called_once_with(widget, "Monitoring Error",
-                                     "No usable auction records are available.")
+    monkeypatch.setattr(app, "process_csv", Mock(return_value=[{"auction_id": "A1"}]))
+    storage = Mock()
+    storage.upsert.return_value = {
+        "processed": 4,
+        "inserted": 1,
+        "updated": 2,
+        "unchanged": 1,
+    }
+    storage.export_excel.return_value = Path("result.xlsx")
+    monkeypatch.setattr(app, "AuctionStorage", Mock(return_value=storage))
+
+    widget._process_worker(Path("input.csv"))
+
+    assert widget.status.text() == (
+        "Done. Processed: 4; inserted: 1; updated: 2; unchanged: 1. "
+        "Result: result.xlsx"
+    )
+    assert "CSV processing completed" in widget.activity_list.item(0).text()
 
 
-def test_close_stops_monitoring_browser_and_joins_worker(window):
+def test_clear_activity_does_not_touch_logs(window):
+    widget, _ = window
+    widget._add_activity("Something")
+    widget.clear_activity()
+    assert widget.activity_list.count() == 0
+
+
+def test_close_stops_managed_browser_and_joins_all_live_workers(window):
     widget, browser = window
-    event = threading.Event(); worker = Mock()
-    worker.is_alive.return_value = True
-    widget._monitoring_stop_event = event; widget._monitoring_thread = worker
+    widget._is_closing = True
+    stop_event = threading.Event()
+    monitoring_worker = Mock()
+    monitoring_worker.is_alive.return_value = True
+    processing_worker = Mock()
+    processing_worker.is_alive.return_value = True
+    widget._monitoring_stop_event = stop_event
+    widget._monitoring_thread = monitoring_worker
+    widget._processing_threads = {processing_worker}
     close_event = Mock()
+
     widget.closeEvent(close_event)
-    assert event.is_set(); browser.stop.assert_called_once(); worker.join.assert_called_once_with()
+
+    assert stop_event.is_set()
+    browser.stop.assert_called_once_with()
+    monitoring_worker.join.assert_called_once_with()
+    processing_worker.join.assert_called_once_with()
     close_event.accept.assert_called_once_with()

@@ -42,6 +42,8 @@
 | P.28 | Validate the executable on a clean Windows environment | ⬜ Planned | Clean-machine validation has not been completed. | Validate launch and core workflows without a development environment. |
 | P.29 | Add project-wide Windows CI | ✅ Completed | Windows CI runs the full pytest suite, Python compilation, and PyInstaller packaging validation on pushes and pull requests for `main`, with manual dispatch support. | None. |
 | P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
+| P.31 | Modern PySide6 monitoring dashboard | ✅ Completed | Responsive light workspace and graphite sidebar, truthful summary cards, model-backed searchable/filterable auction table, browser and monitoring state badges, activity feed, accessible controls, and focused offscreen UI coverage are implemented without changing managed-browser ownership. | Complete manual Windows scaling checks at 125%, 150%, 175%, and 200%. |
+| P.32 | Windows installer and uninstaller using Inno Setup | ⬜ Planned | Installer work is intentionally outside P.31. | Add and validate a signed-ready Inno Setup installer and uninstaller workflow. |
 
 ## Current key limitation
 
@@ -54,10 +56,9 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.30 repository preparation is complete.** Manual final package validation,
-second-PC validation, tagging, and GitHub Release publication remain release
-operations, not completed repository work. Earlier planned feature and
-packaging stages remain tracked separately in the roadmap.
+**P.31 is complete.** The modern desktop monitoring interface is implemented
+and covered by automated tests. P.32 (Windows installer and uninstaller using
+Inno Setup) is the next planned increment; it is not part of this change.
 
 ## Release target
 
