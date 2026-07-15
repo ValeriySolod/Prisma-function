@@ -557,7 +557,7 @@ does not mark clean-Windows validation complete.
 
 ### P.23. Live PRISMA auction monitoring
 
-Status: **In progress — P.23.1 is Completed; P.23.2 and P.23.3 remain planned**.
+Status: **In progress — P.23.1 and P.23.2 are Completed; P.23.3 remains planned**.
 
 Use the Playwright page owned by the existing browser lifecycle as the live
 monitoring source. Authentication/session support and complete recovery for
@@ -587,10 +587,21 @@ P.23.3; clean-Windows validation is not claimed by this increment.
 
 #### P.23.2. Add authentication/session handling if required
 
-Status: **Planned**.
+Status: **Completed**.
 
-Determine the real PRISMA session requirements and add safe authentication or
-session handling only if live-site evidence requires it.
+Completion note: P.23.1 live-site evidence established that the current daily
+auctions workflow is public and works without authentication, including with the
+research-consent banner left untouched. P.23.2 therefore adds focused validation
+of the existing lifecycle-owned page before filtering and every live table read.
+It accepts the expected PRISMA origin/path only when a meaningful auctions-page
+landmark is visible, tolerates delayed rendering, recognizes authentication by a
+sanitized redirect path or visible login structure, and reports typed
+authentication-required or invalid-session failures. Diagnostics contain only
+generation, safe classification, and origin/path without query strings, fragments,
+userinfo, page content, cookies, storage, or session identifiers. No credentials,
+cookie/profile persistence, login automation, retry loop, second browser, context,
+or page were added. P.23 remains in progress because P.23.3 recovery work is not
+complete.
 
 #### P.23.3. Harden live-page failure and recovery behavior
 
