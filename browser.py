@@ -12,7 +12,9 @@ from pathlib import Path
 
 from runtime_logging import LOGGER_NAME, safe_log
 from prisma_page import (
+    PrismaAuthenticationRequiredError, PrismaInvalidSessionError,
     PrismaPageAdapterError, PrismaPageReader, PrismaPageUnavailableError,
+    PrismaSessionValidator,
 )
 
 try:
@@ -266,6 +268,7 @@ class BrowserController:
     def __init__(
         self, page_filter: PrismaAuctionFilter | None = None, detector=None, logger=None,
         page_reader: PrismaPageReader | None = None,
+        session_validator: PrismaSessionValidator | None = None,
     ) -> None:
         self._playwright = None
         self._browser = None
@@ -281,6 +284,7 @@ class BrowserController:
         self._detector = detector or DefaultBrowserDetector()
         self._logger = logger or logging.getLogger(LOGGER_NAME)
         self._page_reader = page_reader or PrismaPageReader()
+        self._session_validator = session_validator or PrismaSessionValidator()
 
     def _log(self, level: int, message: str, *args, **kwargs) -> None:
         safe_log(self._logger, level, message, *args, **kwargs)
@@ -373,12 +377,20 @@ class BrowserController:
                     raise PrismaPageUnavailableError(
                         "The PRISMA browser generation changed before the status request ran."
                     )
+                state = self._session_validator.validate(page)
+                self._log(logging.INFO, "Public session validated: generation=%s classification=%s location=%s", generation, state.classification, state.location)
                 request.status = self._page_reader.read_status(page, request.record)
                 self._log(
                     logging.INFO,
                     "Live status request completed: generation=%s auction_id=%s status=%s",
                     generation, request.record.auction_id, request.status,
                 )
+            except PrismaAuthenticationRequiredError as exc:
+                request.error = exc
+                self._log(logging.WARNING, "Session validation failed: generation=%s classification=authentication-required", generation)
+            except PrismaInvalidSessionError as exc:
+                request.error = exc
+                self._log(logging.WARNING, "Session validation failed: generation=%s classification=invalid-or-unavailable", generation)
             except PrismaPageAdapterError as exc:
                 request.error = exc
                 self._log(
@@ -479,6 +491,15 @@ class BrowserController:
             attach(context, "close", "Context close")
             page.goto(PRISMA_AUCTIONS_URL, wait_until="domcontentloaded")
             self._log(logging.INFO, "Navigation completed: generation=%s url=%s", generation, PRISMA_AUCTIONS_URL)
+            try:
+                session_state = self._session_validator.validate(page)
+            except PrismaAuthenticationRequiredError:
+                self._log(logging.WARNING, "Session validation failed: generation=%s classification=authentication-required", generation)
+                raise
+            except PrismaInvalidSessionError:
+                self._log(logging.WARNING, "Session validation failed: generation=%s classification=invalid-or-unavailable", generation)
+                raise
+            self._log(logging.INFO, "Public session validated: generation=%s classification=%s location=%s", generation, session_state.classification, session_state.location)
             try:
                 self._page_filter.apply(page, cancel_event)
             except _LaunchCancelled:

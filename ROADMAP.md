@@ -31,9 +31,9 @@
 | P.20.2 | Complete PySide6 integration and UI state management | ⬜ Planned | Foundation is available from P.20.1. | Complete lifecycle integration, state transitions, and Qt-safe UI updates. |
 | P.22 | Validate the packaged executable on a clean Windows environment | 🟡 In progress | A second physical PC exposed an intermittent packaged-browser runtime crash. Clean-Windows validation has not passed. | Reproduce with P.22.1 diagnostics and complete all physical-PC checks. |
 | P.22.1 | Add persistent packaged-browser runtime diagnostics | ✅ Completed | Persistent startup and generation-scoped browser lifecycle logging was added for evidence collection; root cause is not yet determined. | Collect and analyze logs from the affected physical PC. |
-| P.23 | Live PRISMA auction monitoring | 🟡 In progress / partially completed | P.23.1 is complete: the default monitoring source was validated against the real public PRISMA auctions page in system-default Chrome and repeatedly normalized a matched live status. | Complete authentication if required and live-page recovery under P.23.2 and P.23.3. |
+| P.23 | Live PRISMA auction monitoring | 🟡 In progress / partially completed | P.23.1 and P.23.2 are complete: live retrieval is validated and the public page/session is safely classified before reads without credential handling or login automation. | Complete live-page recovery under P.23.3. |
 | P.23.1 | Implement live PRISMA page adapter | ✅ Completed | Real-session validation confirmed navigation, delayed table loading, active date filtering, `Marketed >= 1000`, rendered `Auction ID`/`Status` headers, deterministic row matching, `Finished` to `Completed` normalization, typed filtered-row failures, diagnostics, and managed-browser cleanup. Live DOM corrections support the current collapsed filter panel and PRISMA's rendered header row. | None for this increment. |
-| P.23.2 | Add authentication/session handling if required | ⬜ Planned | Authentication requirements are not yet integrated. | Detect requirements and add safe session handling if needed. |
+| P.23.2 | Add authentication/session handling if required | ✅ Completed | The current PRISMA auctions workflow is public. Generation-scoped validation accepts delayed public readiness and the harmless consent banner, detects login redirects/DOM signals, sanitizes diagnostics, and returns typed authentication-required or invalid-session failures. Credential persistence and login automation were intentionally not added. | None for this increment. |
 | P.23.3 | Handle timeout, unavailable page, changed DOM, and manual browser closure | ⬜ Planned | General lifecycle handling exists. | Add live-page-specific recovery and clear error reporting. |
 | P.24 | Persist monitoring results and status changes | ⬜ Planned | Persistence is not complete. | Store checks and detected status transitions safely. |
 | P.25 | Add user-visible status-change notifications | ⬜ Planned | Notifications are not implemented. | Surface meaningful status changes to the user. |
@@ -46,13 +46,14 @@
 ## Current key limitation
 
 The live adapter is implemented, is the default monitoring source, and has passed
-a real public PRISMA session in system-default Chrome. Authentication and full
-live-page recovery remain planned under P.23.2 and P.23.3.
+a real public PRISMA session in system-default Chrome. Public-session validation
+and safe authentication-required detection are complete. Full live-page recovery
+remains planned under P.23.3.
 
 ## Next recommended increment
 
-**Continue with P.23.2 authentication/session handling if required**, followed by
-P.23.3 timeout, unavailable-page, DOM-change, and manual-closure recovery.
+**Continue with P.23.3 timeout, unavailable-page, DOM-change, and manual-closure
+recovery.**
 
 ## Release target
 

@@ -12,7 +12,10 @@ from browser import (
     PrismaAuctionFilter, _PageRequest,
 )
 from auction_csv import AuctionCsvRecord
-from prisma_page import PrismaPageUnavailableError
+from prisma_page import (
+    PrismaAuthenticationRequiredError, PrismaPageUnavailableError,
+    PrismaSessionState, PrismaSessionValidator,
+)
 import browser as browser_module
 
 ORIGINAL_DETECT_EXECUTABLE = DefaultBrowserDetector.detect_executable
@@ -23,6 +26,13 @@ def default_browser(monkeypatch):
     monkeypatch.setattr(
         DefaultBrowserDetector, "detect_executable",
         lambda self: Path("C:/Browsers/default.exe"),
+    )
+    monkeypatch.setattr(
+        PrismaSessionValidator, "validate",
+        lambda self, page: PrismaSessionState(
+            "public-auctions",
+            "https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions",
+        ),
     )
 
 
@@ -218,8 +228,10 @@ class FakeBrowser:
         self.new_page_error = new_page_error
         self.new_page_block = new_page_block
         self.closed = threading.Event()
+        self.new_page_calls = 0
 
     def new_page(self):
+        self.new_page_calls += 1
         if self.new_page_block:
             self.new_page_block()
         if self.new_page_error:
@@ -436,6 +448,63 @@ def test_live_status_read_runs_on_browser_lifecycle_thread(monkeypatch):
     assert lifecycle_thread[0] is not caller_thread
     controller.stop()
     join_worker(controller)
+
+
+def test_authentication_failure_is_typed_stoppable_and_uses_one_page(monkeypatch):
+    logger = ListLogger()
+    validator = Mock()
+    validator.validate.side_effect = PrismaAuthenticationRequiredError(
+        "PRISMA authentication is required; automatic monitoring cannot continue in the public session."
+    )
+    controller = BrowserController(
+        FakePageFilter(), logger=logger, session_validator=validator
+    )
+    browser = FakeBrowser()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    generation = controller.open()
+    join_worker(controller)
+
+    result = controller.get_launch_results()[0]
+    assert result.generation == generation and not result.success
+    assert "authentication is required" in result.error
+    assert controller.state is BrowserState.IDLE
+    controller.stop()
+    assert controller.state is BrowserState.IDLE
+    assert browser.new_page_calls == 1
+    assert browser.closed.is_set()
+    assert any(
+        f"generation={generation}" in message
+        and "classification=authentication-required" in message
+        for message in logger.messages
+    )
+
+
+def test_session_diagnostics_do_not_expose_sensitive_url_values(monkeypatch):
+    logger = ListLogger()
+    validator = Mock()
+    validator.validate.return_value = PrismaSessionState(
+        "public-auctions",
+        "https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions",
+    )
+    controller = BrowserController(
+        FakePageFilter(), logger=logger, session_validator=validator
+    )
+    controller._results = SignallingQueue()
+    browser = FakeBrowser()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._results.ready.wait(2)
+    controller.stop()
+    join_worker(controller)
+
+    diagnostics = "\n".join(logger.messages).casefold()
+    assert "classification=public-auctions" in diagnostics
+    assert all(
+        secret not in diagnostics
+        for secret in ("password=representative", "token=representative", "cookie=representative")
+    )
 
 
 def test_live_status_read_requires_active_browser():
