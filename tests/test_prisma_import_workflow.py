@@ -8,6 +8,8 @@ import json
 import pandas as pd
 import pytest
 import sqlite3
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 import prisma_import_workflow as workflow
 from csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvDetectionResult, CsvFormat
@@ -46,6 +48,7 @@ def valid_workbook_bytes(path: Path) -> bytes:
     pd.DataFrame(columns=AuctionStorage.EXCEL_COLUMNS).to_excel(
         path, index=False, sheet_name="Auctions"
     )
+    AuctionStorage.apply_excel_widths(path)
     assert AuctionStorage.validate_excel(path)
     return path.read_bytes()
 
@@ -90,8 +93,12 @@ def test_malformed_rows_are_audited_without_losing_valid_rows(tmp_path):
 def test_monitoring_and_unsupported_inputs_are_rejected(tmp_path):
     monitoring = tmp_path / "monitor.csv"
     monitoring.write_text(",".join(MONITORING_CSV_COLUMNS) + "\n", encoding="utf-8")
-    with pytest.raises(PrismaWorkflowError, match="Monitoring CSV cannot"):
+    with pytest.raises(PrismaWorkflowError) as caught:
         run(monitoring, tmp_path, date(2025, 1, 1))
+    assert str(caught.value) == (
+        "Monitoring CSV cannot be imported as detailed PRISMA results. "
+        "Use Load Monitoring CSV for live monitoring."
+    )
     unknown = tmp_path / "unknown.csv"
     unknown.write_text("name,value\n", encoding="utf-8")
     with pytest.raises(PrismaWorkflowError, match="Unsupported CSV format"):
@@ -165,6 +172,49 @@ def test_exact_retry_repairs_missing_or_corrupt_output_without_mutating_rows(tmp
     assert workflow.AuctionStorage.validate_excel(output)
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
         assert connection.execute("SELECT count(*) FROM auctions").fetchone()[0] == 1
+
+
+def test_exact_retry_repairs_legacy_default_widths_without_mutating_rows(tmp_path):
+    source = write_export(tmp_path / "source.csv", [BASE])
+    initial = run(source, tmp_path, date(2025, 1, 1))
+    initial_counts = (
+        initial.processed, initial.inserted, initial.updated, initial.unchanged,
+        initial.filtered, initial.rejected, initial.audit_issue_count,
+    )
+    output = tmp_path / "result.xlsx"
+    workbook = load_workbook(output)
+    sheet = workbook["Auctions"]
+    for index in range(1, len(AuctionStorage.EXCEL_COLUMNS) + 1):
+        sheet.column_dimensions[get_column_letter(index)].width = 13
+    workbook.save(output)
+    workbook.close()
+    assert not AuctionStorage.validate_excel(output)
+
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    operations_before = storage.operations()
+    assert len(operations_before) == 1
+    operation_before = dict(operations_before[0])
+    with sqlite3.connect(storage.database_path) as connection:
+        auctions_before = connection.execute(
+            "SELECT * FROM auctions ORDER BY id"
+        ).fetchall()
+    retried = run(source, tmp_path, date(2025, 1, 1))
+    operations_after = storage.operations()
+    assert len(operations_after) == 1
+    operation_after = dict(operations_after[0])
+    with sqlite3.connect(storage.database_path) as connection:
+        auctions_after = connection.execute(
+            "SELECT * FROM auctions ORDER BY id"
+        ).fetchall()
+
+    assert retried.source_status is workflow.SourceUpdateStatus.UNCHANGED
+    assert auctions_after == auctions_before
+    assert operation_after == operation_before
+    assert (
+        retried.processed, retried.inserted, retried.updated, retried.unchanged,
+        retried.filtered, retried.rejected, retried.audit_issue_count,
+    ) == initial_counts
+    assert AuctionStorage.validate_excel(output)
 
 
 def test_header_only_export_is_accepted_as_distinct_empty_import(tmp_path):

@@ -58,7 +58,7 @@ Workflow P визначає послідовність створення, пе�
 Мінімальні елементи:
 
 - `Open Browser`;
-- `Load CSV`;
+- `Load Monitoring CSV`;
 - `Start Monitoring`;
 - `Stop Monitoring`;
 - `Status`;
@@ -720,7 +720,7 @@ Windows application. This work is intentionally not included in P.31.
 
 ### P.33. Unified PRISMA CSV import foundation
 
-Status: **Completed — P.33.1-P.33.5 are Completed**.
+Status: **Completed — P.33.1-P.33.6 are Completed**.
 
 P.33 separates two independent inputs that must never be converted into or
 silently substituted for one another.
@@ -890,9 +890,9 @@ Automatic browser downloading and authentication automation remain outside P.33.
 the workflow accepts only an explicitly selected local PRISMA Export CSV.
 
 P.33.5 adds an explicit `Import PRISMA Export` action and source-date control to
-the PySide6 UI. It is independent from `Load CSV`, which remains the Monitoring
-CSV entry point. The central contract detector rejects Monitoring, unsupported,
-and ambiguous inputs with specific English messages before detailed import.
+the PySide6 UI. It is independent from `Load Monitoring CSV`, which remains the
+Monitoring CSV entry point. The central contract detector rejects Monitoring,
+unsupported, and ambiguous inputs with specific English messages before detailed import.
 
 `prisma_import_workflow.py` is the UI-independent orchestration boundary. It
 uses the existing audited importer, reference enrichment, controlled daily
@@ -911,6 +911,46 @@ Validation evidence: focused workflow/storage/UI recovery tests pass (52 tests),
 focused importer/reference/source-policy/contract tests pass (101 tests), and
 the complete suite passes (299 tests). Production modules compile and the final
 diff passes whitespace validation.
+
+#### P.33.6. Manual validation fixes — Completed
+
+P.33.6 completes two changes identified by manual validation. The Monitoring CSV
+action is labelled `Load Monitoring CSV` consistently in the button, file dialog,
+and PRISMA-import rejection guidance without renaming its established internal
+APIs or the separate `Import PRISMA Export` action. The cumulative `Auctions`
+worksheet now receives one deterministic header-keyed set of column widths after
+pandas creates the staged workbook. Widths are verified with a numeric tolerance
+by the existing openpyxl validation boundary before atomic publication, for both
+header-only and populated output. An exact retry therefore repairs an otherwise
+valid legacy workbook with default widths from authoritative SQLite data without
+mutating auction rows or changing source-operation semantics. Microsoft Excel is
+not required.
+
+Historical Market / Storage backfill was investigated but is deliberately not
+implemented in P.33.6. Automatic backfill during normal import/update is rejected.
+Existing nonblank values must never be overwritten because their provenance and
+possible user edits are unknown. A future explicit maintenance operation may
+enrich only blank single-side rows whose direction is exactly `entry` or `exit`,
+whose retained network point is present, and for which the current reference
+catalog returns one exact side-aware canonical match. Unknown, ambiguous,
+missing-identity, and insufficient-identity rows must be skipped and audited.
+Historical bundle rows cannot be reconstructed safely because SQLite does not
+retain both original side-specific source identities. `network_point_id` must not
+be used until an authoritative mapping exists. Fuzzy, substring, TSO-based, and
+display-text guessing are prohibited.
+
+Any future historical maintenance operation must be explicit, transactional,
+idempotent, rollback-safe, and auditable at row level. Its execution surface and
+durable audit format remain product decisions. P.33.6 does not add a migration,
+GUI maintenance action, CLI, automatic backfill, database mutation, or new
+maintenance module, and it does not claim that historical rows were modified.
+
+Acceptance criteria: the UI-label fix and Excel-width fix are implemented and
+covered by focused regression tests; legacy default-width output is repairable by
+exact retry without database-row changes; the backfill safety investigation and
+its constraints are documented; implementation of an explicit historical
+maintenance backfill remains a deferred follow-up. Focused and complete tests,
+Python compilation, and whitespace validation pass.
 
 ## 6. Definition of Done
 

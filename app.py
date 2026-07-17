@@ -150,7 +150,7 @@ class PrismaMonitorApp(QMainWindow):
             tooltip="Open a PrismaFunction-managed PRISMA browser session")
         self.stop_browser_button = self._button("Stop Browser", self.stop_work)
         self._side_group(side, "BROWSER", self.open_button, self.stop_browser_button)
-        self.load_csv_button = self._button("Load CSV", self.select_csv, primary=True)
+        self.load_csv_button = self._button("Load Monitoring CSV", self.select_csv, primary=True)
         self.csv_filename = QLabel("No CSV selected")
         self.csv_filename.setObjectName("filename")
         self.csv_count = QLabel("0 records loaded")
@@ -328,7 +328,7 @@ class PrismaMonitorApp(QMainWindow):
         self.import_date.setEnabled(not self._processing_active)
 
     def select_csv(self) -> None:
-        selected, _ = QFileDialog.getOpenFileName(self, "Load auction CSV", "", "CSV files (*.csv)")
+        selected, _ = QFileDialog.getOpenFileName(self, "Load Monitoring CSV", "", "CSV files (*.csv)")
         if not selected:
             return
         try:
