@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from csv_contracts import PRISMA_EXPORT_COLUMNS, CsvFormatError
 from processor import process_csv
 
 BASE = {
@@ -21,7 +22,9 @@ BASE = {
 
 def write_csv(tmp_path: Path, rows: list[dict]) -> Path:
     path = tmp_path / "Auction_overview.csv"
-    pd.DataFrame(rows).to_csv(path, sep=";", encoding="cp1252", index=False)
+    pd.DataFrame(rows).reindex(columns=PRISMA_EXPORT_COLUMNS).to_csv(
+        path, sep=";", encoding="cp1252", index=False
+    )
     return path
 
 
@@ -40,9 +43,15 @@ def test_invalid_or_small_capacity_is_skipped(tmp_path: Path, capacity: str, uni
 
 
 def test_missing_required_column_has_english_error(tmp_path: Path) -> None:
-    row = {key: value for key, value in BASE.items() if key != "Direction"}
-    with pytest.raises(ValueError, match="CSV is missing required columns: Direction"):
-        process_csv(write_csv(tmp_path, [row]))
+    path = tmp_path / "Auction_overview.csv"
+    columns = [column for column in PRISMA_EXPORT_COLUMNS if column != "Direction"]
+    pd.DataFrame([BASE]).reindex(columns=columns).to_csv(
+        path, sep=";", encoding="cp1252", index=False
+    )
+    with pytest.raises(
+        CsvFormatError, match="PRISMA Export CSV header is incomplete; missing columns: Direction"
+    ):
+        process_csv(path)
 
 
 @pytest.mark.parametrize(("direction", "point", "point_id"), [
@@ -118,3 +127,12 @@ def test_output_shape_dates_and_prices(tmp_path: Path) -> None:
     assert set(result) == {"auction_id", "auction_date", "exit_market", "entry_market", "direction", "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type", "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours", "tariff_eur_mwh_h", "premium_eur_mwh_h", "state"}
     assert (result["auction_date"], result["flow_start"], result["flow_end"]) == ("2025-01-01T09:00:00", "2025-01-02T00:00:00", "2025-01-03T00:00:00")
     assert (result["tariff_eur_mwh_h"], result["premium_eur_mwh_h"]) == (20.0, 5.0)
+
+
+def test_cp1252_export_is_processed(tmp_path: Path) -> None:
+    result = process_csv(write_csv(tmp_path, [{**BASE, "Network Point Name Entry": "München"}]))
+    assert result[0]["network_point"] == "München"
+
+
+def test_header_only_export_is_compatible(tmp_path: Path) -> None:
+    assert process_csv(write_csv(tmp_path, [])) == []
