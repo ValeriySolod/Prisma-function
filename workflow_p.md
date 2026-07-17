@@ -720,7 +720,7 @@ Windows application. This work is intentionally not included in P.31.
 
 ### P.33. Unified PRISMA CSV import foundation
 
-Status: **In progress — P.33.1 is Completed; P.33.2-P.33.5 are Planned**.
+Status: **In progress — P.33.1-P.33.2 are Completed; P.33.3-P.33.5 are Planned**.
 
 P.33 separates two independent inputs that must never be converted into or
 silently substituted for one another.
@@ -771,14 +771,36 @@ product-type, direction, database, Excel, browser, monitoring, and UI behavior
 is unchanged; focused and complete tests pass; project Python files compile;
 and the final diff passes whitespace validation.
 
-#### P.33.2-P.33.5. Planned follow-up increments
+#### P.33.2. Complete original PRISMA export import — Completed
 
-P.33.2 will implement the agreed complete-export import workflow. P.33.3 will
-add confirmed market/storage reference data and enrichment. P.33.4 will design
-controlled daily downloading/updating. P.33.5 will complete scoped integration
-and end-to-end validation. P.33.1 does not claim full import, reference-data
-enrichment, daily updates, browser download automation, UI changes, schema
-changes, or Excel output changes.
+The detailed importer classifies every physical source row as imported,
+filtered, or rejected and reports human-readable CSV row numbers, stable reason
+codes, English messages, and invariant counts. Issues intentionally do not copy
+complete source rows. The compatibility `process_csv(path)` entry point still
+requires the exact PRISMA Export contract and returns only imported normalized
+row dictionaries.
+
+Marketed capacity supports `kWh/h`, `MWh/h` (×1000), and `kWh/d` (÷24). Valid
+values below 1000 kWh/h are filtered; empty, malformed, negative, non-finite,
+and unsupported-unit values are rejected. Entry, Exit, and Exit/Entry map to
+`entry`, `exit`, and `bundle`, using their corresponding network-point fields.
+Dates use strict `DD.MM.YYYY HH:MM` parsing and runtime must be positive. Product
+types are `WD` for runtimes through 24 hours beginning on the auction calendar
+date, `Day Ahead` for other runtimes through 24 hours, then `Month` through 31
+days, `Quarter` through 93 days, and `Year` above 93 days.
+
+Regulated tariff components and surcharge support only
+`cent/kWh/h/Runtime` (×10) and `cent/kWh/d/Runtime` (×10 ÷24), producing
+EUR/MWh/h values. An empty value/unit pair is zero. Unsupported currencies,
+including pence and halér, are explicitly rejected rather than converted or
+mislabelled as EUR.
+
+#### P.33.3-P.33.5. Planned follow-up increments
+
+P.33.3 will add confirmed market/storage reference data and enrichment. P.33.4
+will design controlled daily downloading/updating. P.33.5 will complete UI and
+end-to-end integration, including reporting import issues to users. Downloads,
+browser automation, schema changes, and monitoring changes also remain deferred.
 
 ## 6. Definition of Done
 
