@@ -5,17 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from csv_contracts import MONITORING_CSV_COLUMNS
 
-CSV_COLUMNS = (
-    "auction_id",
-    "auction_url",
-    "lot_number",
-    "item_name",
-    "expected_status",
-    "last_known_status",
-    "check_interval_seconds",
-    "enabled",
-)
+
+CSV_COLUMNS = MONITORING_CSV_COLUMNS
 
 ALLOWED_STATUSES = frozenset(
     {"Scheduled", "Open", "In Progress", "Completed", "Cancelled", "Unknown", "Error"}

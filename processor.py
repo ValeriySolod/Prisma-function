@@ -7,13 +7,11 @@ from typing import Any
 
 import pandas as pd
 
+from csv_contracts import CsvFormat, PRISMA_EXPORT_COLUMNS, require_csv_format
+
 MIN_MARKETED_CAPACITY_KWH_H = 1000.0
 DATE_FORMAT = "%d.%m.%Y %H:%M"
-REQUIRED_COLUMNS = (
-    "Auction ID", "Start of Auction", "Marketed Capacity",
-    "Unit Marketed Capacity", "Product Runtime Start",
-    "Product Runtime End", "Direction",
-)
+REQUIRED_COLUMNS = PRISMA_EXPORT_COLUMNS
 
 
 def _text(value: Any) -> str:
@@ -63,6 +61,7 @@ def _tariff_eur_mwh_h(row: pd.Series) -> float:
 
 
 def process_csv(path: Path) -> list[dict[str, Any]]:
+    require_csv_format(path, CsvFormat.PRISMA_EXPORT)
     frame = pd.read_csv(path, sep=";", encoding="cp1252", keep_default_na=False)
     missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
     if missing:

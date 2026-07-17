@@ -44,6 +44,12 @@
 | P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
 | P.31 | Modern PySide6 monitoring dashboard | ✅ Completed | Responsive light workspace and graphite sidebar, truthful summary cards, model-backed searchable/filterable auction table, browser and monitoring state badges, activity feed, accessible controls, and focused offscreen UI coverage are implemented without changing managed-browser ownership. | Complete manual Windows scaling checks at 125%, 150%, 175%, and 200%. |
 | P.32 | Windows installer and uninstaller using Inno Setup | ⬜ Planned | Installer work is intentionally outside P.31. | Add and validate a signed-ready Inno Setup installer and uninstaller workflow. |
+| P.33 | Unified PRISMA CSV import foundation | 🟡 In progress | P.33.1 establishes explicit Monitoring CSV and PRISMA Export CSV contracts and safe header-based routing. | Complete P.33.2-P.33.5 without conflating the two contracts. |
+| P.33.1 | Separate and detect both CSV contracts | ✅ Completed | Exact headers, encodings, delimiters, typed detection outcomes, duplicate rejection, and regression-safe routing are implemented and validated. | None for this increment. |
+| P.33.2 | Import complete original PRISMA exports | ⬜ Planned | The safe format boundary is available. | Define and implement the full import workflow without changing monitoring configuration. |
+| P.33.3 | Add market and storage reference enrichment | ⬜ Planned | Reference enrichment is not implemented. | Add a confirmed reference catalog and enrichment rules. |
+| P.33.4 | Add controlled daily source updates | ⬜ Planned | Automatic downloads and daily updates are not implemented. | Design safe update scheduling and source lifecycle. |
+| P.33.5 | Integrate the completed import workflow | ⬜ Planned | UI, browser download automation, persistence changes, and end-to-end import remain deferred. | Integrate and validate the agreed workflow in a later scoped increment. |
 
 ## Current key limitation
 
@@ -56,9 +62,9 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.31 is complete.** The modern desktop monitoring interface is implemented
-and covered by automated tests. P.32 (Windows installer and uninstaller using
-Inno Setup) is the next planned increment; it is not part of this change.
+**P.33.1 is complete.** The two CSV contracts now have a reusable detection and
+routing boundary. P.33.2 is the next planned import increment. P.32 remains a
+separate planned installer stage.
 
 ## Release target
 

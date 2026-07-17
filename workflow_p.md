@@ -718,6 +718,68 @@ Status: **Planned**.
 Create and validate an Inno Setup installer and uninstaller for the packaged
 Windows application. This work is intentionally not included in P.31.
 
+### P.33. Unified PRISMA CSV import foundation
+
+Status: **In progress — P.33.1 is Completed; P.33.2-P.33.5 are Planned**.
+
+P.33 separates two independent inputs that must never be converted into or
+silently substituted for one another.
+
+#### CSV contracts
+
+The **Monitoring CSV** configures live auction monitoring. It is UTF-8,
+comma-delimited, and has exactly these columns in this order:
+`auction_id`, `auction_url`, `lot_number`, `item_name`, `expected_status`,
+`last_known_status`, `check_interval_seconds`, `enabled`. Existing row
+validation in `load_auction_csv()` remains authoritative and backward
+compatible. A UTF-8 BOM is not accepted by the established contract.
+
+The **PRISMA Export CSV** is a raw export downloaded from PRISMA. It is cp1252,
+semicolon-delimited, and has exactly these columns in this order:
+`Auction ID`, `Start of Auction`, `Network Point Name Exit`,
+`Network Point EIC Exit`, `Network Point Type Exit`, `Network Point ID Exit`,
+`Network Point Name Entry`, `Network Point EIC Entry`,
+`Network Point Type Entry`, `Network Point ID Entry`,
+`Network Point Name Exit/Entry`, `Network Point EIC Exit/Entry`,
+`Network Point ID Exit/Entry`, `Published capacity`,
+`Published capacity unit`, `Marketable Capacity`,
+`Unit Marketable Capacity`, `Marketed Capacity`, `Unit Marketed Capacity`,
+`Regulated Tariff Exit TSO`, `Unit Regulated Exit Capacity Tariff`,
+`Regulated Tariff Entry TSO`, `Unit Regulated Entry Capacity Tariff`,
+`Surcharge`, `Unit Surcharge`, `Product Runtime Start`, `Product Runtime End`,
+`Capacity Category`, `TSO Exit`, `TSO EIC Exit`, `TSO Entry`, `TSO EIC Entry`,
+`Direction`, `Type of Gas`, `State`. A BOM is not part of the confirmed export
+contract.
+
+#### P.33.1. Separate and detect both CSV contracts
+
+Status: **Completed**.
+
+P.33.1 adds a single source of truth for both exact headers and a public typed
+detection/routing API. Detection reads only the header, uses structure rather
+than the filename, returns `monitoring`, `prisma_export`, `unsupported`, or
+`ambiguous`, and rejects incomplete headers, duplicates, wrong delimiters,
+empty files, and unknown formats with specific English errors. Ambiguity is an
+explicit outcome for API stability, although it is structurally impossible for
+the current exact, disjoint headers. `process_csv()` explicitly requires a
+PRISMA export; `load_auction_csv()` keeps its existing monitoring validation.
+
+Definition of Done for P.33.1: the real repository export confirms the complete
+PRISMA header; both exact contracts and reading rules have one source of truth;
+no partial or fallback detection occurs; existing capacity, tariff, surcharge,
+product-type, direction, database, Excel, browser, monitoring, and UI behavior
+is unchanged; focused and complete tests pass; project Python files compile;
+and the final diff passes whitespace validation.
+
+#### P.33.2-P.33.5. Planned follow-up increments
+
+P.33.2 will implement the agreed complete-export import workflow. P.33.3 will
+add confirmed market/storage reference data and enrichment. P.33.4 will design
+controlled daily downloading/updating. P.33.5 will complete scoped integration
+and end-to-end validation. P.33.1 does not claim full import, reference-data
+enrichment, daily updates, browser download automation, UI changes, schema
+changes, or Excel output changes.
+
 ## 6. Definition of Done
 
 Етап вважається завершеним, коли:
