@@ -44,12 +44,12 @@
 | P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
 | P.31 | Modern PySide6 monitoring dashboard | ✅ Completed | Responsive light workspace and graphite sidebar, truthful summary cards, model-backed searchable/filterable auction table, browser and monitoring state badges, activity feed, accessible controls, and focused offscreen UI coverage are implemented without changing managed-browser ownership. | Complete manual Windows scaling checks at 125%, 150%, 175%, and 200%. |
 | P.32 | Windows installer and uninstaller using Inno Setup | ⬜ Planned | Installer work is intentionally outside P.31. | Add and validate a signed-ready Inno Setup installer and uninstaller workflow. |
-| P.33 | Unified PRISMA CSV import foundation | 🟡 In progress | P.33.1 establishes explicit CSV contracts; P.33.2 adds a complete, auditable original-export importer; P.33.3 adds deterministic market/storage enrichment; P.33.4 adds controlled daily local-source lifecycle policy. | Complete P.33.5 end-to-end integration without conflating the two contracts. |
+| P.33 | Unified PRISMA CSV import foundation | ✅ Completed | P.33.1-P.33.5 provide separate contracts, audited import, recoverable cumulative persistence, atomic deterministic output, and a non-blocking PySide6 import path. | Manual Windows UI and file-lock smoke testing remains recommended. |
 | P.33.1 | Separate and detect both CSV contracts | ✅ Completed | Exact headers, encodings, delimiters, typed detection outcomes, duplicate rejection, and regression-safe routing are implemented and validated. | None for this increment. |
-| P.33.2 | Import complete original PRISMA exports | ✅ Completed | Typed imported/filtered/rejected results account for every source row; supported capacity and EUR tariff conversions, direction/network selection, strict dates, and product-duration rules are validated. | UI issue reporting and integration remain in P.33.5. |
+| P.33.2 | Import complete original PRISMA exports | ✅ Completed | Typed imported/filtered/rejected results account for every source row; supported capacity and EUR tariff conversions, direction/network selection, strict dates, and product-duration rules are validated. | None. |
 | P.33.3 | Add market and storage reference enrichment | ✅ Completed | Direction-authoritative enrichment exposes side-specific canonical names and market/storage classifications in detailed records; required-side mismatches are typed rejections, irrelevant sides are preserved but ignored, and the 18-field normalized/process_csv contract remains unchanged. | Expand the catalog only when additional authoritative mappings are confirmed. |
-| P.33.4 | Add controlled daily source updates | ✅ Completed | Immutable typed state/results, exact-byte SHA-256 identity, authoritative import validation, stable apply/unchanged/reject decisions, and a pure timezone-aware daily due policy are implemented for caller-supplied local files. | None for this increment; automatic downloading and integration remain in P.33.5. |
-| P.33.5 | Integrate the completed import workflow | ⬜ Planned | UI, browser download automation, persistence changes, and end-to-end import remain deferred. | Integrate and validate the agreed workflow in a later scoped increment. |
+| P.33.4 | Add controlled daily source updates | ✅ Completed | Immutable typed state/results, exact-byte SHA-256 identity, authoritative import validation, stable apply/unchanged/reject decisions, and a pure timezone-aware daily due policy are implemented for caller-supplied local files. | None. |
+| P.33.5 | Integrate the completed import workflow | ✅ Completed | SQLite-led recovery, atomic Excel publication, exact-retry repair, truthful stored summaries, deferred shutdown, and source-date guidance are implemented and verified by the 299-test suite. | Manual Windows UI and file-lock smoke testing remains recommended. |
 
 ## Current key limitation
 
@@ -62,11 +62,10 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.33.4 is complete.** Daily local PRISMA sources can now be evaluated through
-a deterministic immutable lifecycle policy without UI, storage, browser, or
-monitoring changes. P.33 remains in progress: P.33.5 automatic browser download
-and end-to-end persistence/UI integration is the next recommended import
-increment. P.32 remains a separate planned installer stage.
+**P.33 is complete.** Full original PRISMA Export CSV files have a separate,
+audited, enriched, cumulative local-file import path through the PySide6 UI,
+without changing Monitoring CSV or live-monitoring semantics. P.32 remains a
+separate planned installer stage.
 
 ## Release target
 

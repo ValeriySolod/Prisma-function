@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -22,6 +23,8 @@ from prisma_page import (
     PrismaPageStructureError,
     PrismaPageUnavailableError,
 )
+from prisma_import_workflow import PrismaWorkflowResult
+from prisma_source_updates import SourceUpdateStatus
 from version import APP_DISPLAY_NAME, __version__
 from ui_components import APP_STYLE, ArrowComboBox
 
@@ -38,6 +41,10 @@ def window(qt_app, monkeypatch):
     widget = app.PrismaMonitorApp()
     yield widget, browser
     widget._is_closing = True
+    widget._monitoring_thread = None
+    for worker in widget._processing_threads:
+        worker.join(timeout=2)
+    widget._processing_threads.clear()
     widget.close()
 
 
@@ -475,24 +482,79 @@ def test_known_monitoring_failure_messages_are_actionable(error, expected):
 
 def test_processing_success_preserves_full_statistics(window, monkeypatch):
     widget, _ = window
-    monkeypatch.setattr(app, "process_csv", Mock(return_value=[{"auction_id": "A1"}]))
-    storage = Mock()
-    storage.upsert.return_value = {
-        "processed": 4,
-        "inserted": 1,
-        "updated": 2,
-        "unchanged": 1,
-    }
-    storage.export_excel.return_value = Path("result.xlsx")
-    monkeypatch.setattr(app, "AuctionStorage", Mock(return_value=storage))
-
-    widget._process_worker(Path("input.csv"))
-
-    assert widget.status.text() == (
-        "Done. Processed: 4; inserted: 1; updated: 2; unchanged: 1. "
-        "Result: result.xlsx"
+    workflow_result = PrismaWorkflowResult(
+        4, 1, 2, 1, 0, 0, (), Path("result.xlsx"),
+        SourceUpdateStatus.APPLIED, "accepted",
     )
-    assert "CSV processing completed" in widget.activity_list.item(0).text()
+    monkeypatch.setattr(
+        app, "run_prisma_import_workflow", Mock(return_value=workflow_result)
+    )
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=("input.csv", "CSV"))
+    )
+
+    finished = QSignalSpy(widget.signals.processing_finished)
+    widget.start_processing()
+    assert finished.count() == 1 or finished.wait(2000)
+    QApplication.processEvents()
+
+    assert finished.count() == 1
+    outcome = finished.at(0)[0]
+    assert outcome.result is workflow_result
+    assert outcome.error is None
+    assert widget.status.text() == (
+        "accepted Processed: 4; inserted: 1; updated: 2; unchanged: 1; "
+        "filtered: 0; rejected: 0; audit issues: 0. Output: result.xlsx"
+    )
+    assert "PRISMA import completed" in widget.activity_list.item(0).text()
+    assert not widget._processing_active
+    assert widget._active_processing_thread is None
+    assert not widget._processing_threads
+    assert widget.process_button.isEnabled()
+
+    widget._processing_finished(app.ProcessingOutcome(workflow_result, None, 0))
+    assert widget.status.text().startswith("accepted Processed: 4")
+
+
+def test_import_processing_success_and_error_restore_controls(window, monkeypatch):
+    widget, _ = window
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=("export.csv", "CSV"))
+    )
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): pass
+        def is_alive(self): return False
+
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    widget.start_processing()
+    assert widget._processing_active
+    assert not widget.process_button.isEnabled()
+    assert "Importing" in widget.status.text()
+
+    widget._processing_failed("Unsupported CSV format.", None)
+    assert not widget._processing_active
+    assert widget.process_button.isEnabled()
+    assert "Unsupported CSV format" in widget.status.text()
+
+
+def test_monitoring_load_remains_independent_from_prisma_import(window, monkeypatch):
+    widget, _ = window
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=("monitoring.csv", "CSV"))
+    )
+    loader = Mock(return_value=[record()])
+    monkeypatch.setattr(app, "load_auction_csv", loader)
+    workflow = Mock()
+    monkeypatch.setattr(app, "run_prisma_import_workflow", workflow)
+
+    widget.select_csv()
+
+    loader.assert_called_once_with("monitoring.csv")
+    workflow.assert_not_called()
+    assert widget.table_model.rowCount() == 1
 
 
 def test_clear_activity_does_not_touch_logs(window):
@@ -502,7 +564,7 @@ def test_clear_activity_does_not_touch_logs(window):
     assert widget.activity_list.count() == 0
 
 
-def test_close_stops_managed_browser_and_joins_all_live_workers(window):
+def test_close_defers_without_blocking_until_live_workers_finish(window, monkeypatch):
     widget, browser = window
     widget._is_closing = True
     stop_event = threading.Event()
@@ -514,11 +576,47 @@ def test_close_stops_managed_browser_and_joins_all_live_workers(window):
     widget._monitoring_thread = monitoring_worker
     widget._processing_threads = {processing_worker}
     close_event = Mock()
+    retry_close = Mock()
+    monkeypatch.setattr(QMessageBox, "question", Mock(return_value=QMessageBox.Yes))
+    monkeypatch.setattr(app.QTimer, "singleShot", Mock(side_effect=lambda _, callback: retry_close(callback)))
 
     widget.closeEvent(close_event)
 
     assert stop_event.is_set()
     browser.stop.assert_called_once_with()
-    monitoring_worker.join.assert_called_once_with()
-    processing_worker.join.assert_called_once_with()
-    close_event.accept.assert_called_once_with()
+    monitoring_worker.join.assert_not_called()
+    processing_worker.join.assert_not_called()
+    assert widget.status.text() == "Closing; a background import is finishing safely."
+    close_event.ignore.assert_called_once_with()
+    assert retry_close.call_count == 1
+
+    monitoring_worker.is_alive.return_value = False
+    processing_worker.is_alive.return_value = False
+    finished_event = Mock()
+    widget.closeEvent(finished_event)
+    browser.stop.assert_called_once_with()
+    finished_event.accept.assert_called_once_with()
+
+
+def test_close_does_not_block_on_a_genuinely_running_import(window, monkeypatch):
+    widget, _ = window
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, name="blocked-import")
+    worker.start()
+    widget._processing_threads = {worker}
+    widget._active_processing_thread = worker
+    widget._processing_active = True
+    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
+    event = Mock()
+    try:
+        started = time.monotonic()
+        widget.closeEvent(event)
+        assert time.monotonic() - started < 0.5
+        event.ignore.assert_called_once_with()
+        assert widget.status.text() == "Closing; a background import is finishing safely."
+    finally:
+        release.set()
+        worker.join(timeout=2)
+    final_event = Mock()
+    widget.closeEvent(final_event)
+    final_event.accept.assert_called_once_with()
