@@ -720,7 +720,7 @@ Windows application. This work is intentionally not included in P.31.
 
 ### P.33. Unified PRISMA CSV import foundation
 
-Status: **In progress — P.33.1-P.33.2 are Completed; P.33.3-P.33.5 are Planned**.
+Status: **In progress — P.33.1-P.33.3 are Completed; P.33.4-P.33.5 are Planned**.
 
 P.33 separates two independent inputs that must never be converted into or
 silently substituted for one another.
@@ -795,12 +795,52 @@ EUR/MWh/h values. An empty value/unit pair is zero. Unsupported currencies,
 including pence and halér, are explicitly rejected rather than converted or
 mislabelled as EUR.
 
-#### P.33.3-P.33.5. Planned follow-up increments
+#### P.33.3. Market and storage reference enrichment — Completed
 
-P.33.3 will add confirmed market/storage reference data and enrichment. P.33.4
-will design controlled daily downloading/updating. P.33.5 will complete UI and
-end-to-end integration, including reporting import issues to users. Downloads,
-browser automation, schema changes, and monitoring changes also remain deferred.
+P.33.3 adds `prisma_references.py`, a UI-independent immutable catalog of stable
+canonical references, explicit classifications (`market` or `storage`), and
+side-specific aliases. Lookup strips surrounding whitespace and compares case
+insensitively. It performs no fuzzy, substring, or inferred matching. Catalog
+construction rejects blank, surrounding-whitespace, duplicate, or conflicting
+canonical names and duplicate/conflicting side/alias pairs, both within one
+entry and across entries.
+
+Semantic P.33.2 imports are enriched only after parsing and validation succeed.
+The normalized source `Direction` remains authoritative: `entry` requires the
+entry-side value, `exit` requires the exit-side value, and `bundle` requires
+both. A populated side irrelevant to that direction is preserved in `raw_row`
+but ignored; it cannot alter direction, network point, or enrichment. A missing
+required side or unknown required alias rejects the row with a typed enrichment
+reason code plus field, side, and unchanged source-value context.
+
+Successful detailed records retain the unchanged 18-field normalized row, an
+immutable copy of the complete raw row, the starting physical source line, and
+optional side-specific `exit_reference` / `entry_reference` values. Each
+resolved reference contains its canonical name, `market` or `storage`
+classification, and side. `process_csv()` and normalized row dictionary keys
+remain backward compatible; legacy `exit_market` and `entry_market` names are
+preserved for P.33.2 compatibility even when the classified reference is a
+storage facility.
+
+The deliberately small seed catalog contains the exact five market mappings
+from `mapping.csv` (BG/HTP, BG/RS, CEGH/MGP, CEGH/PSV, and CEGH/SK) and the VGS
+Storage Hub alias evidenced by `Auction_overview.csv`. It is not represented as
+a complete PRISMA catalog. Extend it only by adding confirmed `PrismaReference`
+entries and explicit side aliases to `DEFAULT_PRISMA_REFERENCES`; constructor
+validation prevents ambiguous additions.
+
+Validation evidence covers direction authority, side mismatches, classified
+market/storage references, bundles, exact normalized aliases, unknown/missing
+required sides, intra-entry and cross-entry alias conflicts, raw/source-line
+preservation, compatibility, and deterministic ordering.
+`python -m compileall .` and `git diff --check` also pass.
+
+#### P.33.4-P.33.5. Planned follow-up increments
+
+P.33.4 will design controlled daily downloading/updating. P.33.5 will complete
+UI and end-to-end integration, including reporting import issues to users.
+Downloads, browser automation, schema changes, and monitoring changes remain
+deferred.
 
 ## 6. Definition of Done
 

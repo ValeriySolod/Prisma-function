@@ -14,13 +14,20 @@ from processor import (
     import_prisma_export,
     process_csv,
 )
+from prisma_references import (
+    PrismaReference,
+    PrismaReferenceCatalog,
+    ReferenceAlias,
+    ReferenceClassification,
+    ReferenceSide,
+)
 
 BASE = {
     "Auction ID": "000123456789012345", "Start of Auction": "01.01.2025 09:00",
     "Marketed Capacity": "1000", "Unit Marketed Capacity": "kWh/h",
     "Product Runtime Start": "02.01.2025 00:00", "Product Runtime End": "03.01.2025 00:00",
-    "Direction": "Entry", "Network Point Name Entry": "Entry point",
-    "Network Point ID Entry": "ENTRY-ID", "Network Point Name Exit": "Exit point",
+    "Direction": "Entry", "Network Point Name Entry": "VGS Storage Hub (4290)",
+    "Network Point ID Entry": "ENTRY-ID", "Network Point Name Exit": "",
     "Network Point ID Exit": "EXIT-ID", "Network Point Name Exit/Entry": "Bundle point",
     "Network Point ID Exit/Entry": "BUNDLE-ID", "Regulated Tariff Exit TSO": "1,25",
     "Unit Regulated Exit Capacity Tariff": "cent/kWh/h/Runtime",
@@ -57,12 +64,21 @@ def test_detailed_result_classifies_every_row_and_preserves_id(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(("direction", "normalized", "point", "point_id"), [
-    ("Entry", "entry", "Entry point", "ENTRY-ID"),
-    ("Exit", "exit", "Exit point", "EXIT-ID"),
+    ("Entry", "entry", "VGS Storage Hub (4290)", "ENTRY-ID"),
+    ("Exit", "exit", "VGS Storage Hub (4290)", "EXIT-ID"),
     ("Exit/Entry", "bundle", "Bundle point", "BUNDLE-ID"),
 ])
 def test_all_directions_select_their_own_network_point(tmp_path: Path, direction: str, normalized: str, point: str, point_id: str) -> None:
-    row = process_csv(write_csv(tmp_path, [{**BASE, "Direction": direction}]))[0]
+    source = {**BASE, "Direction": direction}
+    if direction == "Entry":
+        source["Network Point Name Exit"] = ""
+    elif direction == "Exit":
+        source["Network Point Name Exit"] = "VGS Storage Hub (4290)"
+        source["Network Point Name Entry"] = ""
+    else:
+        source["Network Point Name Exit"] = "VGS Storage Hub (4290)"
+        source["Network Point Name Entry"] = "VGS Storage Hub (4290)"
+    row = process_csv(write_csv(tmp_path, [source]))[0]
     assert (row["direction"], row["network_point"], row["network_point_id"]) == (normalized, point, point_id)
 
 
@@ -219,7 +235,11 @@ def test_embedded_newline_uses_record_starting_physical_line(tmp_path: Path) -> 
     path = write_csv(tmp_path, [{**BASE, "Network Point Name Entry": "München\nSouth"}])
     with path.open("a", encoding="cp1252", newline="") as csv_file:
         csv.writer(csv_file, delimiter=";", lineterminator="\n").writerow(["too", "few"])
-    result = import_prisma_export(path)
+    catalog = PrismaReferenceCatalog((PrismaReference(
+        "München South", ReferenceClassification.MARKET,
+        (ReferenceAlias("München\nSouth", ReferenceSide.ENTRY),),
+    ),))
+    result = import_prisma_export(path, reference_catalog=catalog)
     assert result.rows[0]["network_point"] == "München\nSouth"
     assert result.issues[0].source_row_number == 4
 
@@ -262,9 +282,14 @@ def test_process_csv_compatibility_and_output_keys(tmp_path: Path) -> None:
 
 
 def test_cp1252_text_iso_dates_and_numeric_prices_are_preserved(tmp_path: Path) -> None:
-    row = process_csv(
-        write_csv(tmp_path, [{**BASE, "Network Point Name Entry": "München"}])
-    )[0]
+    catalog = PrismaReferenceCatalog((PrismaReference(
+        "München", ReferenceClassification.MARKET,
+        (ReferenceAlias("München", ReferenceSide.ENTRY),),
+    ),))
+    row = import_prisma_export(
+        write_csv(tmp_path, [{**BASE, "Network Point Name Entry": "München"}]),
+        reference_catalog=catalog,
+    ).rows[0]
     assert row["network_point"] == "München"
     assert (row["auction_date"], row["flow_start"], row["flow_end"]) == (
         "2025-01-01T09:00:00",
