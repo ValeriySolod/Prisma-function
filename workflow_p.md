@@ -720,7 +720,7 @@ Windows application. This work is intentionally not included in P.31.
 
 ### P.33. Unified PRISMA CSV import foundation
 
-Status: **In progress — P.33.1-P.33.4 are Completed; P.33.5 is Planned**.
+Status: **Completed — P.33.1-P.33.5 are Completed**.
 
 P.33 separates two independent inputs that must never be converted into or
 silently substituted for one another.
@@ -864,18 +864,53 @@ offsets.
 
 P.33.4 does not change `MonitoringScheduler`, `AuctionStorage`, SQLite schemas,
 the UI, or source files. It adds no threads, browser automation, downloads, or
-persistence. Automatic browser downloading and end-to-end persistence/UI
-integration, including user-facing issue reporting, remain deferred to P.33.5.
+persistence. End-to-end persistence/UI integration and user-facing issue
+reporting are completed in P.33.5. Automatic downloading remains outside the
+confirmed local-file import scope.
 
 Validation evidence: focused lifecycle policy tests, affected processor/storage/
 scheduler contract tests, the complete pytest suite, Python source compilation,
 and `git diff --check` pass for this increment.
 
-#### P.33.5. Planned end-to-end integration
+#### P.33.5. Integrate the completed import workflow — Completed
 
-Integrate the completed import and source-update policies with persistence and
-the UI, including automatic browser downloading and reporting import issues to
-users.
+SQLite is the authoritative source-operation ledger. Each operation is identified
+by source date, exact-byte SHA-256 digest, and a generated operation ID. A pending
+record is durable before auction mutation; auction changes, persisted summary
+metadata, and the `data_committed` transition are one transaction. The cumulative
+workbook is generated under a unique name in its destination directory, closed,
+validated, and atomically replaced before the operation becomes `accepted`.
+Failures retain a recoverable ledger state and never overwrite a prior workbook;
+a conflicting same-date digest is blocked until recovery. Exact retries report
+the stored accepted summary and regenerate a missing or invalid workbook from
+SQLite without changing auction rows. Legacy accepted-state JSON remains readable
+when no ledger exists, but SQLite owns all new lifecycle decisions.
+
+Automatic browser downloading and authentication automation remain outside P.33.5;
+the workflow accepts only an explicitly selected local PRISMA Export CSV.
+
+P.33.5 adds an explicit `Import PRISMA Export` action and source-date control to
+the PySide6 UI. It is independent from `Load CSV`, which remains the Monitoring
+CSV entry point. The central contract detector rejects Monitoring, unsupported,
+and ambiguous inputs with specific English messages before detailed import.
+
+`prisma_import_workflow.py` is the UI-independent orchestration boundary. It
+uses the existing audited importer, reference enrichment, controlled daily
+source policy, SQLite operation transaction, and atomic Excel export. Parsing,
+enrichment, and update rules are not duplicated in the UI.
+
+Long-running work executes outside the Qt GUI thread. Qt signals restore the
+controls on success or failure, while status and activity report processed,
+inserted, updated, unchanged, filtered, rejected/audit issue counts, issue
+details, and output destination. Browser ownership, monitoring, scheduler,
+search/filter/table counters, shutdown, and Monitoring CSV semantics remain
+unchanged. Automatic downloading, authentication automation, and schema
+redesign are outside this completed local-file integration scope.
+
+Validation evidence: focused workflow/storage/UI recovery tests pass (52 tests),
+focused importer/reference/source-policy/contract tests pass (101 tests), and
+the complete suite passes (299 tests). Production modules compile and the final
+diff passes whitespace validation.
 
 ## 6. Definition of Done
 

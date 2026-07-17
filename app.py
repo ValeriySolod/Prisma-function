@@ -3,16 +3,18 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QDate, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QDateEdit,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -38,7 +40,7 @@ from prisma_page import (
     PrismaPageStructureError,
     PrismaPageUnavailableError,
 )
-from processor import process_csv
+from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
@@ -46,7 +48,6 @@ from runtime_logging import (
     safe_log,
 )
 from scheduler import MonitoringScheduler
-from storage import AuctionStorage
 from ui_components import (
     APP_STYLE,
     ArrowComboBox,
@@ -60,12 +61,19 @@ from version import APP_DISPLAY_NAME, __version__
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR, RESULT_DIR = APP_DIR / "data", APP_DIR / "data" / "result"
 DATABASE_PATH = DATA_DIR / "prisma_monitor.db"
+IMPORT_STATE_PATH = DATA_DIR / "prisma_import_state.json"
 DEFAULT_MONITORING_INTERVAL_SECONDS = 30.0
 
 
+@dataclass(frozen=True)
+class ProcessingOutcome:
+    result: PrismaWorkflowResult | None
+    error: str | None
+    generation: int
+
+
 class WorkerSignals(QObject):
-    processing_succeeded = Signal(str)
-    processing_failed = Signal(str)
+    processing_finished = Signal(object)
     monitoring_results = Signal(object)
     monitoring_finished = Signal(object)
 
@@ -87,9 +95,12 @@ class PrismaMonitorApp(QMainWindow):
         self._monitoring_thread: threading.Thread | None = None
         self._monitoring_stop_event: threading.Event | None = None
         self._processing_threads: set[threading.Thread] = set()
+        self._active_processing_thread: threading.Thread | None = None
+        self._processing_active = False
+        self._processing_generation = 0
+        self._shutdown_started = False
         self.signals = WorkerSignals(self)
-        self.signals.processing_succeeded.connect(self._processing_succeeded)
-        self.signals.processing_failed.connect(self._processing_failed)
+        self.signals.processing_finished.connect(self._processing_finished)
         self.signals.monitoring_results.connect(self._monitoring_results)
         self.signals.monitoring_finished.connect(self._monitoring_finished)
         self._browser_timer = QTimer(self)
@@ -148,7 +159,24 @@ class PrismaMonitorApp(QMainWindow):
         self.stop_monitoring_button = self._button("Stop Monitoring", self.stop_monitoring)
         self._side_group(side, "MONITORING", self.start_monitoring_button, self.stop_monitoring_button)
         side.addStretch()
-        self.process_button = self._button("Process CSV", self.start_processing, sidebar=True)
+        self.import_date = QDateEdit(QDate.currentDate())
+        self.import_date.setCalendarPopup(True)
+        self.import_date.setDisplayFormat("yyyy-MM-dd")
+        self.import_date.setAccessibleName("PRISMA export source date")
+        self.import_date_label = QLabel("PRISMA EXPORT DATE")
+        self.import_date_label.setObjectName("subtitle")
+        source_date_help = (
+            "Identifies the daily PRISMA source and is used for controlled "
+            "update and exact-retry validation."
+        )
+        self.import_date_label.setToolTip(source_date_help)
+        self.import_date.setToolTip(source_date_help)
+        self.process_button = self._button(
+            "Import PRISMA Export", self.start_processing, sidebar=True,
+            tooltip="Import a complete original PRISMA Export CSV"
+        )
+        side.addWidget(self.import_date_label)
+        side.addWidget(self.import_date)
         self.open_result_button = self._button("Open Result", self.open_result, sidebar=True)
         side.addWidget(self.process_button)
         side.addWidget(self.open_result_button)
@@ -296,7 +324,8 @@ class PrismaMonitorApp(QMainWindow):
         self.load_csv_button.setEnabled(not monitoring)
         self.start_monitoring_button.setEnabled(self._browser_ready and has_records and not monitoring)
         self.stop_monitoring_button.setEnabled(monitoring)
-        self.process_button.setEnabled(bool(self._auction_records))
+        self.process_button.setEnabled(not self._processing_active)
+        self.import_date.setEnabled(not self._processing_active)
 
     def select_csv(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "Load auction CSV", "", "CSV files (*.csv)")
@@ -527,52 +556,101 @@ class PrismaMonitorApp(QMainWindow):
         self._add_activity("Browser stopped")
 
     def start_processing(self) -> None:
-        source = Path(self.csv_path.text())
-        if not source.is_file():
-            QMessageBox.warning(
-                self, "CSV Not Selected", "Load a CSV file first."
-            )
+        if self._processing_active:
             return
-        self.process_button.setEnabled(False)
-        self.status.setText("Processing CSV…")
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Import PRISMA Export CSV", "", "CSV files (*.csv)"
+        )
+        if not selected:
+            return
+        source = Path(selected)
+        self._processing_active = True
+        self.status.setText("Importing PRISMA Export CSV…")
+        self._add_activity(f"PRISMA import started: {source.name}")
+        self._update_controls()
+        selected_date = self.import_date.date().toPython()
+        self._processing_generation += 1
+        generation = self._processing_generation
         thread = threading.Thread(
             target=self._process_worker,
-            args=(source,),
+            args=(source, selected_date, generation),
             daemon=False,
             name="prisma-processing",
         )
         self._processing_threads.add(thread)
-        thread.start()
-
-    def _process_worker(self, source: Path) -> None:
+        self._active_processing_thread = thread
         try:
-            rows = process_csv(source)
-            storage = AuctionStorage(DATABASE_PATH)
-            stats = storage.upsert(rows)
-            result = storage.export_excel(RESULT_DIR / "prisma_auctions.xlsx")
-            self.signals.processing_succeeded.emit(
-                f"Done. Processed: {stats['processed']}; "
-                f"inserted: {stats['inserted']}; updated: {stats['updated']}; "
-                f"unchanged: {stats['unchanged']}. Result: {result.name}"
+            thread.start()
+        except Exception as exc:
+            self._processing_threads.discard(thread)
+            self._processing_active = False
+            self._update_controls()
+            self._processing_finished(ProcessingOutcome(None, str(exc), generation))
+
+    def _process_worker(self, source: Path, source_date=None, generation: int = 0) -> None:
+        try:
+            result = run_prisma_import_workflow(
+                source,
+                source_date=source_date or datetime.now().date(),
+                evaluated_at=datetime.now().astimezone(),
+                database_path=DATABASE_PATH,
+                state_path=IMPORT_STATE_PATH,
+                output_path=RESULT_DIR / "prisma_auctions.xlsx",
+            )
+            self.signals.processing_finished.emit(
+                ProcessingOutcome(result, None, generation)
             )
         except Exception as exc:
-            self.signals.processing_failed.emit(str(exc))
+            self.signals.processing_finished.emit(
+                ProcessingOutcome(None, str(exc), generation)
+            )
 
-    def _processing_succeeded(self, text: str) -> None:
-        if not self._is_closing:
-            self.status.setText(text)
-            self.process_button.setEnabled(True)
-            self._add_activity("CSV processing completed")
+    def _processing_finished(self, outcome: ProcessingOutcome) -> None:
+        if outcome.generation != self._processing_generation:
+            return
+        if outcome.error is not None:
+            self._processing_failed(outcome.error, None)
+        elif outcome.result is not None:
+            self._processing_succeeded(outcome.result, None)
 
-    def _processing_failed(self, error: str) -> None:
-        if not self._is_closing:
+    def _finish_processing(self, thread: threading.Thread | None) -> bool:
+        if thread is None:
+            thread = self._active_processing_thread
+        if thread is not None and thread is not self._active_processing_thread:
+            return False
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.1)
+        if thread is not None and not thread.is_alive():
+            self._processing_threads.discard(thread)
+        self._active_processing_thread = None
+        self._processing_active = False
+        self._update_controls()
+        return True
+
+    def _processing_succeeded(
+        self, result: PrismaWorkflowResult, thread: threading.Thread | None
+    ) -> None:
+        if not self._is_closing and self._finish_processing(thread):
+            self.status.setText(result.summary())
+            self._add_activity(
+                f"PRISMA import completed: {result.processed} processed, "
+                f"{len(result.issues)} audit issues"
+            )
+            for issue in result.issues[:5]:
+                self._add_activity(
+                    f"Row {issue.source_row_number}: {issue.status.value} — {issue.message}"
+                )
+
+    def _processing_failed(
+        self, error: str, thread: threading.Thread | None
+    ) -> None:
+        if not self._is_closing and self._finish_processing(thread):
             safe_log(self._logger, logging.ERROR, "Processing failed: %s", error)
             self._show_error(
                 "Processing Error",
-                "CSV processing failed. Check the log for details.",
+                f"PRISMA import failed: {error}",
             )
-            self.status.setText("Processing failed")
-            self.process_button.setEnabled(True)
+            self.status.setText(f"PRISMA import failed: {error}")
 
     def open_result(self) -> None:
         result = RESULT_DIR / "prisma_auctions.xlsx"
@@ -593,7 +671,7 @@ class PrismaMonitorApp(QMainWindow):
         QMessageBox.critical(self, title, message)
 
     def closeEvent(self, event) -> None:
-        if not self._is_closing and self._monitoring_thread is not None:
+        if not self._shutdown_started and self._monitoring_thread is not None:
             answer = QMessageBox.question(
                 self,
                 "Close PrismaFunction",
@@ -604,18 +682,25 @@ class PrismaMonitorApp(QMainWindow):
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
-        self._is_closing = True
-        self._browser_timer.stop()
-        self._active_browser_launch = None
-        if self._monitoring_stop_event is not None:
-            self._monitoring_stop_event.set()
-        self.browser.stop()
+        if not self._shutdown_started:
+            self._shutdown_started = True
+            self._is_closing = True
+            self._browser_timer.stop()
+            self._active_browser_launch = None
+            if self._monitoring_stop_event is not None:
+                self._monitoring_stop_event.set()
+            self.browser.stop()
         threads = (
             [self._monitoring_thread] if self._monitoring_thread else []
         ) + list(self._processing_threads)
-        for thread in threads:
-            if thread is not threading.current_thread() and thread.is_alive():
-                thread.join()
+        if any(
+            thread is not threading.current_thread() and thread.is_alive()
+            for thread in threads
+        ):
+            self.status.setText("Closing; a background import is finishing safely.")
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
         event.accept()
 
 
