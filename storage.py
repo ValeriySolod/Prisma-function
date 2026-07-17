@@ -10,6 +10,7 @@ from typing import Any
 
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 
 class AuctionStorageError(RuntimeError):
@@ -24,6 +25,25 @@ class AuctionStorage:
         "Tariff, EUR/MWh/h", "Premium, EUR/MWh/h", "Auction ID",
         "TSO Exit", "TSO Entry", "Status",
     )
+    EXCEL_COLUMN_WIDTHS = {
+        "Auction Date": 21,
+        "Exit Market/Storage": 22,
+        "Entry Market/Storage": 22,
+        "Capacity Type": 15,
+        "Network Point Name": 36,
+        "Product Type": 14,
+        "Flow Start": 21,
+        "Flow End": 21,
+        "Booked Capacity, kWh/h": 24,
+        "Runtime Hours": 15,
+        "Tariff, EUR/MWh/h": 20,
+        "Premium, EUR/MWh/h": 21,
+        "Auction ID": 16,
+        "TSO Exit": 30,
+        "TSO Entry": 30,
+        "Status": 14,
+    }
+    EXCEL_WIDTH_TOLERANCE = 1e-6
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self.database_path = database_path
@@ -172,20 +192,43 @@ class AuctionStorage:
                 raise AuctionStorageError("The PRISMA operation could not be finalized safely.")
 
     @staticmethod
-    def validate_excel(path: Path) -> bool:
+    def apply_excel_widths(path: Path) -> None:
+        workbook = load_workbook(path)
         try:
-            workbook = load_workbook(path, read_only=True, data_only=True)
+            sheet = workbook["Auctions"]
+            for index, header in enumerate(AuctionStorage.EXCEL_COLUMNS, start=1):
+                sheet.column_dimensions[get_column_letter(index)].width = (
+                    AuctionStorage.EXCEL_COLUMN_WIDTHS[header]
+                )
+            workbook.save(path)
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def validate_excel(path: Path) -> bool:
+        workbook = None
+        try:
+            workbook = load_workbook(path, read_only=False, data_only=True)
             valid = False
             if "Auctions" in workbook.sheetnames:
                 sheet = workbook["Auctions"]
                 headers = tuple(
                     cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))
                 )
-                valid = headers == AuctionStorage.EXCEL_COLUMNS
-            workbook.close()
+                widths_are_valid = all(
+                    abs(
+                        sheet.column_dimensions[get_column_letter(index)].width
+                        - AuctionStorage.EXCEL_COLUMN_WIDTHS[header]
+                    ) <= AuctionStorage.EXCEL_WIDTH_TOLERANCE
+                    for index, header in enumerate(AuctionStorage.EXCEL_COLUMNS, start=1)
+                )
+                valid = headers == AuctionStorage.EXCEL_COLUMNS and widths_are_valid
             return valid
         except Exception:
             return False
+        finally:
+            if workbook is not None:
+                workbook.close()
 
     def export_excel(self, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +249,7 @@ class AuctionStorage:
             os.close(descriptor)
             staged = Path(name)
             frame.to_excel(staged, index=False, sheet_name="Auctions")
+            self.apply_excel_widths(staged)
             if not self.validate_excel(staged):
                 raise AuctionStorageError("The staged Excel workbook failed validation.")
             try:

@@ -94,6 +94,7 @@ def test_initial_dashboard_state_and_accessibility(window):
     assert widget.minimumWidth() >= 1080
     assert widget.status.text() == "Ready"
     assert widget.browser_badge.text() == "Disconnected"
+    assert widget.load_csv_button.text() == "Load Monitoring CSV"
     assert not widget.start_monitoring_button.isEnabled()
     assert widget.csv_table.accessibleName() == "Auctions"
     assert [
@@ -169,14 +170,14 @@ def test_ordinary_table_cells_keep_model_text_and_explicit_contrast(window):
 
 def test_cancel_csv_dialog_preserves_state(window, monkeypatch):
     widget, _ = window
-    monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=("", ""))
-    )
+    dialog = Mock(return_value=("", ""))
+    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", dialog)
     load = Mock()
     monkeypatch.setattr(app, "load_auction_csv", load)
 
     widget.select_csv()
 
+    assert dialog.call_args.args[1] == "Load Monitoring CSV"
     load.assert_not_called()
     assert widget.csv_path.text() == ""
 
