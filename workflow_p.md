@@ -720,7 +720,7 @@ Windows application. This work is intentionally not included in P.31.
 
 ### P.33. Unified PRISMA CSV import foundation
 
-Status: **In progress — P.33.1-P.33.3 are Completed; P.33.4-P.33.5 are Planned**.
+Status: **In progress — P.33.1-P.33.4 are Completed; P.33.5 is Planned**.
 
 P.33 separates two independent inputs that must never be converted into or
 silently substituted for one another.
@@ -835,12 +835,47 @@ required sides, intra-entry and cross-entry alias conflicts, raw/source-line
 preservation, compatibility, and deterministic ordering.
 `python -m compileall .` and `git diff --check` also pass.
 
-#### P.33.4-P.33.5. Planned follow-up increments
+#### P.33.4. Controlled daily source updates
 
-P.33.4 will design controlled daily downloading/updating. P.33.5 will complete
-UI and end-to-end integration, including reporting import issues to users.
-Downloads, browser automation, schema changes, and monitoring changes remain
-deferred.
+Status: **Completed**.
+
+`prisma_source_updates.py` provides a deterministic, UI-independent lifecycle
+boundary for caller-supplied local PRISMA Export CSV files. The caller supplies
+an exact `datetime.date`, a timezone-aware evaluation time, and the previous
+immutable accepted state. The policy computes SHA-256 from the exact file bytes
+and exposes only the basename in audit metadata. It never infers dates or reads
+the clock.
+
+The stable lifecycle statuses are `APPLIED`, `UNCHANGED`, and `REJECTED`, with
+typed reasons for applied, identical, stale, conflicting, future-dated, and
+invalid sources. A first or newer valid source is applied. An already accepted
+date and digest is unchanged without rerunning the importer; different content
+for an accepted date, stale dates, and future dates are rejected before import.
+`import_prisma_export()` remains the authoritative validation boundary. Fatal
+validation never advances state or exposes a partial import, while header-only
+exports and row-level filtered/rejected outcomes remain valid auditable imports.
+Only an applied result returns advanced accepted state.
+
+The pure daily due policy compares a caller-supplied aware local evaluation time
+with an explicit wall-clock scheduled time. It does not sleep, start threads, or
+read the system clock; acceptance for the source date suppresses another due
+update. Tests cover local times before and after the schedule and non-UTC
+offsets.
+
+P.33.4 does not change `MonitoringScheduler`, `AuctionStorage`, SQLite schemas,
+the UI, or source files. It adds no threads, browser automation, downloads, or
+persistence. Automatic browser downloading and end-to-end persistence/UI
+integration, including user-facing issue reporting, remain deferred to P.33.5.
+
+Validation evidence: focused lifecycle policy tests, affected processor/storage/
+scheduler contract tests, the complete pytest suite, Python source compilation,
+and `git diff --check` pass for this increment.
+
+#### P.33.5. Planned end-to-end integration
+
+Integrate the completed import and source-update policies with persistence and
+the UI, including automatic browser downloading and reporting import issues to
+users.
 
 ## 6. Definition of Done
 

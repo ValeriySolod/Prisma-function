@@ -44,11 +44,11 @@
 | P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
 | P.31 | Modern PySide6 monitoring dashboard | ✅ Completed | Responsive light workspace and graphite sidebar, truthful summary cards, model-backed searchable/filterable auction table, browser and monitoring state badges, activity feed, accessible controls, and focused offscreen UI coverage are implemented without changing managed-browser ownership. | Complete manual Windows scaling checks at 125%, 150%, 175%, and 200%. |
 | P.32 | Windows installer and uninstaller using Inno Setup | ⬜ Planned | Installer work is intentionally outside P.31. | Add and validate a signed-ready Inno Setup installer and uninstaller workflow. |
-| P.33 | Unified PRISMA CSV import foundation | 🟡 In progress | P.33.1 establishes explicit CSV contracts; P.33.2 adds a complete, auditable original-export importer; P.33.3 adds deterministic market/storage enrichment. | Complete P.33.4-P.33.5 without conflating the two contracts. |
+| P.33 | Unified PRISMA CSV import foundation | 🟡 In progress | P.33.1 establishes explicit CSV contracts; P.33.2 adds a complete, auditable original-export importer; P.33.3 adds deterministic market/storage enrichment; P.33.4 adds controlled daily local-source lifecycle policy. | Complete P.33.5 end-to-end integration without conflating the two contracts. |
 | P.33.1 | Separate and detect both CSV contracts | ✅ Completed | Exact headers, encodings, delimiters, typed detection outcomes, duplicate rejection, and regression-safe routing are implemented and validated. | None for this increment. |
 | P.33.2 | Import complete original PRISMA exports | ✅ Completed | Typed imported/filtered/rejected results account for every source row; supported capacity and EUR tariff conversions, direction/network selection, strict dates, and product-duration rules are validated. | UI issue reporting and integration remain in P.33.5. |
 | P.33.3 | Add market and storage reference enrichment | ✅ Completed | Direction-authoritative enrichment exposes side-specific canonical names and market/storage classifications in detailed records; required-side mismatches are typed rejections, irrelevant sides are preserved but ignored, and the 18-field normalized/process_csv contract remains unchanged. | Expand the catalog only when additional authoritative mappings are confirmed. |
-| P.33.4 | Add controlled daily source updates | ⬜ Planned | Automatic downloads and daily updates are not implemented. | Design safe update scheduling and source lifecycle. |
+| P.33.4 | Add controlled daily source updates | ✅ Completed | Immutable typed state/results, exact-byte SHA-256 identity, authoritative import validation, stable apply/unchanged/reject decisions, and a pure timezone-aware daily due policy are implemented for caller-supplied local files. | None for this increment; automatic downloading and integration remain in P.33.5. |
 | P.33.5 | Integrate the completed import workflow | ⬜ Planned | UI, browser download automation, persistence changes, and end-to-end import remain deferred. | Integrate and validate the agreed workflow in a later scoped increment. |
 
 ## Current key limitation
@@ -62,10 +62,10 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.33.3 is complete.** Detailed imports now expose deterministic side-specific
-canonical references and market/storage classifications while source Direction
-remains authoritative and the legacy 18-field `process_csv` row boundary stays
-compatible. P.33.4 controlled source updates are the next planned import
+**P.33.4 is complete.** Daily local PRISMA sources can now be evaluated through
+a deterministic immutable lifecycle policy without UI, storage, browser, or
+monitoring changes. P.33 remains in progress: P.33.5 automatic browser download
+and end-to-end persistence/UI integration is the next recommended import
 increment. P.32 remains a separate planned installer stage.
 
 ## Release target
