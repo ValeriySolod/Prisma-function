@@ -7,9 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from csv_contracts import CsvFormat, PRISMA_EXPORT_COLUMNS, require_csv_format
+from prisma_references import (
+    DEFAULT_PRISMA_REFERENCES,
+    PrismaReferenceCatalog,
+    ReferenceClassification,
+    ReferenceSide,
+)
 
 MIN_MARKETED_CAPACITY_KWH_H = 1000.0
 DATE_FORMAT = "%d.%m.%Y %H:%M"
@@ -22,6 +29,13 @@ class PrismaImportStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class PrismaEnrichmentReasonCode(str, Enum):
+    MISSING_REQUIRED_EXIT_REFERENCE = "missing_required_exit_reference"
+    MISSING_REQUIRED_ENTRY_REFERENCE = "missing_required_entry_reference"
+    UNKNOWN_EXIT_REFERENCE = "unknown_exit_reference"
+    UNKNOWN_ENTRY_REFERENCE = "unknown_entry_reference"
+
+
 class PrismaImportError(RuntimeError):
     """Raised when an export cannot be parsed safely as a complete import."""
 
@@ -30,8 +44,31 @@ class PrismaImportError(RuntimeError):
 class PrismaImportIssue:
     source_row_number: int
     status: PrismaImportStatus
-    reason_code: str
+    reason_code: str | PrismaEnrichmentReasonCode
     message: str
+    field_name: str | None = None
+    side: str | None = None
+    source_value: str | None = None
+
+
+@dataclass(frozen=True)
+class PrismaImportedRecord:
+    """An enriched row paired with its unchanged source row and physical line."""
+
+    source_row_number: int
+    row: dict[str, Any]
+    raw_row: Mapping[str, str]
+    exit_reference: PrismaResolvedReference | None
+    entry_reference: PrismaResolvedReference | None
+
+
+@dataclass(frozen=True)
+class PrismaResolvedReference:
+    """A canonical, classified reference resolved for one capacity side."""
+
+    canonical_name: str
+    classification: ReferenceClassification
+    side: ReferenceSide
 
 
 @dataclass(frozen=True)
@@ -42,6 +79,7 @@ class PrismaImportResult:
     filtered_count: int
     rejected_count: int
     issues: list[PrismaImportIssue]
+    enriched_records: tuple[PrismaImportedRecord, ...] = ()
 
     @property
     def rows(self) -> list[dict[str, Any]]:
@@ -50,9 +88,20 @@ class PrismaImportResult:
 
 
 class _RowRejected(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str | PrismaEnrichmentReasonCode,
+        message: str,
+        *,
+        field_name: str | None = None,
+        side: str | None = None,
+        source_value: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.field_name = field_name
+        self.side = side
+        self.source_value = source_value
 
 
 def _text(value: Any) -> str:
@@ -127,7 +176,19 @@ def _direction_and_network(row: dict[str, Any]) -> tuple[str, str, str]:
     name = _text(row.get(f"Network Point Name {suffix}"))
     point_id = _text(row.get(f"Network Point ID {suffix}"))
     if not name:
-        raise _RowRejected("missing_network_point", "The selected network-point name is empty.")
+        side = direction if direction in ("entry", "exit") else None
+        code: str | PrismaEnrichmentReasonCode = "missing_network_point"
+        if side == "entry":
+            code = PrismaEnrichmentReasonCode.MISSING_REQUIRED_ENTRY_REFERENCE
+        elif side == "exit":
+            code = PrismaEnrichmentReasonCode.MISSING_REQUIRED_EXIT_REFERENCE
+        raise _RowRejected(
+            code,
+            "The selected network-point name is empty.",
+            field_name=f"Network Point Name {suffix}",
+            side=side,
+            source_value="",
+        )
     return direction, name, point_id
 
 
@@ -222,9 +283,76 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def import_prisma_export(path: str | Path) -> PrismaImportResult:
+def _enrich_row(
+    row: dict[str, Any],
+    source: dict[str, Any],
+    catalog: PrismaReferenceCatalog,
+) -> tuple[
+    dict[str, Any],
+    PrismaResolvedReference | None,
+    PrismaResolvedReference | None,
+]:
+    required_sides = {
+        "exit": (ReferenceSide.EXIT,),
+        "entry": (ReferenceSide.ENTRY,),
+        "bundle": (ReferenceSide.EXIT, ReferenceSide.ENTRY),
+    }[row["direction"]]
+    resolved: dict[ReferenceSide, PrismaResolvedReference] = {}
+    for side in required_sides:
+        field_name = f"Network Point Name {side.value.title()}"
+        original_value = "" if source.get(field_name) is None else str(source[field_name])
+        if not original_value.strip():
+            code = (
+                PrismaEnrichmentReasonCode.MISSING_REQUIRED_EXIT_REFERENCE
+                if side is ReferenceSide.EXIT
+                else PrismaEnrichmentReasonCode.MISSING_REQUIRED_ENTRY_REFERENCE
+            )
+            raise _RowRejected(
+                code,
+                f"Direction {row['direction']} requires a populated {side.value}-side "
+                f"reference in {field_name}.",
+                field_name=field_name,
+                side=side.value,
+                source_value=original_value,
+            )
+        reference = catalog.lookup(original_value, side)
+        if reference is None:
+            code = (
+                PrismaEnrichmentReasonCode.UNKNOWN_EXIT_REFERENCE
+                if side is ReferenceSide.EXIT
+                else PrismaEnrichmentReasonCode.UNKNOWN_ENTRY_REFERENCE
+            )
+            raise _RowRejected(
+                code,
+                f"Unknown {side.value}-side market/storage reference in {field_name}: "
+                f"{original_value}.",
+                field_name=field_name,
+                side=side.value,
+                source_value=original_value,
+            )
+        resolved[side] = PrismaResolvedReference(
+            reference.canonical_name, reference.classification, side
+        )
+    enriched = dict(row)
+    exit_reference = resolved.get(ReferenceSide.EXIT)
+    entry_reference = resolved.get(ReferenceSide.ENTRY)
+    enriched["exit_market"] = (
+        exit_reference.canonical_name if exit_reference is not None else ""
+    )
+    enriched["entry_market"] = (
+        entry_reference.canonical_name if entry_reference is not None else ""
+    )
+    return enriched, exit_reference, entry_reference
+
+
+def import_prisma_export(
+    path: str | Path,
+    *,
+    reference_catalog: PrismaReferenceCatalog = DEFAULT_PRISMA_REFERENCES,
+) -> PrismaImportResult:
     require_csv_format(path, CsvFormat.PRISMA_EXPORT)
     rows: list[dict[str, Any]] = []
+    records: list[PrismaImportedRecord] = []
     issues: list[PrismaImportIssue] = []
     filtered = rejected = total = 0
     with Path(path).open("r", encoding="cp1252", newline="") as csv_file:
@@ -268,7 +396,20 @@ def import_prisma_export(path: str | Path) -> PrismaImportResult:
 
             source = dict(zip(PRISMA_EXPORT_COLUMNS, fields, strict=True))
             try:
-                rows.append(_import_row(source))
+                imported = _import_row(source)
+                enriched, exit_reference, entry_reference = _enrich_row(
+                    imported, source, reference_catalog
+                )
+                rows.append(enriched)
+                records.append(
+                    PrismaImportedRecord(
+                        source_row_number,
+                        enriched,
+                        MappingProxyType(dict(source)),
+                        exit_reference,
+                        entry_reference,
+                    )
+                )
             except _RowRejected as exc:
                 if exc.code == "capacity_below_threshold":
                     status = PrismaImportStatus.FILTERED
@@ -282,9 +423,14 @@ def import_prisma_export(path: str | Path) -> PrismaImportResult:
                         status,
                         exc.code,
                         str(exc),
+                        exc.field_name,
+                        exc.side,
+                        exc.source_value,
                     )
                 )
-    return PrismaImportResult(rows, total, len(rows), filtered, rejected, issues)
+    return PrismaImportResult(
+        rows, total, len(rows), filtered, rejected, issues, tuple(records)
+    )
 
 
 def process_csv(path: str | Path) -> list[dict[str, Any]]:
