@@ -35,10 +35,16 @@ def qt_app() -> QApplication:
 
 
 @pytest.fixture
-def window(qt_app, monkeypatch):
+def window(qt_app, monkeypatch, tmp_path):
     browser = Mock()
     monkeypatch.setattr(app, "BrowserController", Mock(return_value=browser))
-    widget = app.PrismaMonitorApp()
+    root = tmp_path / "runtime"
+    paths = app.RuntimePaths(
+        root=root, database=root / "data/test.db",
+        result=root / "data/result/test.xlsx",
+        state=root / "state/test.json", log=root / "logs/test.log",
+    )
+    widget = app.PrismaMonitorApp(paths)
     yield widget, browser
     widget._is_closing = True
     widget._monitoring_thread = None
@@ -621,3 +627,43 @@ def test_close_does_not_block_on_a_genuinely_running_import(window, monkeypatch)
     final_event = Mock()
     widget.closeEvent(final_event)
     final_event.accept.assert_called_once_with()
+
+
+def test_startup_shows_path_error_after_qapplication_exists(monkeypatch):
+    application = Mock()
+    monkeypatch.setattr(app.QApplication, "instance", Mock(return_value=application))
+    monkeypatch.setattr(app, "runtime_paths", Mock(side_effect=app.RuntimePathError("LOCALAPPDATA must be absolute")))
+    logging_init = Mock()
+    migration = Mock()
+    message = Mock()
+    monkeypatch.setattr(app, "initialize_runtime_logging", logging_init)
+    monkeypatch.setattr(app, "migrate_legacy_runtime_data", migration)
+    monkeypatch.setattr(app.QMessageBox, "critical", message)
+
+    assert app.main() == 1
+
+    logging_init.assert_not_called()
+    migration.assert_not_called()
+    message.assert_called_once()
+    assert "LOCALAPPDATA must be absolute" in message.call_args.args[2]
+
+
+def test_startup_does_not_migrate_when_required_logging_fails(tmp_path, monkeypatch):
+    application = Mock()
+    paths = app.RuntimePaths(
+        root=tmp_path, database=tmp_path / "data/db.sqlite",
+        result=tmp_path / "data/result/result.xlsx",
+        state=tmp_path / "state/state.json", log=tmp_path / "logs/app.log",
+    )
+    monkeypatch.setattr(app.QApplication, "instance", Mock(return_value=application))
+    monkeypatch.setattr(app, "runtime_paths", Mock(return_value=paths))
+    monkeypatch.setattr(app, "initialize_runtime_logging", Mock(return_value=(Mock(), None)))
+    migration = Mock()
+    message = Mock()
+    monkeypatch.setattr(app, "migrate_legacy_runtime_data", migration)
+    monkeypatch.setattr(app.QMessageBox, "critical", message)
+
+    assert app.main() == 1
+
+    migration.assert_not_called()
+    assert "required user-data log file could not be created" in message.call_args.args[2]

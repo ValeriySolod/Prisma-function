@@ -81,10 +81,16 @@ checks from the repository root:
 set QT_QPA_PLATFORM=offscreen
 set PYTHONUTF8=1
 python -m pytest -q
-python -m compileall -q app.py auction_csv.py browser.py monitoring.py processor.py runtime_logging.py scheduler.py storage.py version.py tests
+python -m compileall -q app.py auction_csv.py browser.py monitoring.py processor.py runtime_logging.py runtime_paths.py scheduler.py storage.py version.py tests
 python -m PyInstaller --clean --noconfirm PrismaFunction.spec
 ```
 
 The packaging command validates the checked-in PyInstaller configuration and
 writes an unarchived build to `dist\PrismaFunction\`; CI does not publish or
 upload it. Playwright browser binaries are not required by these checks.
+
+Source and packaged runs write application-owned data only below
+`%LOCALAPPDATA%\PrismaFunction`; they do not require the repository or install
+directory to be writable. On first launch, confirmed legacy database, result,
+state, and temporary-fallback log paths are copied and verified there. Close all
+other PrismaFunction processes before manually testing migration.

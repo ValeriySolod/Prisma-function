@@ -425,7 +425,7 @@ Packaging починати лише після завершення:
 
 Runtime data не повинні записуватися до temporary directory PyInstaller. Рекомендована writable location:
 
-`%LOCALAPPDATA%\PrismaMonitor\`
+`%LOCALAPPDATA%\PrismaFunction\`
 
 Packaging checks:
 
@@ -1042,6 +1042,69 @@ whitespace-only IDs; preservation of valid IDs; identical duplicates; conflicts
 against empty and populated databases; direct storage validation; reference
 enrichment; and the integrated import workflow. Focused and complete tests,
 Python compilation, and whitespace validation are required.
+
+### P.26. Move writable runtime data to the user data directory
+
+Status: **Completed; manual installed-package migration smoke testing remains recommended**.
+
+One authoritative runtime-path module resolves source and frozen execution to
+the same Windows user-data root. `LOCALAPPDATA` must be absolute; when it is
+missing, the deterministic Windows-compatible fallback is
+`%USERPROFILE%\AppData\Local` (or the equivalent home directory). The
+application never uses its installation directory, bundle directory, current
+working directory, or temporary directory as a normal-write fallback.
+
+Final layout:
+
+```text
+%LOCALAPPDATA%\PrismaFunction\
+  data\prisma_monitor.db
+  data\result\prisma_auctions.xlsx
+  state\prisma_import_state.json
+  logs\prisma-function.log[.1-.3]
+```
+
+At startup, Qt is created first so path failures can be reported visibly. The
+runtime paths are then validated once and the required file logger is opened in
+the new location before migration begins. If that handler cannot be created,
+startup stops and migration is not called; no claim is made that file
+diagnostics exist. Migration then covers only paths confirmed by the
+application's prior code: `data\prisma_monitor.db`,
+`data\result\prisma_auctions.xlsx`, and `data\prisma_import_state.json` beside
+the source tree or packaged executable, plus the former
+`%TEMP%\PrismaFunction\logs\prisma-function.log[.1-.3]` logging fallback.
+User-selected CSV files and unrelated files are never scanned or moved.
+
+The legacy current log normally conflicts with the newly opened current log, so
+it is retained as a deterministic `.legacy-<digest>` copy rather than replacing
+the active handler's file. Rotated legacy logs follow the same conflict policy.
+
+An atomically created lock directory with a unique PID/token owner record
+serializes concurrent launches. A briefly empty or malformed new lock is never
+removed. Recovery requires a minimum age and a non-running or unreadable stale
+owner. On Windows, stale removal and release open the directory with read-only
+identity/query plus synchronization/delete rights, verify its volume/file ID,
+and rename that exact handle to quarantine; this prevents a path replacement
+from being removed. Release also checks the exact owner token. Process liveness
+uses read-only `OpenProcess` and `WaitForSingleObject` queries with guaranteed
+handle cleanup, never process signaling. SQLite uses the
+SQLite backup API and an integrity check, incorporating committed WAL content
+without copying `-wal` or `-shm` blindly. Source and destination are compared as
+consistent verified snapshots using deterministic logical content, never as a
+normalized backup versus raw live bytes. Other artifacts are copied to a staged
+file, SHA-256 verified, and atomically published. Repeated migration treats an
+identical destination as complete. A different destination is preserved and
+the legacy version is retained beside it as `.legacy-<digest>`; the original
+source also remains available. Staged files are removed after interruption and
+migration retries on the next launch. Path escape outside the confirmed roots
+is rejected.
+
+If the user-data root, SQLite backup, verification, or migration lock cannot be
+used safely, startup stops with an actionable data error; it does not create a
+new empty database over uncertain legacy data. For recovery, close other
+PrismaFunction processes, preserve both legacy and user-data copies, confirm
+`LOCALAPPDATA`, and retry. Conflict copies can be inspected or restored
+manually after closing PrismaFunction; no conflict is overwritten silently.
 
 ## 6. Definition of Done
 

@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 import runtime_logging
+import runtime_paths
 
 
 def reset_logger():
@@ -52,24 +53,21 @@ def test_log_initialization_in_simulated_packaged_mode(tmp_path, monkeypatch):
     reset_logger()
 
 
-def test_log_initialization_falls_back_to_temp(tmp_path, monkeypatch):
+def test_log_initialization_does_not_fall_back_outside_user_data(tmp_path, monkeypatch):
     reset_logger()
     preferred = tmp_path / "blocked" / "prisma-function.log"
-    fallback = tmp_path / "fallback" / "prisma-function.log"
     real_create = runtime_logging._create_handler
     monkeypatch.setattr(runtime_logging, "preferred_log_path", lambda: preferred)
-    monkeypatch.setattr(runtime_logging, "fallback_log_path", lambda: fallback)
+    monkeypatch.setattr(runtime_logging, "fallback_log_path", lambda: preferred)
 
     def create(path):
-        if path == preferred:
-            raise PermissionError("blocked")
-        return real_create(path)
+        raise PermissionError("blocked")
 
     monkeypatch.setattr(runtime_logging, "_create_handler", create)
     logger, path = runtime_logging.initialize_runtime_logging()
 
-    assert path == fallback.resolve()
-    assert fallback.exists()
+    assert path is None
+    assert any(isinstance(handler, logging.NullHandler) for handler in logger.handlers)
     reset_logger()
 
 
@@ -84,4 +82,29 @@ def test_total_logging_failure_uses_null_handler(monkeypatch):
     assert configured is logger
     assert path is None
     assert any(isinstance(handler, logging.NullHandler) for handler in logger.handlers)
+    reset_logger()
+
+
+def test_bootstrap_log_remains_active_and_legacy_current_log_becomes_conflict(tmp_path, monkeypatch):
+    reset_logger()
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    paths = runtime_paths.runtime_paths()
+    legacy_logs = tmp_path / "temp" / "PrismaFunction" / "logs"
+    legacy_logs.mkdir(parents=True)
+    legacy = legacy_logs / runtime_paths.LOG_FILENAME
+    legacy.write_text("legacy current log", encoding="utf-8")
+
+    logger, path = runtime_logging.initialize_runtime_logging(paths.log)
+    runtime_paths.migrate_legacy_runtime_data(
+        paths=paths, logger=logger,
+        app_directory=tmp_path / "missing", temp_directory=tmp_path / "temp",
+    )
+    for handler in logger.handlers:
+        handler.flush()
+
+    assert path == paths.log.resolve()
+    assert "Application startup" in paths.log.read_text(encoding="utf-8")
+    conflict = next(paths.log.parent.glob("prisma-function.log.legacy-*"))
+    assert conflict.read_text(encoding="utf-8") == "legacy current log"
+    assert legacy.read_text(encoding="utf-8") == "legacy current log"
     reset_logger()
