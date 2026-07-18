@@ -44,9 +44,9 @@ from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workf
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
-    preferred_log_path,
     safe_log,
 )
+from runtime_paths import RuntimePathError, RuntimePaths, migrate_legacy_runtime_data, runtime_paths
 from scheduler import MonitoringScheduler
 from ui_components import (
     APP_STYLE,
@@ -58,10 +58,6 @@ from ui_components import (
 )
 from version import APP_DISPLAY_NAME, __version__
 
-APP_DIR = Path(__file__).resolve().parent
-DATA_DIR, RESULT_DIR = APP_DIR / "data", APP_DIR / "data" / "result"
-DATABASE_PATH = DATA_DIR / "prisma_monitor.db"
-IMPORT_STATE_PATH = DATA_DIR / "prisma_import_state.json"
 DEFAULT_MONITORING_INTERVAL_SECONDS = 30.0
 
 
@@ -79,13 +75,12 @@ class WorkerSignals(QObject):
 
 
 class PrismaMonitorApp(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, paths: RuntimePaths) -> None:
         super().__init__()
+        self._runtime_paths = paths
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{__version__}")
         self.setMinimumSize(1080, 680)
         self.resize(1280, 800)
-        DATA_DIR.mkdir(exist_ok=True)
-        RESULT_DIR.mkdir(parents=True, exist_ok=True)
         self.browser = BrowserController()
         self._logger = logging.getLogger(LOGGER_NAME)
         self._is_closing = False
@@ -593,9 +588,9 @@ class PrismaMonitorApp(QMainWindow):
                 source,
                 source_date=source_date or datetime.now().date(),
                 evaluated_at=datetime.now().astimezone(),
-                database_path=DATABASE_PATH,
-                state_path=IMPORT_STATE_PATH,
-                output_path=RESULT_DIR / "prisma_auctions.xlsx",
+                database_path=self._runtime_paths.database,
+                state_path=self._runtime_paths.state,
+                output_path=self._runtime_paths.result,
             )
             self.signals.processing_finished.emit(
                 ProcessingOutcome(result, None, generation)
@@ -653,7 +648,7 @@ class PrismaMonitorApp(QMainWindow):
             self.status.setText(f"PRISMA import failed: {error}")
 
     def open_result(self) -> None:
-        result = RESULT_DIR / "prisma_auctions.xlsx"
+        result = self._runtime_paths.result
         if not result.exists():
             QMessageBox.information(
                 self, "Result Not Found", "Process a CSV file first."
@@ -662,7 +657,7 @@ class PrismaMonitorApp(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(result)))
 
     def open_log_directory(self) -> None:
-        path = preferred_log_path().parent
+        path = self._runtime_paths.log.parent
         path.mkdir(parents=True, exist_ok=True)
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             self._show_error("Log Folder", "The log folder could not be opened.")
@@ -705,14 +700,33 @@ class PrismaMonitorApp(QMainWindow):
 
 
 def main() -> int:
-    try:
-        initialize_runtime_logging()
-    except Exception:
-        pass
     application = QApplication.instance() or QApplication(sys.argv)
     application.setApplicationName(APP_DISPLAY_NAME)
     application.setApplicationVersion(__version__)
-    window = PrismaMonitorApp()
+    initialization_error = None
+    paths = None
+    try:
+        paths = runtime_paths()
+        logger, log_path = initialize_runtime_logging(paths.log)
+        if log_path is None:
+            raise RuntimePathError(
+                "The required user-data log file could not be created. "
+                "Check LOCALAPPDATA and folder permissions, then retry."
+            )
+        migrate_legacy_runtime_data(paths=paths, logger=logger)
+    except Exception as exc:
+        initialization_error = str(exc)
+        if any(getattr(handler, "baseFilename", None) for handler in logging.getLogger(LOGGER_NAME).handlers):
+            logging.getLogger(LOGGER_NAME).exception("Runtime-data initialization failed")
+    if initialization_error is not None:
+        QMessageBox.critical(
+            None,
+            "PrismaFunction Data Error",
+            "PrismaFunction could not prepare its user-data directory. "
+            f"No legacy data was discarded. {initialization_error}",
+        )
+        return 1
+    window = PrismaMonitorApp(paths)
     window.show()
     return application.exec()
 

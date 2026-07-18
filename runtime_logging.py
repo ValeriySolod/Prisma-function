@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import logging
-import os
 import platform
 import sys
-import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from runtime_paths import LOG_FILENAME, runtime_paths
+
 
 LOGGER_NAME = "prisma_function"
-LOG_FILENAME = "prisma-function.log"
 
 
 def runtime_mode() -> str:
@@ -29,13 +28,12 @@ def package_path() -> Path:
 
 
 def preferred_log_path() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-    return base / "PrismaFunction" / "logs" / LOG_FILENAME
+    return runtime_paths().log
 
 
 def fallback_log_path() -> Path:
-    return Path(tempfile.gettempdir()) / "PrismaFunction" / "logs" / LOG_FILENAME
+    """Compatibility alias: normal runtime writes never fall back outside user data."""
+    return preferred_log_path()
 
 
 def _create_handler(path: Path) -> RotatingFileHandler:
@@ -45,15 +43,18 @@ def _create_handler(path: Path) -> RotatingFileHandler:
     )
 
 
-def initialize_runtime_logging() -> tuple[logging.Logger, Path | None]:
-    """Initialize persistent logging, degrading silently if storage is unavailable."""
+def initialize_runtime_logging(log_path: Path | None = None) -> tuple[logging.Logger, Path | None]:
+    """Initialize persistent logging; return a null path when no file handler is available."""
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
     resolved_path = None
     if not logger.handlers:
-        for candidate in (preferred_log_path(), fallback_log_path()):
+        candidates = (log_path,) if log_path is not None else dict.fromkeys(
+            (preferred_log_path(), fallback_log_path())
+        )
+        for candidate in candidates:
             try:
                 handler = _create_handler(candidate)
             except Exception:
