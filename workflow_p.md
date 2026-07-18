@@ -720,7 +720,7 @@ Windows application. This work is intentionally not included in P.31.
 
 ### P.33. Unified PRISMA CSV import foundation
 
-Status: **Completed — P.33.1-P.33.6 are Completed**.
+Status: **Completed — P.33.1-P.33.7 are Completed**.
 
 P.33 separates two independent inputs that must never be converted into or
 silently substituted for one another.
@@ -951,6 +951,64 @@ exact retry without database-row changes; the backfill safety investigation and
 its constraints are documented; implementation of an explicit historical
 maintenance backfill remains a deferred follow-up. Focused and complete tests,
 Python compilation, and whitespace validation pass.
+
+#### P.33.7. Explicit historical Market / Storage backfill — Completed
+
+`AuctionStorage.backfill_historical_market_storage()` is the sole public launch
+point. It is never called by schema creation, application startup, CSV import,
+daily update, export, or storage opening. There is no overwrite mode. The
+existing immutable `DEFAULT_PRISMA_REFERENCES` catalog, or an explicitly supplied
+`PrismaReferenceCatalog`, remains the only mapping authority.
+
+Storage initialization enables and verifies foreign keys outside a transaction,
+then acquires `BEGIN IMMEDIATE` before reading any schema fingerprint. Concurrent
+initializers therefore serialize through SQLite's configured busy timeout: a short
+overlap waits and reclassifies the committed current schema, while an expired timeout
+raises SQLite's lock error without leaving a partial schema. One backfill call likewise
+acquires `BEGIN IMMEDIATE` before its first `SELECT`, then examines every
+stored auction in stable SQLite `id` order and performs classification, validation,
+updates, run/audit insertion, and commit in that transaction. Valid `entry` and
+`exit` rows use exact side-aware lookup of the retained `network_point`. NULL or
+whitespace-only required-side values are missing. Trimmed, case-insensitive canonical
+equivalents retain their original representation; genuine conflicts leave the entire
+row unchanged. Unknown aliases are skipped. Malformed dates, reversed intervals,
+missing identities/product types, and invalid or non-finite persisted numerics are invalid;
+naive flow timestamps are compared only with naive timestamps, aware timestamps are
+compared as instants, and mixed-awareness or otherwise unorderable pairs are invalid;
+bundle rows are skipped because both original side identities were not retained.
+
+The typed `HistoricalBackfillSummary` includes a collision-safe `run_id` and reports `examined`, `updated`, `unchanged`,
+`skipped`, `conflicts`, `invalid`, `committed`, and ordered row audit. Mutually
+exclusive row counts equal `examined`. Each `HistoricalBackfillAudit` contains
+the SQLite row id and composite key, previous and resolved values, status,
+machine-readable reason, English message, and changed flag. Statuses are
+`updated`, `unchanged/already_complete`, `skipped/unresolvable`, `conflict`, and
+`invalid`. Reasons are `missing_values_filled`, `already_complete`,
+`reference_unresolvable`, `insufficient_bundle_identity`, `reference_conflict`,
+and `invalid_historical_row`.
+
+Each successful invocation appends a UTC-timestamped `committed` record to
+`historical_market_storage_runs` and exactly one positioned row record per examined
+physical auction to `historical_market_storage_audit`; `(run_id, auction_row_id)` is
+the row-audit primary key. Both foreign keys use `ON DELETE RESTRICT`, and every
+storage connection enables and verifies `PRAGMA foreign_keys = ON`. The unreleased
+single-column experimental audit table is replaced only when its ordered column name,
+declared type, NULL/default/PK metadata, foreign keys, and indexes exactly match that
+one known fingerprint. The current runs/audit tables are likewise accepted only with
+their exact `table_info`, foreign-key, and index fingerprints, including the stable
+`auction_row_id` index. Any unknown, extended, or partial schema fails closed before
+mutation. Migration uses separate DDL statements in one explicit transaction: dropping
+the experimental table and creating runs, audit, and indexes commit or roll back together,
+and `auctions` is never dropped or rebuilt. Ordinary pre-P.33.7 databases initialize
+normally. Every production storage connection is closed exactly once after transaction
+completion on both success and exception paths. A close failure after success remains
+visible; while another failure is active, rollback and close diagnostics are attached
+best-effort, and failure of that diagnostic mechanism never replaces the primary
+exception or traceback. If SQLite rollback itself fails, only preservation of the primary
+exception and a deterministic close attempt are guaranteed. When rollback succeeds,
+processing, SQL, audit, or validation exceptions roll back auctions, the run, and row
+audit and return no success summary. A successful repeat changes no auction rows, appends its own
+run/audit history, and reports them as already complete. Invocation remains API-only.
 
 ## 6. Definition of Done
 

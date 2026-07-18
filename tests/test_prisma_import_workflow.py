@@ -75,6 +75,20 @@ def test_new_repeat_and_next_daily_export_are_cumulative_and_enriched(tmp_path):
     assert frame["Auction ID"].tolist() == ["A-1", "A-2", "A-3"]
 
 
+def test_normal_import_never_runs_historical_backfill(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        AuctionStorage,
+        "backfill_historical_market_storage",
+        lambda *_: pytest.fail("historical backfill must remain explicit"),
+    )
+    result = run(
+        write_export(tmp_path / "source.csv", [BASE]),
+        tmp_path,
+        date(2025, 1, 1),
+    )
+    assert result.inserted == 1
+
+
 def test_daily_export_reports_inserted_updated_and_unchanged(tmp_path):
     first_rows = [BASE, {**BASE, "Auction ID": "A-2", "Network Point ID Entry": "E-2"}]
     run(write_export(tmp_path / "one.csv", first_rows), tmp_path, date(2025, 1, 1))
