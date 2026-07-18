@@ -1010,6 +1010,28 @@ processing, SQL, audit, or validation exceptions roll back auctions, the run, an
 audit and return no success summary. A successful repeat changes no auction rows, appends its own
 run/audit history, and reports them as already complete. Invocation remains API-only.
 
+#### P.33.8. Expanded authoritative Market / Storage mapping — Completed
+
+The immutable default reference catalog now covers every exact side-specific
+network-point name that the checked-in `Auction_overview.csv` explicitly marks as
+`RESERVOIR`: 37 Exit aliases and 37 Entry aliases. The existing five Market pairs
+remain the exact mappings from `mapping.csv`; no market identity was derived from
+TSO, EIC, display text, or geography.
+
+Storage aliases are declared separately for Exit and Entry. An alias observed on
+only one side is not assumed to be valid on the other side. Exact source strings
+that occur on both sides share one catalog entry, while different injection and
+withdrawal names remain distinct instead of being grouped heuristically. The
+established `VGS Storage Hub` canonical display name is preserved for backward
+compatibility. Lookup normalization remains limited to surrounding whitespace and
+case, and constructor conflict detection is unchanged.
+
+Regression coverage derives the authoritative Storage sets from the checked-in
+export and proves both completeness and absence of unevidenced Storage aliases for
+each side. It also verifies that a one-sided Storage alias cannot resolve on the
+unevidenced side. Import contracts, normalized row fields, persistence schemas,
+backfill semantics, and UI behavior are unchanged.
+
 ### P.34.1. Safe auction deduplication — Completed
 
 Every imported auction requires the nonblank selected network-point ID for its
