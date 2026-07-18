@@ -82,6 +82,74 @@ def test_all_directions_select_their_own_network_point(tmp_path: Path, direction
     assert (row["direction"], row["network_point"], row["network_point_id"]) == (normalized, point, point_id)
 
 
+@pytest.mark.parametrize(("direction", "field", "side"), [
+    ("Entry", "Network Point ID Entry", "entry"),
+    ("Exit", "Network Point ID Exit", "exit"),
+    ("Exit/Entry", "Network Point ID Exit/Entry", None),
+])
+@pytest.mark.parametrize("source_value", ["", " \t "])
+def test_blank_selected_network_point_id_is_audited(
+    tmp_path: Path, direction: str, field: str, side: str | None, source_value: str
+) -> None:
+    source = {**BASE, "Direction": direction, field: source_value}
+    if direction == "Exit":
+        source["Network Point Name Exit"] = "VGS Storage Hub (4290)"
+    result = import_prisma_export(write_csv(tmp_path, [source]))
+    issue = result.issues[0]
+    assert (result.imported_count, result.rejected_count) == (0, 1)
+    assert (issue.reason_code, issue.message) == (
+        "missing_network_point_id",
+        "The selected network-point ID is empty.",
+    )
+    assert (issue.field_name, issue.side, issue.source_value) == (
+        field,
+        side,
+        source_value,
+    )
+
+
+@pytest.mark.parametrize(("direction", "name_field", "id_field", "code"), [
+    (
+        "Entry",
+        "Network Point Name Entry",
+        "Network Point ID Entry",
+        "missing_required_entry_reference",
+    ),
+    (
+        "Exit",
+        "Network Point Name Exit",
+        "Network Point ID Exit",
+        "missing_required_exit_reference",
+    ),
+    (
+        "Exit/Entry",
+        "Network Point Name Exit/Entry",
+        "Network Point ID Exit/Entry",
+        "missing_network_point",
+    ),
+])
+def test_blank_selected_name_takes_precedence_over_blank_selected_id(
+    tmp_path: Path, direction: str, name_field: str, id_field: str, code: str
+) -> None:
+    result = import_prisma_export(write_csv(tmp_path, [{
+        **BASE,
+        "Direction": direction,
+        name_field: "",
+        id_field: "",
+    }]))
+
+    issue = result.issues[0]
+    assert issue.reason_code == code
+    assert issue.field_name == name_field
+
+
+def test_selected_network_point_id_preserves_valid_text(tmp_path: Path) -> None:
+    row = process_csv(write_csv(tmp_path, [{
+        **BASE, "Network Point ID Entry": "  000123-A  "
+    }]))[0]
+    assert row["network_point_id"] == "000123-A"
+
+
 @pytest.mark.parametrize(("capacity", "unit", "expected"), [
     ("1000", "kWh/h", 1000.0), ("1", "MWh/h", 1000.0), ("24000", "kWh/d", 1000.0),
 ])

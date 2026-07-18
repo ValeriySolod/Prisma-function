@@ -1010,6 +1010,39 @@ processing, SQL, audit, or validation exceptions roll back auctions, the run, an
 audit and return no success summary. A successful repeat changes no auction rows, appends its own
 run/audit history, and reports them as already complete. Invocation remains API-only.
 
+### P.34.1. Safe auction deduplication — Completed
+
+Every imported auction requires the nonblank selected network-point ID for its
+normalized direction: `Network Point ID Entry` for Entry, `Network Point ID Exit`
+for Exit, and `Network Point ID Exit/Entry` for Exit/Entry. Blank and
+whitespace-only selected IDs are rejected as audited source rows with reason code
+`missing_network_point_id`, the exact selected field name, the original source
+value, and the applicable `entry` or `exit` side; bundle issues have no single
+side. Existing normalization trims surrounding whitespace while preserving valid
+identifier text, including leading zeroes.
+
+Network-point names are display and enrichment values, not identity fallbacks.
+The persisted identity remains the existing five fields: `auction_id`,
+`network_point_id`, `direction`, `flow_start`, and `flow_end`.
+
+`AuctionStorage` validates the complete caller-supplied batch before its first
+auction `INSERT` or `UPDATE`. A blank or whitespace-only `network_point_id` fails
+with `AuctionStorageError`. Identical rows sharing one identity remain idempotent
+and retain the established processed/inserted/updated/unchanged accounting.
+Different persisted values sharing one identity are a conflicting batch and fail
+closed with `AuctionStorageError`; no row from that batch can insert or modify an
+auction, so existing stored auctions remain unchanged.
+
+P.34.1 does not change or rebuild the SQLite `auctions` schema or its unique
+constraint. It performs no migration, deletion, or modification of historical
+rows. P.26 runtime-data-path work is explicitly outside this increment.
+
+Acceptance evidence covers Entry, Exit, and Exit/Entry audit context;
+whitespace-only IDs; preservation of valid IDs; identical duplicates; conflicts
+against empty and populated databases; direct storage validation; reference
+enrichment; and the integrated import workflow. Focused and complete tests,
+Python compilation, and whitespace validation are required.
+
 ## 6. Definition of Done
 
 Етап вважається завершеним, коли:
