@@ -58,3 +58,7 @@ Record the default-browser setting and browser version for each applicable run.
 - [ ] Record every failed or blocked item with the checklist item, expected result, actual result, exact reproduction steps, frequency, relevant paths/settings, evidence, and error text copied exactly.
 - [ ] Record whether Chrome, Edge, and unsupported-default-browser cases were each tested; list every outstanding case.
 - [ ] Attach the completed checklist and evidence to the P.22 validation record.
+
+The partial physical Windows P.28 run performed on 2026-07-18 is recorded in
+`P28_VALIDATION_2026-07-18.md`. It is supporting evidence only and does not
+satisfy this clean-environment checklist or mark P.22/P.28 as passed.
