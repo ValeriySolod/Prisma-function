@@ -16,6 +16,7 @@ import app
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
 from monitoring import MonitoringResult
+from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from prisma_page import (
     LivePrismaStatusAdapter,
     PrismaAuctionNotFoundError,
@@ -470,6 +471,29 @@ def test_default_monitoring_engine_uses_live_browser_adapter(window):
     engine = widget.create_monitoring_engine()
     assert isinstance(engine._status_checker, LivePrismaStatusAdapter)
     assert engine._status_checker._browser_controller is browser
+    assert isinstance(engine._persistence, MonitoringStorage)
+    assert engine._persistence.database_path == widget._runtime_paths.database
+
+
+def test_persistence_failure_stops_worker_before_result_emission(window):
+    widget, _ = window
+    failure = MonitoringStorageError("diagnostic detail")
+    scheduler = Mock()
+    scheduler.run_forever.side_effect = failure
+    results = QSignalSpy(widget.signals.monitoring_results)
+    finished = QSignalSpy(widget.signals.monitoring_finished)
+    widget.signals.monitoring_results.disconnect(widget._monitoring_results)
+    widget.signals.monitoring_finished.disconnect(widget._monitoring_finished)
+
+    widget._monitoring_worker(scheduler, threading.Event())
+
+    assert results.count() == 0
+    assert finished.at(0) == [failure]
+    assert widget._monitoring_failure_message(failure) == (
+        "Monitoring history could not be saved. Please retry."
+    )
+    widget.signals.monitoring_results.connect(widget._monitoring_results)
+    widget.signals.monitoring_finished.connect(widget._monitoring_finished)
 
 
 @pytest.mark.parametrize(

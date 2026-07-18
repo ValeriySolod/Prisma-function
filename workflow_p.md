@@ -1043,6 +1043,60 @@ against empty and populated databases; direct storage validation; reference
 enrichment; and the integrated import workflow. Focused and complete tests,
 Python compilation, and whitespace validation are required.
 
+### P.24. Persist monitoring checks and status transitions
+
+Status: **Completed**.
+
+Every actual live lookup is stored in the runtime SQLite database at
+`RuntimePaths.database`. The monitoring schema is additive and semantically
+independent from PRISMA Export auctions, source-operation ledgers, and historical
+backfill tables. It contains an immutable check history, a transition history
+linked to its originating check by an enforced foreign key, and one latest
+successful status row per exact textual auction ID. Schema creation uses
+`CREATE TABLE IF NOT EXISTS`, deterministic indexes, verified foreign-key
+enforcement, and a write-reserving transaction, preserving existing database
+content.
+
+The live lookup runs without holding a database transaction. When its observation
+is ready to persist, the storage transaction reads the latest successfully
+persisted status for that exact auction ID. If none exists, the caller-supplied
+Monitoring CSV `last_known_status` is the initial baseline; the CSV is never
+rewritten. Storage, rather than the engine or caller, derives the final
+`previous_status`, `status_changed`, and `Success`/`Changed` classification. A
+successful observation always advances latest state. It produces a transition
+only when its current status differs from that authoritative effective baseline.
+Repeated observations therefore remain visible as checks without duplicate transitions.
+An `Error` check retains the effective baseline as both previous and fallback
+current status, is audited, and neither advances state nor creates a transition.
+`Skipped` means that no live lookup occurred and is not persisted.
+
+Authoritative baseline resolution, canonical classification, the check, its
+optional transition, and successful latest-state update occur in one
+`BEGIN IMMEDIATE` transaction. Rollback and close diagnostics never
+replace the primary failure. Event timestamps come from application-owned,
+timezone-aware datetimes and are normalized to ISO-8601 UTC with a `Z` suffix;
+SQLite `CURRENT_TIMESTAMP` is not used for monitoring event time. Short-lived
+connections make the abstraction safe for the existing worker-thread model.
+The worker persists synchronously before the scheduler callback emits results
+to Qt. A persistence failure terminates the run, returns the GUI to its
+retryable idle state, shows a stable English error, and does not emit the
+unpersisted cycle as a successful UI update. Reopening the application or a new
+persistence object against the same database restores the baseline.
+
+Deterministically ordered read APIs expose all checks and transitions with an
+optional auction-ID filter, plus latest-status lookup for one auction or a set.
+The records returned by these APIs are immutable typed dataclasses. P.24 adds no
+notification behavior or UI; user-visible status-change notifications remain
+exclusively P.25.
+
+Automated validation covers additive schema initialization, foreign keys,
+unchanged and changed observations, repeated and sequential transitions, error
+and skipped semantics, rollback, restart restoration, stale-CSV override,
+independent IDs, ordering, timezone normalization, runtime-path wiring, worker
+ordering/failure recovery, and existing monitoring/import/storage/packaging
+regressions. No manual live-session or installed-package validation is claimed
+for P.24.
+
 ### P.26. Move writable runtime data to the user data directory
 
 Status: **Completed; manual installed-package migration smoke testing remains recommended**.

@@ -35,7 +35,7 @@
 | P.23.1 | Implement live PRISMA page adapter | ✅ Completed | Real-session validation confirmed navigation, delayed table loading, active date filtering, `Marketed >= 1000`, rendered `Auction ID`/`Status` headers, deterministic row matching, `Finished` to `Completed` normalization, typed filtered-row failures, diagnostics, and managed-browser cleanup. Live DOM corrections support the current collapsed filter panel and PRISMA's rendered header row. | None for this increment. |
 | P.23.2 | Add authentication/session handling if required | ✅ Completed | The current PRISMA auctions workflow is public. Generation-scoped validation accepts delayed public readiness and the harmless consent banner, detects login redirects/DOM signals, sanitizes diagnostics, and returns typed authentication-required or invalid-session failures. Credential persistence and login automation were intentionally not added. | None for this increment. |
 | P.23.3 | Handle timeout, unavailable page, changed DOM, and manual browser closure | ✅ Completed | Bounded live lookups, typed timeout/unavailable/DOM results, lifecycle-driven monitoring termination, idempotent cleanup, stable English UI messages, and stale-generation protection are covered by deterministic tests. | Manual real-session closure/disconnect timing validation remains recommended; no additional implementation is required for this increment. |
-| P.24 | Persist monitoring results and status changes | ⬜ Planned | Persistence is not complete. | Store checks and detected status transitions safely. |
+| P.24 | Persist monitoring results and status changes | ✅ Completed | Actual live checks, transactional status transitions, and the latest successful per-auction baseline are stored in the runtime SQLite database; restart recovery, error/skip semantics, ordered reads, and persistence-before-UI emission are covered by tests. | No notification UI is included; P.25 remains separate. |
 | P.25 | Add user-visible status-change notifications | ⬜ Planned | Notifications are not implemented. | Surface meaningful status changes to the user. |
 | P.26 | Move writable runtime data to the user data directory | ✅ Completed | SQLite, generated Excel, import state, and rotating logs use one `%LOCALAPPDATA%\PrismaFunction` boundary; confirmed source/package/temp legacy artifacts migrate with locking, verification, atomic publication, and deterministic conflict retention. | Complete the documented manual installed-package migration smoke check on Windows. |
 | P.27 | Package the application with PyInstaller | ⬜ Planned | No completed application package is claimed. | Create and verify a PyInstaller `onedir` build. |
@@ -65,13 +65,16 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.33 is complete through P.33.7.** Full original PRISMA Export CSV files have a
+**P.24 and P.33 through P.33.7 are complete.** Monitoring now has durable check
+and transition history plus restart-safe successful-status baselines. Full
+original PRISMA Export CSV files have a
 separate, audited, enriched, cumulative local-file import path through the PySide6
 UI, while Monitoring CSV loading remains a distinct action. Generated workbooks
 have validated deterministic widths. Historical Market / Storage maintenance
 is available only through an explicit transactional storage API for the safely
-identifiable subset; it is never invoked by startup, import, or update. P.32
-remains a separate planned installer stage.
+identifiable subset; it is never invoked by startup, import, or update. P.25
+remains the next monitoring increment for user-visible change notifications,
+while P.32 remains a separate planned installer stage.
 
 ## Release target
 

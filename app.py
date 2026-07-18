@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
 from monitoring import MonitoringEngine, MonitoringResult
+from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from prisma_page import (
     LivePrismaStatusAdapter,
     PrismaAuctionNotFoundError,
@@ -413,7 +414,10 @@ class PrismaMonitorApp(QMainWindow):
         self._add_activity("Browser error")
 
     def create_monitoring_engine(self) -> MonitoringEngine:
-        return MonitoringEngine(LivePrismaStatusAdapter(self.browser))
+        return MonitoringEngine(
+            LivePrismaStatusAdapter(self.browser),
+            persistence=MonitoringStorage(self._runtime_paths.database),
+        )
 
     def create_monitoring_scheduler(
         self, records: list[AuctionCsvRecord]
@@ -505,6 +509,8 @@ class PrismaMonitorApp(QMainWindow):
             )
         if isinstance(error, PrismaAuctionNotFoundError):
             return str(error)
+        if isinstance(error, MonitoringStorageError):
+            return "Monitoring history could not be saved. Please retry."
         return "Monitoring stopped because of an unexpected error. Please retry."
 
     def _monitoring_finished(self, error: object = None) -> None:
