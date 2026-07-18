@@ -1217,6 +1217,20 @@ Exact build, structural validation, metadata verification, and isolated
 same-machine startup commands are documented in `BUILDING.md`. Clean-machine
 validation remains P.28, and no P.32 installer work is included.
 
+### P.28. Validate the executable on a clean Windows environment
+
+Status: **In progress — the 2026-07-18 physical Windows result is Partial / Blocked, not Pass**.
+
+The dated evidence in `P28_VALIDATION_2026-07-18.md` records successful
+non-elevated packaged startup, English UI rendering, Chrome launch, public
+PRISMA monitoring, header-only export processing, workbook opening, user-data
+placement, process cleanup, and relaunch. It also records the remaining blockers:
+the computer had developer tools installed, the account was a local
+Administrators-group member, the export had no data rows, Edge and unsupported
+default browsers were not tested, and disappearing live auction IDs prevented
+restart baseline revalidation. A fully clean physical Windows test is still
+required; neither P.22 nor P.28 is fully passed.
+
 ## 6. Definition of Done
 
 Етап вважається завершеним, коли:
