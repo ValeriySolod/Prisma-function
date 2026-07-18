@@ -25,6 +25,7 @@ Run the Windows build script from the repository root:
 
 ```bat
 build.bat
+python validate_package.py
 ```
 
 The windowed application and its supporting files are written to
@@ -35,6 +36,46 @@ The Playwright Python modules needed by the application are included. The
 application uses an installed system-default Chrome or Edge browser; browser
 binaries are not bundled. A successful build does not replace the manual
 release-readiness checks in `RELEASE_CHECKLIST.md`.
+
+Verify the Windows executable metadata in PowerShell:
+
+```powershell
+$exe = Get-Item .\dist\PrismaFunction\PrismaFunction.exe
+if ($exe.VersionInfo.FileVersion -ne "1.0.0" -or $exe.VersionInfo.ProductVersion -ne "1.0.0") { throw "Executable version metadata mismatch." }
+if ($exe.VersionInfo.ProductName -ne "PRISMA Monitor" -or $exe.VersionInfo.OriginalFilename -ne "PrismaFunction.exe") { throw "Executable identity metadata mismatch." }
+Write-Host "Executable metadata verified."
+```
+
+For a local packaged startup smoke check, use a new writable data root and a
+working directory outside the repository. This checks that startup does not
+use the source tree, active virtual environment, current directory, or the
+distribution directory for writable data:
+
+```powershell
+$smokeRoot = Join-Path $env:TEMP "PrismaFunction-P27-smoke"
+$packagedExe = (Resolve-Path .\dist\PrismaFunction\PrismaFunction.exe).Path
+New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+$originalLocalAppData = [Environment]::GetEnvironmentVariable("LOCALAPPDATA", "Process")
+$originalLocation = Get-Location
+try {
+    $env:LOCALAPPDATA = $smokeRoot
+    Set-Location -LiteralPath $env:TEMP
+    & $packagedExe
+} finally {
+    if ($null -eq $originalLocalAppData) {
+        Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+    } else {
+        $env:LOCALAPPDATA = $originalLocalAppData
+    }
+    Set-Location -LiteralPath $originalLocation
+}
+```
+
+When using a different repository location, replace the executable path with
+its absolute path. Confirm the main window opens without a console window, then
+close it normally. Verify that logs and any generated data are below
+`$smokeRoot\PrismaFunction` and that `dist\PrismaFunction` remains unchanged.
+This is a same-machine P.27 smoke check, not the clean-machine P.28 validation.
 
 ## Prepare and create the release archive
 
@@ -80,9 +121,11 @@ checks from the repository root:
 ```bat
 set QT_QPA_PLATFORM=offscreen
 set PYTHONUTF8=1
+python -m pytest -q tests\test_packaging.py
 python -m pytest -q
-python -m compileall -q app.py auction_csv.py browser.py monitoring.py processor.py runtime_logging.py runtime_paths.py scheduler.py storage.py version.py tests
+python -m compileall -q app.py auction_csv.py browser.py csv_contracts.py monitoring.py monitoring_storage.py notifications.py prisma_import_workflow.py prisma_page.py prisma_references.py prisma_source_updates.py processor.py runtime_logging.py runtime_paths.py scheduler.py storage.py ui_components.py validate_package.py version.py tests
 python -m PyInstaller --clean --noconfirm PrismaFunction.spec
+python validate_package.py
 ```
 
 The packaging command validates the checked-in PyInstaller configuration and

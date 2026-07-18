@@ -1196,6 +1196,27 @@ PrismaFunction processes, preserve both legacy and user-data copies, confirm
 `LOCALAPPDATA`, and retry. Conflict copies can be inspected or restored
 manually after closing PrismaFunction; no conflict is overwritten silently.
 
+### P.27. Package the application with PyInstaller
+
+Status: **Completed; same-machine interactive launch smoke testing remains manual**.
+
+The authoritative `PrismaFunction.spec` now produces a Windows `onedir`,
+windowed `PrismaFunction.exe` with no console window. PyInstaller hooks collect
+PySide6 and its Windows platform plugin, while the specification explicitly
+collects Playwright modules and data, including its Node driver. Application
+dependencies are discovered from the production entry point; pytest,
+setuptools, source files, caches, and other developer-only content are excluded.
+The existing 1.0.0 Windows file and product metadata remain attached.
+
+`validate_package.py` deterministically verifies the executable, Python runtime,
+required Qt libraries and platform plugin, and Playwright driver. It also
+rejects source/developer files and pre-created writable database, workbook,
+state, or log artifacts. Packaged runtime writes continue to resolve only below
+`%LOCALAPPDATA%\PrismaFunction`; the distribution is not a write target.
+Exact build, structural validation, metadata verification, and isolated
+same-machine startup commands are documented in `BUILDING.md`. Clean-machine
+validation remains P.28, and no P.32 installer work is included.
+
 ## 6. Definition of Done
 
 Етап вважається завершеним, коли:

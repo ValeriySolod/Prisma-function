@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from validate_package import REQUIRED_PATHS, validate_distribution
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "PrismaFunction.spec"
@@ -19,8 +21,73 @@ def test_spec_configures_windows_gui_application():
     assert 'name="PrismaFunction"' in content
     assert "console=False" in content
     assert 'collect_submodules("playwright")' in content
+    assert 'collect_data_files("playwright")' in content
     assert "COLLECT(" in content
     assert 'version="PrismaFunction.version"' in content
+    assert 'excludes=["pytest", "_pytest", "setuptools"]' in content
+
+
+def test_distribution_validator_accepts_complete_runtime(tmp_path):
+    for relative in REQUIRED_PATHS:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime")
+    (tmp_path / "_internal" / "python314.dll").write_bytes(b"runtime")
+
+    assert validate_distribution(tmp_path) == []
+
+
+def test_distribution_validator_rejects_missing_developer_and_runtime_files(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text("", encoding="utf-8")
+    (tmp_path / "prisma_monitor.db").write_bytes(b"")
+
+    errors = validate_distribution(tmp_path)
+
+    assert errors[: len(REQUIRED_PATHS)] == [
+        f"Missing required package file: {relative}" for relative in REQUIRED_PATHS
+    ]
+    assert "Missing required package file: _internal/python3*.dll" in errors
+    assert "Writable runtime file in package: prisma_monitor.db" in errors
+    assert "Developer-only path in package: tests/test_app.py" in errors
+    assert "Forbidden file type in package: tests/test_app.py" in errors
+
+
+def test_distribution_validator_rejects_sqlite_sidecars_and_rotated_logs(tmp_path):
+    runtime_files = (
+        "data/prisma_monitor.db",
+        "data/prisma_monitor.db-shm",
+        "data/prisma_monitor.db-wal",
+        "logs/prisma-function.log",
+        "logs/prisma-function.log.1",
+        "logs/prisma-function.log.2",
+        "logs/prisma-function.log.3",
+    )
+    for relative in runtime_files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime output")
+
+    errors = validate_distribution(tmp_path)
+
+    runtime_errors = [
+        error for error in errors if error.startswith("Writable runtime file in package:")
+    ]
+    assert runtime_errors == [
+        f"Writable runtime file in package: {relative}" for relative in runtime_files
+    ]
+
+
+def test_distribution_validator_accepts_similarly_named_dependencies(tmp_path):
+    for relative in REQUIRED_PATHS:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime")
+    (tmp_path / "_internal" / "python314.dll").write_bytes(b"runtime")
+    (tmp_path / "_internal" / "prisma_monitor.dbapi.dll").write_bytes(b"runtime")
+    (tmp_path / "_internal" / "prisma-function.log.config").write_bytes(b"runtime")
+
+    assert validate_distribution(tmp_path) == []
 
 
 def test_authoritative_stable_version_matches_executable_metadata():
