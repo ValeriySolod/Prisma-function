@@ -520,7 +520,11 @@ class BrowserController:
             if cancel_event.is_set():
                 return
 
-            launch_options = {"executable_path": str(executable), "headless": False}
+            launch_options = {
+                "executable_path": str(executable),
+                "headless": False,
+                "args": ["--start-maximized"],
+            }
             self._log(logging.INFO, "Playwright launch options: generation=%s options=%s", generation, launch_options)
             browser = playwright.chromium.launch(**launch_options)
             self._log(logging.INFO, "Browser created: generation=%s", generation)
@@ -532,7 +536,7 @@ class BrowserController:
             if cancel_event.is_set():
                 return
 
-            page = browser.new_page()
+            page = browser.new_page(no_viewport=True)
             context = getattr(page, "context", None)
             self._log(logging.INFO, "Browser context created: generation=%s", generation)
             self._log(logging.INFO, "Page created: generation=%s", generation)

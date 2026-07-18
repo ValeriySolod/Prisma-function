@@ -230,9 +230,11 @@ class FakeBrowser:
         self.new_page_block = new_page_block
         self.closed = threading.Event()
         self.new_page_calls = 0
+        self.new_page_options = []
 
-    def new_page(self):
+    def new_page(self, **kwargs):
         self.new_page_calls += 1
+        self.new_page_options.append(kwargs)
         if self.new_page_block:
             self.new_page_block()
         if self.new_page_error:
@@ -415,8 +417,11 @@ def test_successful_start_uses_system_default_browser_executable(monkeypatch):
     assert result.generation == generation
     assert result.success
     assert launches == [{
-        "executable_path": "C:\\Browsers\\default.exe", "headless": False
+        "executable_path": "C:\\Browsers\\default.exe",
+        "headless": False,
+        "args": ["--start-maximized"],
     }]
+    assert browser.new_page_options == [{"no_viewport": True}]
     assert page_filter.pages == [browser.page]
 
     controller.stop()

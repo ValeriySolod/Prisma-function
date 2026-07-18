@@ -1268,3 +1268,16 @@ required; neither P.22 nor P.28 is fully passed.
 - Copilot review не має невиправлених critical findings;
 - зміни об’єднані з `main`;
 - feature branch видалена.
+
+### P.34.2. Maximize the managed browser window — Completed
+
+The Playwright-managed Chrome or Edge window launches with Chromium's
+`--start-maximized` argument. Its page is created with `no_viewport=True`, so
+Playwright does not constrain the rendered PRISMA page to the default fixed
+viewport and instead follows the native maximized window size.
+
+Regression coverage verifies both launch settings while preserving default
+browser detection, lifecycle ownership, filtering, monitoring, cleanup, and
+retry behavior. Focused browser tests, the complete 418-test suite, Python compilation,
+whitespace validation, and the manual Windows maximized-window smoke check passed.
+
