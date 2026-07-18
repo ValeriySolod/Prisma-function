@@ -366,6 +366,80 @@ def test_result_update_is_correct_while_proxy_is_sorted_and_filtered(window):
     assert widget.summary_cards["completed"].value.text() == "1"
 
 
+def test_monitoring_results_add_ordered_notifications_and_one_cycle_summary(window):
+    widget, _ = window
+    widget.clear_activity()
+    widget.table_model.set_records([record("ALPHA"), record("BETA")])
+
+    widget._monitoring_results(
+        [result("ALPHA", "Open"), result("BETA", "Completed")]
+    )
+
+    assert widget.activity_list.count() == 3
+    texts = [widget.activity_list.item(index).text() for index in range(3)]
+    assert "Statuses updated: 2 checked, 2 changed, 0 errors" in texts[0]
+    assert "Status change — Auction ALPHA: Scheduled → Open" in texts[1]
+    assert "Status change — Auction BETA: Scheduled → Completed" in texts[2]
+    assert sum("Statuses updated:" in text for text in texts) == 1
+    notification = widget.activity_list.item(1)
+    assert notification.data(Qt.UserRole) == app.ActivityKind.STATUS_CHANGE.value
+    assert notification.font().bold()
+    assert notification.data(Qt.AccessibleDescriptionRole) == (
+        "Status change notification. Auction ALPHA: Scheduled → Open"
+    )
+
+
+def test_monitoring_results_exclude_non_notifications_but_keep_summary(window):
+    widget, _ = window
+    widget.clear_activity()
+    widget.table_model.set_records([record("A1")])
+    candidates = [
+        MonitoringResult("A1", datetime.now(), "Scheduled", "Scheduled", False,
+                         "Success", ""),
+        MonitoringResult("A1", datetime.now(), "", "Open", False,
+                         "Success", ""),
+        MonitoringResult("A1", datetime.now(), "Scheduled", "Scheduled", False,
+                         "Skipped", ""),
+        MonitoringResult("A1", datetime.now(), "Scheduled", "Scheduled", False,
+                         "Error", "lookup failed"),
+    ]
+
+    widget._monitoring_results(candidates)
+
+    assert widget.activity_list.count() == 1
+    assert "Statuses updated: 4 checked, 0 changed, 1 errors" in (
+        widget.activity_list.item(0).text()
+    )
+
+
+def test_monitoring_result_signal_delivers_notifications_on_qt_thread(window, qt_app):
+    widget, _ = window
+    widget.clear_activity()
+    widget.table_model.set_records([record("A1")])
+
+    widget.signals.monitoring_results.emit([result("A1", "Open")])
+    qt_app.processEvents()
+
+    assert widget.activity_list.count() == 2
+    assert "Status change — Auction A1: Scheduled → Open" in (
+        widget.activity_list.item(1).text()
+    )
+
+
+def test_activity_history_bounds_notifications_and_ordinary_entries(window):
+    widget, _ = window
+    widget.clear_activity()
+    for index in range(49):
+        widget._add_activity(f"Ordinary {index}")
+    widget.table_model.set_records([record("A1")])
+
+    widget._monitoring_results([result("A1", "Open")])
+
+    assert widget.activity_list.count() == 50
+    assert "Statuses updated:" in widget.activity_list.item(0).text()
+    assert "Status change — Auction A1" in widget.activity_list.item(1).text()
+
+
 def test_model_rejects_duplicate_auction_ids(window):
     widget, _ = window
     with pytest.raises(ValueError, match="unique"):
