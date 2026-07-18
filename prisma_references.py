@@ -86,21 +86,119 @@ def _market(
     return PrismaReference(canonical_name, ReferenceClassification.MARKET, aliases)
 
 
-def _storage(canonical_name: str, *aliases: str) -> PrismaReference:
+def _storage(
+    canonical_name: str,
+    *,
+    exit_aliases: tuple[str, ...] = (),
+    entry_aliases: tuple[str, ...] = (),
+) -> PrismaReference:
     side_aliases = tuple(
-        ReferenceAlias(value, side)
-        for value in aliases
-        for side in (ReferenceSide.EXIT, ReferenceSide.ENTRY)
+        ReferenceAlias(value, ReferenceSide.EXIT) for value in exit_aliases
+    )
+    side_aliases += tuple(
+        ReferenceAlias(value, ReferenceSide.ENTRY) for value in entry_aliases
     )
     return PrismaReference(
         canonical_name, ReferenceClassification.STORAGE, side_aliases
     )
 
 
-# Deliberately small seed catalog. Market aliases are the exact network-point
-# mappings checked into mapping.csv. The storage alias is evidenced by the
-# checked-in Auction_overview.csv export. Add entries only from confirmed source
-# data; the constructor rejects every duplicate side/alias pair.
+def _storage_catalog_entries() -> tuple[PrismaReference, ...]:
+    """Build exact side aliases evidenced as RESERVOIR in Auction_overview.csv."""
+    exit_aliases = (
+        "Empelde (37)",
+        "Empelde H-Gas (119)",
+        "Epe/Xanten II (UGS-A) (31110001)",
+        "Etzel (Speicher Crystal), Bitzenlander Weg 10 (8541I)",
+        "Etzel (Speicher ESE),Bitzenlander Weg 3 (8543I)",
+        "Friedeburg-Etzel, Bitzenlander Weg 2 (8542I)",
+        "Friedeburg-Etzel, Schienenstrang, EGL (8536I)",
+        "Haiming 2 7F (3432I)",
+        "Haiming 2-7F/bn Einpressen (BAY-700069-1800-2)",
+        "Haiming 2-RAGES/bn Einpressen (BAY-700069-1800-6)",
+        "Inzenham-West USP Einpressen (BAY-700069-3202-2)",
+        "Jemgum I (1BMA)",
+        "Jemgum III (1BRA)",
+        "Nüttermoor (1BQA)",
+        "Speicher Bierwang (3381I)",
+        "Speicher Breitbrunn (3416I)",
+        "Speicher Epe H (8513I)",
+        "Speicher Epe L (9199I)",
+        "Speicher Gronau-Epe H1 (8520)",
+        "Speicher Gronau-Epe H4 (EPEH1)",
+        "Speicher Gronau-Epe L2 (EPEL2)",
+        "Speicher Haiming 3-Haidach (3433I)",
+        "Speicher Reckrod (RC Speicher Reckrod)",
+        "Speicherzone Nord (Rehden) (37Z0000000089417)",
+        "TEP Storage Hub (6257)",
+        "UGS JEMGUM EWE (H200) (H200)",
+        "UGS LESUM H (H623) (H623)",
+        "UGS NUETTERMOOR (H101) (H101)",
+        "UGS NUETTERMOOR H (MOORAECKER) (H651) (H651)",
+        "UGS Peckensen (1322)",
+        "UGS Staßfurt (61004)",
+        "UGS UELSEN (H099) (H099)",
+        "USP Haidach/Einpressen (BAY-700069-8021-2)",
+        "VGS Storage Hub (4290)",
+        "Wolfersberg/USP Einpressen (BAY-700069-0205-2)",
+        "Zone MND ESG (MND_Exit)",
+        "Zone UGS EWE H-Gas (37Z000000007514V)",
+    )
+    entry_aliases = (
+        "Bobbau (6CZA)",
+        "Empelde (304)",
+        "Etzel (Speicher Crystal), Bitzenlander Weg 10 (8541P)",
+        "Etzel (Speicher ESE),Bitzenlander Weg 3 (8543P)",
+        "Friedeburg-Etzel, Bitzenlander Weg 2 (8542P)",
+        "Friedeburg-Etzel, Schienenstrang, EGL (8536P)",
+        "Haiming 2 7F (3432P)",
+        "Haiming 2-7F/bn Entnahme (BAY-700069-1800-1)",
+        "Haiming 2-RAGES/bn Entnahme (BAY-700069-1800-5)",
+        "Inzenham-West USP Entnahme (BAY-700069-3202-1)",
+        "Jemgum I (1BMA)",
+        "Jemgum III (1BRA)",
+        "Nüttermoor (1BQA)",
+        "Speicher Bierwang (3381P)",
+        "Speicher Breitbrunn (3416P)",
+        "Speicher Epe H (8513P)",
+        "Speicher Epe L (9199P)",
+        "Speicher Gronau-Epe H1 (8520E)",
+        "Speicher Gronau-Epe H4 (EPEH1E)",
+        "Speicher Gronau-Epe L2 (EPEL2E)",
+        "Speicher Haiming 3-Haidach (3433P)",
+        "Speicher Reckrod (Speicher Reckrod)",
+        "Speicherzone Nord (Rehden) (37Z0000000089417)",
+        "UGS HARSEFELD (H102) (H102)",
+        "UGS JEMGUM EWE (H199) (H199)",
+        "UGS LESUM H (H622) (H622)",
+        "UGS NUETTERMOOR (H100) (H100)",
+        "UGS NUETTERMOOR H (MOORAECKER) (H650) (H650)",
+        "UGS Peckensen (1322)",
+        "UGS Staßfurt (61004)",
+        "UGS UELSEN (H098) (H098)",
+        "USP Haidach/Entnahme (BAY-700069-8021-1)",
+        "VGS Storage Hub (4290)",
+        "Wolfersberg/USP Entnahme (BAY-700069-0205-1)",
+        "Zone MND ESG (MND_Entry)",
+        "Zone UGS EWE H-Gas (37Z000000007514V)",
+        "Zone UGS EWE L-Gas (21W0000000000176)",
+    )
+    source_values = tuple(dict.fromkeys(exit_aliases + entry_aliases))
+    return tuple(
+        _storage(
+            "VGS Storage Hub" if source_value == "VGS Storage Hub (4290)" else source_value,
+            exit_aliases=(source_value,) if source_value in exit_aliases else (),
+            entry_aliases=(source_value,) if source_value in entry_aliases else (),
+        )
+        for source_value in source_values
+    )
+
+
+# Market aliases are the exact network-point mappings checked into mapping.csv.
+# Storage aliases are the exact side-specific network-point names explicitly
+# classified as RESERVOIR in the checked-in Auction_overview.csv export. Add
+# entries only from confirmed source data; the constructor rejects every
+# duplicate side/alias pair.
 DEFAULT_PRISMA_REFERENCES = PrismaReferenceCatalog(
     (
         _market(
@@ -120,6 +218,6 @@ DEFAULT_PRISMA_REFERENCES = PrismaReferenceCatalog(
         _market("MGP", entry_aliases=("Mosonmagyarovar (AT) / Mosonmagyaróvár (HU)",)),
         _market("PSV", entry_aliases=("Arnoldstein Exit",)),
         _market("SK", entry_aliases=("Baumgarten WAG AT->SK",)),
-        _storage("VGS Storage Hub", "VGS Storage Hub (4290)"),
     )
+    + _storage_catalog_entries()
 )

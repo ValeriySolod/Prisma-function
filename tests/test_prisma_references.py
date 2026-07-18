@@ -63,6 +63,57 @@ def test_known_entry_storage_enrichment_and_source_metadata(tmp_path: Path) -> N
     assert record.exit_reference is None
 
 
+def test_all_authoritative_reservoir_aliases_are_side_specific_storage() -> None:
+    overview = pd.read_csv(
+        Path(__file__).parents[1] / "Auction_overview.csv",
+        sep=";",
+        encoding="cp1252",
+        dtype=str,
+    ).fillna("")
+    for side in ReferenceSide:
+        source_side = side.value.title()
+        name_column = f"Network Point Name {source_side}"
+        type_column = f"Network Point Type {source_side}"
+        reservoir_names = set(
+            overview.loc[overview[type_column] == "RESERVOIR", name_column]
+        ) - {""}
+        assert len(reservoir_names) == 37
+        for source_value in reservoir_names:
+            reference = DEFAULT_PRISMA_REFERENCES.lookup(source_value, side)
+            assert reference is not None, (side, source_value)
+            assert reference.classification is ReferenceClassification.STORAGE
+
+
+def test_storage_catalog_contains_only_authoritative_side_aliases() -> None:
+    overview = pd.read_csv(
+        Path(__file__).parents[1] / "Auction_overview.csv",
+        sep=";",
+        encoding="cp1252",
+        dtype=str,
+    ).fillna("")
+    for side in ReferenceSide:
+        source_side = side.value.title()
+        name_column = f"Network Point Name {source_side}"
+        type_column = f"Network Point Type {source_side}"
+        expected = set(
+            overview.loc[overview[type_column] == "RESERVOIR", name_column]
+        ) - {""}
+        actual = {
+            alias.source_value
+            for reference in DEFAULT_PRISMA_REFERENCES.entries
+            if reference.classification is ReferenceClassification.STORAGE
+            for alias in reference.aliases
+            if alias.side is side
+        }
+        assert actual == expected
+
+
+def test_storage_alias_is_not_assumed_for_unevidenced_side() -> None:
+    assert DEFAULT_PRISMA_REFERENCES.lookup(
+        "TEP Storage Hub (6257)", ReferenceSide.ENTRY
+    ) is None
+
+
 def test_known_exit_market_exact_alias(tmp_path: Path) -> None:
     row = {
         **BASE,
