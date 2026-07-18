@@ -44,13 +44,14 @@
 | P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
 | P.31 | Modern PySide6 monitoring dashboard | ✅ Completed | Responsive light workspace and graphite sidebar, truthful summary cards, model-backed searchable/filterable auction table, browser and monitoring state badges, activity feed, accessible controls, and focused offscreen UI coverage are implemented without changing managed-browser ownership. | Complete manual Windows scaling checks at 125%, 150%, 175%, and 200%. |
 | P.32 | Windows installer and uninstaller using Inno Setup | ⬜ Planned | Installer work is intentionally outside P.31. | Add and validate a signed-ready Inno Setup installer and uninstaller workflow. |
-| P.33 | Unified PRISMA CSV import foundation | ✅ Completed | P.33.1-P.33.6 provide separate contracts, audited import, recoverable cumulative persistence, atomic deterministic output with readable widths, a distinct Monitoring CSV action, and a non-blocking PySide6 import path. | Historical Market / Storage maintenance backfill remains an investigated, deferred follow-up. |
+| P.33 | Unified PRISMA CSV import foundation | ✅ Completed | P.33.1-P.33.7 provide separate contracts, audited import, recoverable cumulative persistence, atomic deterministic output, and an explicit transactional historical Market / Storage backfill API. | Expand the reference catalog only from authoritative evidence. |
 | P.33.1 | Separate and detect both CSV contracts | ✅ Completed | Exact headers, encodings, delimiters, typed detection outcomes, duplicate rejection, and regression-safe routing are implemented and validated. | None for this increment. |
 | P.33.2 | Import complete original PRISMA exports | ✅ Completed | Typed imported/filtered/rejected results account for every source row; supported capacity and EUR tariff conversions, direction/network selection, strict dates, and product-duration rules are validated. | None. |
 | P.33.3 | Add market and storage reference enrichment | ✅ Completed | Direction-authoritative enrichment exposes side-specific canonical names and market/storage classifications in detailed records; required-side mismatches are typed rejections, irrelevant sides are preserved but ignored, and the 18-field normalized/process_csv contract remains unchanged. | Expand the catalog only when additional authoritative mappings are confirmed. |
 | P.33.4 | Add controlled daily source updates | ✅ Completed | Immutable typed state/results, exact-byte SHA-256 identity, authoritative import validation, stable apply/unchanged/reject decisions, and a pure timezone-aware daily due policy are implemented for caller-supplied local files. | None. |
 | P.33.5 | Integrate the completed import workflow | ✅ Completed | SQLite-led recovery, atomic Excel publication, exact-retry repair, truthful stored summaries, deferred shutdown, and source-date guidance are implemented and verified by the 299-test suite. | Manual Windows UI and file-lock smoke testing remains recommended. |
 | P.33.6 | Manual validation fixes | ✅ Completed | The Monitoring CSV action has unambiguous user-facing text; deterministic `Auctions` worksheet widths are applied and validated without Excel; exact retry repairs legacy default-width output without changing stored rows; historical backfill safety was investigated and documented. | Do not backfill automatically. A future explicit, transactional, idempotent, row-audited maintenance operation remains deferred, with its execution surface and durable audit format still to be decided. |
+| P.33.7 | Explicit historical Market / Storage backfill | ✅ Completed | `AuctionStorage.backfill_historical_market_storage()` fills only missing safely resolvable single-side values under `BEGIN IMMEDIATE`, preserves canonical equivalents/conflicts, and appends a durable run plus deterministic per-row audit with exact typed counters. | No automatic or force mode; bundle rows remain unresolvable because both source-side identities were not retained. |
 
 ## Current key limitation
 
@@ -63,12 +64,12 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.33 is complete through P.33.6.** Full original PRISMA Export CSV files have a
+**P.33 is complete through P.33.7.** Full original PRISMA Export CSV files have a
 separate, audited, enriched, cumulative local-file import path through the PySide6
 UI, while Monitoring CSV loading remains a distinct action. Generated workbooks
 have validated deterministic widths. Historical Market / Storage maintenance
-backfill is intentionally deferred rather than performed automatically; only a
-future explicit operation may address the safely identifiable subset. P.32
+is available only through an explicit transactional storage API for the safely
+identifiable subset; it is never invoked by startup, import, or update. P.32
 remains a separate planned installer stage.
 
 ## Release target
