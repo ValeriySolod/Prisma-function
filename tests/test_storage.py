@@ -125,6 +125,60 @@ def historical_row(**changes):
     return row
 
 
+def test_identical_rows_in_one_batch_preserve_idempotent_counts(tmp_path):
+    storage = AuctionStorage(tmp_path / "test.db")
+    row = historical_row()
+
+    result = storage.upsert([row, dict(row)])
+
+    assert result == {"processed": 2, "inserted": 1, "updated": 0, "unchanged": 1}
+
+
+def test_conflicting_batch_fails_before_inserting_into_empty_database(tmp_path):
+    storage = AuctionStorage(tmp_path / "test.db")
+    row = historical_row()
+
+    with pytest.raises(AuctionStorageError, match="conflicting rows"):
+        storage.upsert([row, {**row, "state": "Open"}])
+
+    with sqlite3.connect(storage.database_path) as connection:
+        assert connection.execute("SELECT count(*) FROM auctions").fetchone()[0] == 0
+
+
+def test_conflicting_batch_cannot_modify_existing_auction(tmp_path):
+    storage = AuctionStorage(tmp_path / "test.db")
+    original = historical_row(state="Original")
+    storage.upsert([original])
+
+    with pytest.raises(AuctionStorageError, match="conflicting rows"):
+        storage.upsert([
+            {**original, "state": "First change"},
+            {**original, "state": "Second change"},
+        ])
+
+    with sqlite3.connect(storage.database_path) as connection:
+        assert connection.execute("SELECT state FROM auctions").fetchone()[0] == "Original"
+
+
+@pytest.mark.parametrize("network_point_id", ["", " \t "])
+def test_blank_network_point_id_fails_before_storage_mutation(
+    tmp_path, network_point_id
+):
+    storage = AuctionStorage(tmp_path / "test.db")
+    original = historical_row()
+    storage.upsert([original])
+
+    with pytest.raises(AuctionStorageError, match="nonblank string"):
+        storage.upsert([
+            {**original, "state": "Changed"},
+            historical_row(auction_id="blank", network_point_id=network_point_id),
+        ])
+
+    with sqlite3.connect(storage.database_path) as connection:
+        auctions = connection.execute("SELECT state FROM auctions").fetchall()
+    assert auctions == [("Finished",)]
+
+
 def test_explicit_historical_backfill_is_idempotent_and_preserves_complete_values(tmp_path):
     storage = AuctionStorage(tmp_path / "test.db")
     storage.upsert([

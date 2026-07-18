@@ -69,6 +69,15 @@ class HistoricalBackfillSummary:
 
 
 class AuctionStorage:
+    AUCTION_IDENTITY_FIELDS = (
+        "auction_id", "network_point_id", "direction", "flow_start", "flow_end",
+    )
+    AUCTION_PERSISTED_FIELDS = (
+        "auction_id", "auction_date", "exit_market", "entry_market", "direction",
+        "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type",
+        "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours",
+        "tariff_eur_mwh_h", "premium_eur_mwh_h", "state",
+    )
     AUDIT_ROW_INDEX = "idx_historical_market_storage_audit_auction_row_id"
     EXPERIMENTAL_AUDIT_COLUMNS = (
         ("auction_row_id", "INTEGER", 0, None, 1),
@@ -584,9 +593,30 @@ class AuctionStorage:
         return stats
 
     @staticmethod
+    def _validate_upsert_batch(rows: list[dict[str, Any]]) -> None:
+        rows_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in rows:
+            network_point_id = row.get("network_point_id")
+            if not isinstance(network_point_id, str) or not network_point_id.strip():
+                raise AuctionStorageError(
+                    "Auction network_point_id must be a nonblank string."
+                )
+            identity = tuple(row.get(field) for field in AuctionStorage.AUCTION_IDENTITY_FIELDS)
+            previous = rows_by_identity.get(identity)
+            if previous is not None and any(
+                previous.get(field) != row.get(field)
+                for field in AuctionStorage.AUCTION_PERSISTED_FIELDS
+            ):
+                raise AuctionStorageError(
+                    "The auction batch contains conflicting rows with the same identity."
+                )
+            rows_by_identity[identity] = row
+
+    @staticmethod
     def _upsert_rows(
         connection: sqlite3.Connection, rows: list[dict[str, Any]]
     ) -> dict[str, int]:
+        AuctionStorage._validate_upsert_batch(rows)
         inserted = updated = unchanged = 0
         for row in rows:
             existing = connection.execute(

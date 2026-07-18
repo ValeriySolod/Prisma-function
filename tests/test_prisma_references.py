@@ -126,6 +126,8 @@ def test_unknown_reference_is_auditable(
     row = {**BASE, "Network Point Name Entry": ""}
     row[field] = "Unknown Source Value"
     row["Direction"] = "Exit" if side == "exit" else "Entry"
+    if side == "exit":
+        row["Network Point ID Exit"] = "EXIT-ID"
     result = import_prisma_export(write_csv(tmp_path, [row]))
     issue = result.issues[0]
     assert result.rows == []

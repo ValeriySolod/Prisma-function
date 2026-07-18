@@ -174,7 +174,9 @@ def _direction_and_network(row: dict[str, Any]) -> tuple[str, str, str]:
         raise _RowRejected("unsupported_direction", f"Unsupported direction: {source_direction or '(blank)'}.")
     direction, suffix = directions[source_direction]
     name = _text(row.get(f"Network Point Name {suffix}"))
-    point_id = _text(row.get(f"Network Point ID {suffix}"))
+    id_field = f"Network Point ID {suffix}"
+    original_point_id = "" if row.get(id_field) is None else str(row[id_field])
+    point_id = _text(original_point_id)
     if not name:
         side = direction if direction in ("entry", "exit") else None
         code: str | PrismaEnrichmentReasonCode = "missing_network_point"
@@ -188,6 +190,14 @@ def _direction_and_network(row: dict[str, Any]) -> tuple[str, str, str]:
             field_name=f"Network Point Name {suffix}",
             side=side,
             source_value="",
+        )
+    if not point_id:
+        raise _RowRejected(
+            "missing_network_point_id",
+            "The selected network-point ID is empty.",
+            field_name=id_field,
+            side=direction if direction in ("entry", "exit") else None,
+            source_value=original_point_id,
         )
     return direction, name, point_id
 
