@@ -1097,6 +1097,42 @@ ordering/failure recovery, and existing monitoring/import/storage/packaging
 regressions. No manual live-session or installed-package validation is claimed
 for P.24.
 
+### P.25. User-visible status-change notifications
+
+Status: **Completed; manual Windows visual/accessibility validation remains recommended**.
+
+Notifications are derived only from the persisted `MonitoringResult` objects
+delivered for the current monitoring cycle through the existing
+`monitoring_results` Qt signal. An immutable notification value object owns the
+independently testable decision and exact message formatting. A result is
+eligible only when `status_changed` is true, `result` is exactly `Changed`, and
+trimmed previous and current statuses are both nonempty and different. Its
+stable English message is `Auction <auction_id>: <previous_status> →
+<current_status>`.
+
+Initial baselines, successful unchanged checks, skipped or disabled records,
+lookup errors, persistence failures, malformed empty or equal statuses, cycle
+summaries, and historical transitions read after restart do not create
+notifications. No notification history is persisted or replayed; P.24 remains
+the sole persistence authority. No toast, tray, email, sound, network, modal,
+or background-service behavior was added.
+
+Eligible transitions appear in scheduler result order directly below the one
+existing aggregate summary for that cycle in Recent activity. Status-change
+entries carry an explicit textual label, bold emphasis, contrasting foreground,
+an accessible description, and a typed item role, so distinction does not rely
+on color. Notifications and ordinary activity share the existing newest-first
+50-item bound and Clear action. All widget mutation remains in the Qt main-thread
+slot reached through the existing signal/slot boundary.
+
+Focused automated validation covers exact eligibility and formatting, one and
+multiple ordered changes, unchanged/baseline/error/skipped/malformed results,
+mixed bounded history, accessible presentation, Qt signal delivery, and exactly
+one aggregate cycle summary. The complete pytest suite, Python compilation, and
+whitespace validation passed for this increment. A manual Windows smoke check
+of visual contrast, screen-reader wording, and live-transition appearance is
+still recommended; no such manual validation is claimed here.
+
 ### P.26. Move writable runtime data to the user data directory
 
 Status: **Completed; manual installed-package migration smoke testing remains recommended**.

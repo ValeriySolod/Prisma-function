@@ -5,12 +5,13 @@ import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from collections.abc import Callable
 
 from PySide6.QtCore import QDate, QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -34,6 +36,7 @@ from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
 from monitoring import MonitoringEngine, MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
+from notifications import StatusChangeNotification
 from prisma_page import (
     LivePrismaStatusAdapter,
     PrismaAuctionNotFoundError,
@@ -67,6 +70,11 @@ class ProcessingOutcome:
     result: PrismaWorkflowResult | None
     error: str | None
     generation: int
+
+
+class ActivityKind(Enum):
+    ACTIVITY = "activity"
+    STATUS_CHANGE = "status-change"
 
 
 class WorkerSignals(QObject):
@@ -303,8 +311,22 @@ class PrismaMonitorApp(QMainWindow):
         badge.style().unpolish(badge)
         badge.style().polish(badge)
 
-    def _add_activity(self, message: str) -> None:
-        self.activity_list.insertItem(0, f"{datetime.now():%H:%M:%S}  {message}")
+    def _add_activity(
+        self, message: str, kind: ActivityKind = ActivityKind.ACTIVITY
+    ) -> None:
+        label = "Status change — " if kind is ActivityKind.STATUS_CHANGE else ""
+        item = QListWidgetItem(f"{datetime.now():%H:%M:%S}  {label}{message}")
+        item.setData(Qt.UserRole, kind.value)
+        if kind is ActivityKind.STATUS_CHANGE:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            item.setForeground(QColor("#075985"))
+            item.setData(
+                Qt.AccessibleDescriptionRole,
+                f"Status change notification. {message}",
+            )
+        self.activity_list.insertItem(0, item)
         while self.activity_list.count() > 50:
             self.activity_list.takeItem(self.activity_list.count() - 1)
 
@@ -480,11 +502,21 @@ class PrismaMonitorApp(QMainWindow):
 
     def _monitoring_results(self, results: list[MonitoringResult]) -> None:
         changed = errors = 0
+        notifications: list[StatusChangeNotification] = []
         for result in results:
             self.table_model.apply_result(result)
             changed += bool(result.status_changed)
             errors += result.result == "Error"
+            notification = StatusChangeNotification.from_result(result)
+            if notification is not None:
+                notifications.append(notification)
         self._update_summary()
+        # The list is newest-first. Reverse insertion preserves the scheduler's
+        # deterministic result order directly below the cycle summary.
+        for notification in reversed(notifications):
+            self._add_activity(
+                notification.message(), ActivityKind.STATUS_CHANGE
+            )
         self._add_activity(
             f"Statuses updated: {len(results)} checked, "
             f"{changed} changed, {errors} errors"
