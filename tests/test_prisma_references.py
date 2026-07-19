@@ -77,7 +77,9 @@ def test_all_authoritative_reservoir_aliases_are_side_specific_storage() -> None
         reservoir_names = set(
             overview.loc[overview[type_column] == "RESERVOIR", name_column]
         ) - {""}
-        assert len(reservoir_names) == 37
+        assert len(reservoir_names) == (
+            50 if side is ReferenceSide.EXIT else 51
+        )
         for source_value in reservoir_names:
             reference = DEFAULT_PRISMA_REFERENCES.lookup(source_value, side)
             assert reference is not None, (side, source_value)
@@ -112,6 +114,39 @@ def test_storage_alias_is_not_assumed_for_unevidenced_side() -> None:
     assert DEFAULT_PRISMA_REFERENCES.lookup(
         "TEP Storage Hub (6257)", ReferenceSide.ENTRY
     ) is None
+
+
+@pytest.mark.parametrize(
+    ("source_value", "side"),
+    [
+        ("Epe - IV (UGS-A) (01110021)", ReferenceSide.EXIT),
+        ("Epe - III (UGS-E) (01210003)", ReferenceSide.ENTRY),
+        ("UGS Jemgum GTG (37Z000000008869Q)", ReferenceSide.EXIT),
+        ("UGS Jemgum GTG (37Z000000008869Q)", ReferenceSide.ENTRY),
+    ],
+)
+def test_new_authoritative_storage_aliases_resolve_on_evidenced_side(
+    source_value: str, side: ReferenceSide
+) -> None:
+    reference = DEFAULT_PRISMA_REFERENCES.lookup(source_value, side)
+    assert reference is not None
+    assert reference.classification is ReferenceClassification.STORAGE
+
+
+@pytest.mark.parametrize(
+    ("source_value", "evidenced_side", "unevidenced_side"),
+    [
+        ("Epe - IV (UGS-A) (01110021)", ReferenceSide.EXIT, ReferenceSide.ENTRY),
+        ("Epe - III (UGS-E) (01210003)", ReferenceSide.ENTRY, ReferenceSide.EXIT),
+    ],
+)
+def test_new_one_sided_storage_aliases_do_not_cross_resolve(
+    source_value: str,
+    evidenced_side: ReferenceSide,
+    unevidenced_side: ReferenceSide,
+) -> None:
+    assert DEFAULT_PRISMA_REFERENCES.lookup(source_value, evidenced_side) is not None
+    assert DEFAULT_PRISMA_REFERENCES.lookup(source_value, unevidenced_side) is None
 
 
 def test_known_exit_market_exact_alias(tmp_path: Path) -> None:

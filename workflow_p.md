@@ -1301,3 +1301,21 @@ browser detection, lifecycle ownership, filtering, monitoring, cleanup, and
 retry behavior. Focused browser tests, the complete 418-test suite, Python compilation,
 whitespace validation, and the manual Windows maximized-window smoke check passed.
 
+### P.35. Authoritative PRISMA reference catalog expansion — Completed
+
+The updated checked-in `Auction_overview.csv` is the only authoritative evidence
+for this expansion. The immutable Storage catalog contains every exact nonblank
+`Network Point Name Exit` and `Network Point Name Entry` explicitly classified as
+`RESERVOIR`: exactly 50 Exit aliases and 51 Entry aliases. Aliases are admitted
+only on the side where the export provides that classification.
+
+No cross-side equivalence, canonical grouping, geography, TSO relationship, EIC
+relationship, or Market mapping is inferred. The established `VGS Storage Hub`
+canonical-name compatibility behavior is preserved, and the five explicit
+`mapping.csv` Market mappings are unchanged. Import logic, normalized contracts,
+persistence, historical backfill behavior, schemas, and UI behavior are also
+unchanged.
+
+Regression coverage derives both exact side-specific sets from the authoritative
+export, proves catalog completeness and the absence of unevidenced Storage aliases,
+and focuses on newly introduced aliases plus aliases evidenced on only one side.
