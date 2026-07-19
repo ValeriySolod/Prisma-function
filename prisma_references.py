@@ -221,7 +221,8 @@ def _storage_catalog_entries() -> tuple[PrismaReference, ...]:
     )
 
 
-# Market aliases are the exact network-point mappings checked into mapping.csv.
+# Market aliases are the exact side-specific network-point mappings checked into
+# mapping.csv or accepted through an authoritative evidence manifest.
 # Storage aliases are the exact side-specific network-point names explicitly
 # classified as RESERVOIR in the checked-in Auction_overview.csv export. Add
 # entries only from confirmed source data; the constructor rejects every
@@ -243,8 +244,18 @@ DEFAULT_PRISMA_REFERENCES = PrismaReferenceCatalog(
             ),
         ),
         _market("MGP", entry_aliases=("Mosonmagyarovar (AT) / Mosonmagyaróvár (HU)",)),
-        _market("PSV", entry_aliases=("Arnoldstein Exit",)),
+        _market(
+            "PSV",
+            entry_aliases=(
+                "Arnoldstein Exit",
+                "Arnoldstein importazione (35718301)",
+            ),
+        ),
         _market("SK", entry_aliases=("Baumgarten WAG AT->SK",)),
+        _market(
+            "THE",
+            exit_aliases=("VIP DK-THE (H646) (H646)",),
+        ),
     )
     + _storage_catalog_entries()
 )
