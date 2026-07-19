@@ -55,6 +55,7 @@
 | P.33.8 | Expanded authoritative Market / Storage mapping | ✅ Completed | All 37 Exit and 37 Entry network-point aliases explicitly classified as `RESERVOIR` in the checked-in authoritative export resolve as side-specific Storage references; the five explicit Market mappings remain unchanged. | Add aliases only from checked-in authoritative evidence; do not infer cross-side equivalence. |
 | P.34.1 | Safe auction deduplication | ✅ Completed | Selected network-point IDs are mandatory and audited during import; storage rejects blank IDs and conflicting same-identity batches before auction mutation while preserving identical-duplicate accounting. | No schema migration; network-point names are never identity fallbacks. |
 | P.34.2 | Maximize the managed browser window | ✅ Completed | Chromium launches with `--start-maximized`, Playwright uses the native window size without a fixed viewport, regression coverage verifies both settings, and the maximized Windows behavior passed manual validation. | None. |
+| P.35 | Authoritative PRISMA reference catalog expansion | ✅ Completed | Every exact nonblank network-point name explicitly classified as `RESERVOIR` in the updated checked-in `Auction_overview.csv` resolves as a side-specific Storage alias: exactly 50 Exit and 51 Entry aliases. The five `mapping.csv` Market mappings and `VGS Storage Hub` canonical compatibility remain unchanged. | Add aliases only from exact checked-in side-specific evidence; do not infer relationships or mappings. |
 
 ## Current key limitation
 
@@ -67,7 +68,7 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.24, P.25, and P.33 through P.33.8 are complete.** Monitoring now has durable
+**P.24, P.25, P.33 through P.33.8, and P.35 are complete.** Monitoring now has durable
 check and transition history, restart-safe successful-status baselines, and
 bounded current-cycle status-change notifications in Recent activity. Full
 original PRISMA Export CSV files have a
