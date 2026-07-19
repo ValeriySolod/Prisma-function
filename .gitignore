@@ -7,5 +7,6 @@ data/result/*.xlsx
 dist/
 build/
 release/
+installer/
 
 .pytest_tmp/
