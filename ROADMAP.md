@@ -56,6 +56,7 @@
 | P.34.1 | Safe auction deduplication | ✅ Completed | Selected network-point IDs are mandatory and audited during import; storage rejects blank IDs and conflicting same-identity batches before auction mutation while preserving identical-duplicate accounting. | No schema migration; network-point names are never identity fallbacks. |
 | P.34.2 | Maximize the managed browser window | ✅ Completed | Chromium launches with `--start-maximized`, Playwright uses the native window size without a fixed viewport, regression coverage verifies both settings, and the maximized Windows behavior passed manual validation. | None. |
 | P.35 | Authoritative PRISMA reference catalog expansion | ✅ Completed | Every exact nonblank network-point name explicitly classified as `RESERVOIR` in the updated checked-in `Auction_overview.csv` resolves as a side-specific Storage alias: exactly 50 Exit and 51 Entry aliases. The five `mapping.csv` Market mappings and `VGS Storage Hub` canonical compatibility remain unchanged. | Add aliases only from exact checked-in side-specific evidence; do not infer relationships or mappings. |
+| P.35.1 | Expand authoritative Market mapping catalog (Batch 1) | ✅ Completed | Exactly two customer-approved side-specific aliases resolve to PSV and THE from Auction-ID-linked CSV/PDF evidence with normalized booked capacity of at least 1000 kWh/h, recorded in `evidence/p35-1/EVIDENCE_MANIFEST.md`. Existing Market mappings and the complete Storage catalog remain unchanged. | Twelve aliases from the preliminary 14-row candidate set were rejected below the capacity threshold. Other shared-ID rows were not reviewed or accepted, remain outside this batch, and provide no mappings. No completeness claim is made. |
 
 ## Current key limitation
 
@@ -68,7 +69,7 @@ disconnect, and live DOM timing behavior.
 
 ## Next recommended increment
 
-**P.24, P.25, P.33 through P.33.8, and P.35 are complete.** Monitoring now has durable
+**P.24, P.25, P.33 through P.33.8, P.35, and P.35.1 are complete.** Monitoring now has durable
 check and transition history, restart-safe successful-status baselines, and
 bounded current-cycle status-change notifications in Recent activity. Full
 original PRISMA Export CSV files have a
