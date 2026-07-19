@@ -713,10 +713,30 @@ Windows display scaling levels from 125% through 200% remain recommended.
 
 ### P.32. Windows installer and uninstaller using Inno Setup
 
-Status: **Planned**.
+Status: **Completed**.
 
-Create and validate an Inno Setup installer and uninstaller for the packaged
-Windows application. This work is intentionally not included in P.31.
+The version-controlled `PrismaFunction.iss` definition builds a per-user Inno
+Setup installer from the existing PyInstaller onedir distribution at
+`dist\PrismaFunction`. Installation does not require administrator privileges
+and defaults to `%LOCALAPPDATA%\Programs\PrismaFunction`.
+
+The installer uses the authoritative application identity and executable version
+metadata, creates a Start Menu shortcut, offers an optional desktop shortcut,
+supports paths containing spaces, and includes a functional uninstaller. A
+stable application identifier supports in-place upgrades of later versions.
+
+Only the validated packaged runtime is installed. Python source, tests,
+development files, caches, runtime databases, logs, generated workbooks, and
+other writable user data are excluded. Uninstall removes installed application
+files and shortcuts but intentionally preserves application-owned runtime data
+below `%LOCALAPPDATA%\PrismaFunction`.
+
+`build-installer.bat` validates the existing PyInstaller distribution and invokes
+Inno Setup 6. Optional signing is supported through the documented Inno Setup
+sign-tool configuration. Deterministic tests verify the installer contract,
+per-user behavior, shortcut definitions, upgrade identity, uninstall behavior,
+and packaging exclusions. Build, signing, installation, upgrade, uninstall, and
+manual validation procedures are documented in `INSTALLER.md`.
 
 ### P.33. Unified PRISMA CSV import foundation
 
