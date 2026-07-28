@@ -1384,3 +1384,18 @@ Focused regression coverage proves exact canonical Market resolution for both al
 opposite-side rejection for each alias, continued rejection of representative fuzzy,
 substring, and identifier-only values, the exact complete Market alias set, and the
 existing complete Storage catalog contract.
+
+#### P.35.2-P.35.5 — Cancelled (2026-07-28)
+
+An uncommitted working-tree implementation of automated/paired official CSV+PDF
+acquisition (deterministic staging, geometry-based PDF parsing, a paired-operation
+ledger) was in progress under this line. It was cancelled without ever being
+committed, because `Prisma Function.odt` — adopted as the sole authoritative business
+specification — requires a **manual** official-CSV download and processing workflow
+(manual open/close of PRISMA, manual date selection and download by the user, manual
+file hand-off to the program), not automated or paired source acquisition. The
+cancelled diff was backed up to `Prisma-function-backups/p35.2-cancelled-2026-07-28/`
+before removal. `ROADMAP.md`'s "Authoritative specification pivot" and "P.36 roadmap"
+sections are now the authoritative forward plan and list the open questions that must
+be answered before implementing each new increment; they take precedence over any
+remaining automated-acquisition assumptions elsewhere in this document.
