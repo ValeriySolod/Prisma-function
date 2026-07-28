@@ -39,8 +39,8 @@ design.
 
 P.36 is the authoritative forward roadmap for the manual PRISMA workflow:
 
-- P.36.1 is documentation and contracts only and is currently in progress.
-- P.36.2 is planned but blocked on unresolved specification questions 1 and 4.
+- P.36.1 documentation and contracts are complete; no application behavior changed.
+- P.36.2 is the next planned increment but remains blocked on unresolved specification questions 1 and 4.
 - Later P.36 increments must follow the dependency and blocking state recorded in
   `ROADMAP.md`.
 
