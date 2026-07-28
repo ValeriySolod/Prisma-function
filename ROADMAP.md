@@ -116,13 +116,13 @@ model and was cancelled rather than adapted, per the sequence below (P.36).
 
 ## P.36 roadmap — manual PRISMA workflow (per `Prisma Function.odt`)
 
-Each increment below is small and independently testable. **P.36.1 is documentation and contracts
-only — no application behavior changes.** Later increments are not started until P.36.1 is agreed
-and open questions above are resolved for the parts they touch.
+Each increment below is small and independently testable. **P.36.1 is completed and introduced
+only documentation and contracts — no application behavior changes.** Later increments are not
+started until their applicable open questions are resolved.
 
 | ID | Stage | Status | Scope |
 |---|---|---|---|
-| P.36.1 | Adopt the authoritative specification: documentation and contracts only | 🟨 This task (started 2026-07-28) | Record the manual workflow, the 12-field output CSV contract (names, order, formats, units), and the open questions above. No code changes. |
+| P.36.1 | Adopt the authoritative specification: documentation and contracts only | ✅ Completed | Recorded the manual workflow, the 12-field output CSV contract (names, order, formats, units), and the open questions above. No application behavior changed. |
 | P.36.2 | Manual "open Prisma" / "closed Prisma" lifecycle | ⬜ Planned (blocked on question 1 and 4) | A user-triggered control opens the official site in a new browser tab; a second user-triggered control closes it. No automated navigation, login, date-setting, or download. |
 | P.36.3 | Documents-based or user-selected download directory | ⬜ Planned | Default the expected download location to the user's Documents folder; let the user choose a different folder explicitly. No hidden internal staging path. |
 | P.36.4 | Manual CSV selection and validation | ⬜ Planned | User selects the manually downloaded official CSV from disk; validate its exact header/encoding contract; typed accept/reject, no silent coercion. |
@@ -148,9 +148,8 @@ in scope alongside the new manual CSV workflow is unresolved question 1 above.
 ## Next recommended increment
 
 **P.24, P.25, P.33 through P.33.8, P.35, and P.35.1 are complete. P.35.2-P.35.5 are cancelled.**
-The next recommended increment is **P.36.1**: agree the manual-workflow documentation and the
-output CSV contract against `Prisma Function.odt`, and get authoritative answers to the five open
-questions above, before any new application code is written.
+**P.36.1 is complete.** The next recommended increment is **P.36.2**, which remains blocked until
+authoritative answers are provided for unresolved specification questions 1 and 4.
 
 ## Release target
 
