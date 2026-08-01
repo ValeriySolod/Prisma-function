@@ -1399,3 +1399,276 @@ before removal. `ROADMAP.md`'s "Authoritative specification pivot" and "P.36 roa
 sections are now the authoritative forward plan and list the open questions that must
 be answered before implementing each new increment; they take precedence over any
 remaining automated-acquisition assumptions elsewhere in this document.
+
+#### P.36.2. Manual "Open Prisma" / "Close Prisma" lifecycle — Completed (2026-08-01)
+
+Both former P.36.2 prerequisites are now resolved by explicit customer decisions recorded
+in `ROADMAP.md`'s "Resolved specification questions":
+
+- The manual CSV workflow **replaces** the existing live PRISMA monitoring dashboard,
+  scheduler, and automated monitoring workflow (P.7-P.25, P.31); they are not intended to
+  coexist in the final product.
+- "Open Prisma" must open exactly
+  `https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` — the
+  same URL the superseded monitoring subsystem already targeted.
+
+`prisma_lifecycle.py` adds `PrismaLifecycleController`, a UI-independent, thread-based
+lifecycle boundary that owns exactly one browser session at a time. `open()` launches the
+Windows default browser (reusing `DefaultBrowserDetector`) and navigates only to the
+approved `PRISMA_OFFICIAL_URL` (re-exported from `browser.PRISMA_AUCTIONS_URL`, the single
+source of truth for the approved URL); it performs no login, filtering, date selection,
+download, monitoring, or polling automation. Repeating `open()` while a session is already
+opening, open, still closing (`CLOSING`), or stuck with unconfirmed cleanup (`CLOSE_FAILED`,
+see below) is a deterministic no-op returning the existing generation, so no uncontrolled
+duplicate session can be created even across a rapid Close-then-Open click. `close()` only
+signals cancellation; it returns immediately without waiting for cleanup and is idempotent
+when nothing is open, a close is already in progress, or a prior close's cleanup could not
+be confirmed. The controller stays in `CLOSING` — never reporting `IDLE` — until the
+background worker thread has actually called `browser.close()` and `playwright.stop()`.
+
+Both cleanup calls are tracked independently and neither exception is swallowed silently: if
+`browser.close()` **or** `playwright.stop()` raises, the failure is logged with full
+diagnostic context (`exc_info=True`) but the controller never transitions to `IDLE` and never
+publishes a successful close-completed event. Instead it moves to a dedicated
+`CLOSE_FAILED` state, keeps the owned `_browser`/`_playwright` references (rather than
+discarding the only handles to resources that may still be alive), and publishes a typed,
+non-sensitive failure event (`kind="close"`, `success=False`,
+`"The PRISMA browser could not be confirmed closed."` — no raw exception text crosses the
+controller/UI boundary). `CLOSE_FAILED` behaves like `CLOSING` for safety purposes — `open()`
+still refuses a new generation and `close()` is a no-op — so the application can never
+silently start a second session or report a clean shutdown while an owned browser process
+may still be running. There is deliberately no automatic retry of the failed cleanup call
+itself (Playwright's sync-API objects are only valid on the worker thread that created them,
+and a bare retry of the exact same call that just failed has no expected effect); recovering
+from `CLOSE_FAILED` requires restarting PrismaFunction. Only when both cleanup calls succeed
+does the controller transition to `IDLE` and publish the close-completed event
+(`kind="close"`, `success=True`).
+
+`join(timeout=...)` lets a caller wait deterministically for that same owned worker thread
+(and only that thread) to finish, without touching any unrelated browser, profile, or
+process — but a finished worker thread by itself does **not** mean cleanup succeeded (the
+thread exits normally either way, since the cleanup exceptions are caught); callers that need
+to know whether the browser was actually confirmed closed must also check
+`PrismaLifecycleController.state`.
+
+**Real-runtime evidence log for manual-closure detection (do not delete; each fix attempt below
+was independently retested on real Windows and the outcome is recorded exactly as observed).**
+
+1. *First attempt.* Made `browser.is_connected()` polling unconditional instead of gated on
+   `browser.on("disconnected", ...)` attachment success. **Failed real X-button retest**: the
+   browser window closed but PrismaFunction kept reporting "Prisma open" indefinitely.
+2. *Second attempt.* Added `page.on("close", ...)`, `context.on("close", ...)`, and
+   `page.is_closed()` polling, reasoning that closing the visible window closes only its owned
+   `Page`/`BrowserContext` while the underlying `Browser` (e.g. a Chrome/Edge process that keeps
+   running in the background after its last window closes) can stay connected. **Failed real
+   X-button retest again**: `browser.on("disconnected")`, `browser.is_connected()` polling,
+   `page.on("close")`, `page.is_closed()` polling, and `context.on("close")` all failed to fire
+   or change state on the real machine. This means the previous paragraph's "verified technical
+   cause" claim was wrong, or at least incomplete: Playwright's own `Page`/`BrowserContext`/
+   `Browser` objects can *all* keep reporting "alive" after the real, visible window the user
+   interacted with has disappeared, and no theory for why has been confirmed against real
+   Windows telemetry.
+3. *Third attempt.* Rather than add a further speculative combination of the same high-level
+   Playwright signals, this attempt added one independent, lower-level signal: a browser-level
+   CDP session (`browser.new_browser_cdp_session()`) subscribes to the Chrome DevTools Protocol
+   `Target` domain — the ground-truth layer Playwright's own `Page`/`BrowserContext` wrappers are
+   themselves built on. Immediately after `browser.new_page()`, a one-time `Target.getTargets`
+   baseline identifies the sole existing `"page"`-type target as the owned target (an
+   approximation: if zero or more than one page-type target already exists, the owned target is
+   left unidentified rather than guessed, and detection falls back to the existing page/browser
+   signals only, with a logged warning). A `Target.targetDestroyed` event naming that owned
+   target ID is treated as a manual closure. This is layered on top of, not instead of, every
+   previously attempted signal — none were removed, since none were confirmed harmful, only
+   confirmed insufficient alone. To correlate this attempt's outcome, narrowly scoped, non-
+   sensitive diagnostic logging (a periodic owned-object/target snapshot, a UI-side poll
+   heartbeat, and per-CDP-event logging) was temporarily added on top of this signal; it recorded
+   only opaque target IDs, counts, types, and booleans — never URLs, titles, or other page
+   content. **Passed real X-button retest**: on 2026-08-01, PRISMA was opened from the
+   application, the managed browser window was closed with its own X button, and the
+   application correctly transitioned to "Prisma closed", re-enabled "Open Prisma", disabled
+   "Close Prisma", and recorded "Prisma closed manually" — confirming the CDP
+   `Target.targetDestroyed` signal is what corrected the previously observed real defect. Only
+   the system's configured default browser was exercised in this test; separate validation of
+   the other supported browser (Chrome or Edge, whichever was not the default at test time)
+   was not performed and remains open for a future manual check, not a P.36.2 blocker since the
+   controller applies the same detection logic regardless of which supported browser is
+   launched.
+
+Once this result was confirmed, the temporary diagnostic logging described in the third attempt
+(periodic snapshot, UI poll heartbeat, per-CDP-event logging, and the associated tick counters)
+was removed as no longer appropriate for normal production use, since it never logged page
+content but did log at a volume unsuitable for routine operation. The CDP
+`Target.targetDestroyed` detection logic itself, its correlation with the owned page target at
+open time, and the existing Page/BrowserContext/Browser fallback signals are unchanged and
+retained. A single `WARNING`-level log line remains for the case where the CDP baseline cannot
+uniquely identify the owned target (ambiguous or zero page targets at open time), since that is
+an actionable setup/correlation condition, not routine noise.
+
+`app.py`'s `PrismaMonitorApp` adds an "Open Prisma" and a "Close Prisma" sidebar control
+that call only `PrismaLifecycleController.open()` / `.get_events()` / `.close()` / `.join()`
+and render typed states through a dedicated `prisma_badge` and status text; no browser,
+Playwright, or process handle is ever held by the Qt layer — ownership stays entirely inside
+`PrismaLifecycleController`. A `QTimer` polls `get_events()` on the Qt thread so Playwright
+launch/navigation runs off the UI thread without blocking the event loop. Each poll drains
+and processes *every* event `get_events()` returns for the active generation, in order,
+instead of reacting to only the first match: `get_events()` permanently removes events from
+the controller's queue, so returning after the first one silently discarded any further
+event already pulled out of that same drain (e.g. a successful "open" immediately followed
+by a manual "closed" once the browser closes before the next 50 ms poll tick). Processing
+stops only once a terminal event for that generation has been applied (a failed "open", a
+manual `closed`, or an application close-completed `close`), so a later terminal event from
+the same drain is never lost and a stale-generation event mixed into the same batch (e.g.
+after a manual-closure retry started a new generation) is skipped rather than misapplied;
+this also guarantees at most one error dialog / activity entry per terminal transition.
+Clicking "Close Prisma" no longer reports "Prisma closed" immediately: the UI enters a
+stable "Closing Prisma…" state, disables both "Open Prisma" and "Close Prisma", and keeps
+polling `get_events()` on the running timer — with no blocking call on the Qt thread — until
+the controller's typed close-completed event for the active generation arrives; only then
+does the badge show "Prisma closed" and "Open Prisma" re-enable. Because `open()` itself
+now refuses a new generation while `CLOSING`, and the UI additionally keeps
+`_active_prisma_generation` set (and both buttons disabled) for the whole closing window, a
+rapid Close-then-Open click cannot create a second owned browser session.
+
+A `close` event's `success` flag is also respected rather than assumed: a `success=False`
+close-completed event (the controller's cleanup-failure report) never reaches the "Prisma
+closed" / retryable branch. It instead calls `_prisma_close_failed`, which logs the raw
+diagnostic via `safe_log`, shows a stable English critical dialog and status text explaining
+that cleanup could not be confirmed and PrismaFunction should be restarted after checking
+Task Manager, and sets a dedicated `_prisma_close_error` lock. That lock keeps both "Open
+Prisma" and "Close Prisma" permanently disabled (`_update_controls` treats it exactly like
+the closing-in-progress lock) — there is no working retry button, matching the controller's
+own `CLOSE_FAILED` state, which likewise refuses `open()` and treats `close()` as a no-op.
+This is intentionally conservative: with no automatic retry of the failed cleanup call and no
+safe way to force-terminate the browser from the Qt thread (see the shutdown discussion
+below), the only correct alternative to a dead-end lock would be to let the user open a
+second, possibly-overlapping session against a browser that might still be alive — which the
+no-overlap contract established earlier in this increment must not allow.
+
+Application shutdown (`closeEvent`) signals the owned Prisma session to close and then waits
+for that same owned worker thread via `PrismaLifecycleController.join(timeout=0.05)`,
+re-checked in small non-blocking increments through the existing `QTimer.singleShot`
+shutdown-retry mechanism already used for monitoring/import threads, so the Qt event loop
+stays responsive throughout. For the first `PRISMA_SHUTDOWN_GRACE_SECONDS = 5s` this is
+reported as a normal "finishing safely" status. Critically, shutdown **never accepts the
+close event while `join()` still reports the worker alive**, even after that grace period —
+there is no fallback that forces the close to succeed anyway. Once the grace period elapses
+the status text instead explains that closing is taking longer than expected, and the
+non-blocking retry continues indefinitely until the worker actually finishes; only then is
+the window allowed to close. This was a deliberate choice between the two options the
+increment considered: force-terminating the owned browser/Playwright process from the Qt
+thread, or keeping shutdown visibly blocked until the worker finishes on its own. The former
+was rejected because Playwright's sync API objects (`Browser`, `Playwright`) are only valid
+on the thread that created them — the lifecycle worker thread — so the Qt thread cannot
+safely call into them, and Python's Playwright bindings do not expose the owned browser's OS
+process handle for an out-of-band kill; attempting one from the wrong thread or against the
+wrong handle would risk hanging, raising, or — worse — targeting a process PrismaFunction
+does not own. Keeping shutdown blocked with a stable, truthful status message guarantees the
+application can never exit while it still owns a live browser/Playwright worker, so no
+process is ever silently orphaned.
+
+The same principle extends to a confirmed cleanup **failure**, not just an in-progress one:
+once `join()` reports the worker thread has finished, `closeEvent` additionally checks
+`PrismaLifecycleController.state`. A finished worker thread alone is not proof of a clean
+close — the worker's cleanup exceptions are caught internally so the thread always exits
+normally, whether or not `browser.close()`/`playwright.stop()` actually succeeded. If the
+state is `CLOSE_FAILED`, shutdown ignores the close event and keeps retrying — with a status
+message telling the user to close the browser window manually and check Task Manager —
+exactly as it does for a still-alive worker, so a confirmed cleanup failure can never be
+silently accepted as a successful, safe shutdown either.
+
+Per the replacement decision, the old "Open Browser" / "Stop Browser" controls, "Load
+Monitoring CSV", "Start Monitoring", "Stop Monitoring", and their status badges are hidden
+(`QWidget.hide()`) so they cannot be triggered through the UI and no longer appear as an
+active product workflow alongside the new controls. Their underlying code, tests, and
+`BrowserController` are intentionally left in place — this increment does not perform the
+repository-wide monitoring removal assigned to P.36.10; it only disconnects the UI surface
+that would otherwise conflict with "Open Prisma" / "Close Prisma".
+
+Regression coverage in `tests/test_prisma_lifecycle.py` covers the exact approved URL
+boundary, successful open (navigating only to that URL, no other page interaction),
+repeated open while opening/open (safe no-op), close with no active session (idempotent),
+repeated close after open (idempotent), manual browser closure and retry with a new
+generation, browser startup failure, close targeting only this controller's owned browser
+instance, navigation failure, stopping mid-launch, `close()` staying in `CLOSING` (not
+reporting `IDLE`) until `browser.close()`/`playwright.stop()` cleanup actually completes,
+`open()` during `CLOSING` being a deterministic no-op that never launches a second browser,
+a rapid Close-then-Open sequence not producing an overlapping session, `join()` waiting only
+for this controller's own worker thread, `close()` reporting failure (never success) when
+`browser.close()` raises, when `playwright.stop()` raises, and when both raise — in every
+case landing in `CLOSE_FAILED` rather than `IDLE` — `open()` and `close()` both being refused
+after a close failure, and a manually closed browser still being detected and reported via
+the `is_connected()` fallback when `browser.on("disconnected", ...)` registration itself
+raises. Further coverage proves the browser-level connectivity signal alone (not a
+directly-invoked mocked `"disconnected"` callback): a manual closure is still detected by
+polling when the handler attaches without raising but the event itself is never emitted, and
+retrying `open()` after a polling-detected closure starts a new, non-overlapping generation.
+Reproducing the confirmed real-world defect, dedicated page-level coverage proves the owned
+`Page`, not the `Browser`, is what actually drives detection: a manual closure is detected
+when the owned page closes silently (no `"close"` event delivered, `browser.is_connected()`
+still `True`) purely via `page.is_closed()` polling; the same closure is detected via the real
+`page.on("close", ...)` event, again with the browser still reporting connected; exactly one
+typed `closed` event is published even when the page-close and browser-disconnect signals both
+fire for the same closure; retrying `open()` after a page-detected closure starts a new,
+non-overlapping generation; and a normal, application-requested `close()` is never
+misclassified as a manual closure even when Playwright's realistic `"close"` cascade to the
+owned page fires while cleanup is already in progress. `tests/test_app.py`
+adds coverage for the new controls' state transitions, stable
+English error presentation, the asynchronous "Closing Prisma…" UI state that only resolves
+once the close-completed event lands, Open being a no-op during closing, a rapid
+Close-then-Open not overlapping sessions at the UI layer, a single `get_events()` drain
+containing a successful open followed by a manual `closed` event, a single drain containing a
+successful open followed by a close-completed `close` event, a single drain mixing
+stale-generation events with active-generation ones, a terminal open failure followed by a
+spurious event not producing a duplicate error dialog, a `close` cleanup-failure event
+locking both controls with a stable error (and proving Open/Close clicks are then no-ops),
+shutdown never accepting the close event while the owned lifecycle worker reports itself
+alive (including past the grace period), shutdown never accepting once cleanup is confirmed
+failed (`CLOSE_FAILED`) even though the worker thread itself has finished, and proof that the
+superseded monitoring controls are hidden while their code paths remain callable. The full
+pytest suite (489 tests), Python compilation, and whitespace validation passed for this
+increment; no packaging files, browser runtime dependencies, entry points, or bundled
+resources changed, so no packaging validation was required.
+
+Three subsequent manual-closure-detection change rounds followed (all still within P.36.2, no
+scope change), each retested on real Windows hardware by the user. Rounds one and two are the
+"first attempt" and "second attempt" in the real-runtime evidence log above; **both failed real
+X-button retest** — the browser window closed but PrismaFunction kept reporting "Prisma open"
+indefinitely both times, so neither `is_connected()`-only polling nor the
+Page/Context-close-event-and-poll combination was actually sufficient, despite earlier revisions
+of this document having called the second one "verified." Round three ("third attempt" above)
+added the CDP `Target.targetDestroyed` ground-truth signal, together with the additional
+`tests/test_prisma_lifecycle.py` coverage listed above (six tests: CDP-target-destroyed
+detection while the page/browser signals stay silent, resilience when CDP session creation
+itself fails, graceful fallback when the CDP baseline is ambiguous, exactly-one-event with CDP
+and page signals both firing, retry without overlap after a CDP-detected closure, and the
+CLOSING-state guard against a cascading `Target.targetDestroyed` during a normal close). **Round
+three passed real X-button retest** on 2026-08-01, confirming the CDP owned-target-destruction
+signal is the real-runtime-validated fix. The temporary diagnostics added alongside round three
+to correlate that test were removed afterward per the note above; the CDP detection logic and
+its regression coverage were retained unchanged. The full pytest suite (503 tests), Python
+compilation (project-wide `compileall`, excluding `.venv`, `build`, `.git`, `__pycache__`, and
+backup/cache directories), `validate_package.py`, and `git diff --check` all passed after
+diagnostic removal.
+
+**Final lifecycle contract.** `PrismaLifecycleController` owns exactly one manual, unautomated
+PRISMA browser session per the semantics described earlier in this section (`open()`/`close()`/
+`join()`, the `IDLE`/`OPENING`/`OPEN`/`CLOSING`/`CLOSE_FAILED` states, and the typed `open`/
+`close`/`closed` events). Manual closure is detected by, in order of how they were introduced:
+the browser-level `disconnected` event and `is_connected()` polling; the owned page's `close`
+event and `is_closed()` polling; and the CDP `Target.targetDestroyed` event for the owned page's
+target identified at open time. All are layered together as independent, non-exclusive signals;
+whichever fires first calls `mark_manual_closure`, which is idempotent (at most one typed
+`closed` event per generation) and inert while an application-requested close is already in
+progress. Only concise operational logging remains: session opened (default-browser detection,
+browser created, navigation completed), manual closure detected (including which signal source
+fired), application-requested closure, the final cleanup result (state, classification, whether
+cleanup failed), and actionable CDP setup/correlation failures (attach/session-creation failure,
+or an ambiguous owned-target baseline) — never periodic snapshots, heartbeats, or a log line per
+CDP target-create/info-change event, and never URLs, titles, page content, credentials, cookies,
+storage, or form data.
+
+Not yet done: `P.36.3` onward (download directory, CSV selection, mapping, output writing), and
+the physical removal of the superseded monitoring/dashboard/scheduler code (P.36.10). P.36.2
+itself is complete: the real Windows X-button test above confirms the accepted behavior, the
+temporary diagnostics used to correlate that test have been removed, the focused and full test
+suites pass, and no critical review finding remains open.

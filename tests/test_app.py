@@ -25,6 +25,7 @@ from prisma_page import (
     PrismaPageUnavailableError,
 )
 from prisma_import_workflow import PrismaWorkflowResult
+from prisma_lifecycle import PrismaLifecycleEvent, PrismaLifecycleState
 from prisma_source_updates import SourceUpdateStatus
 from version import APP_DISPLAY_NAME, __version__
 from ui_components import APP_STYLE, ArrowComboBox
@@ -39,6 +40,7 @@ def qt_app() -> QApplication:
 def window(qt_app, monkeypatch, tmp_path):
     browser = Mock()
     monkeypatch.setattr(app, "BrowserController", Mock(return_value=browser))
+    monkeypatch.setattr(app, "PrismaLifecycleController", Mock(return_value=Mock()))
     root = tmp_path / "runtime"
     paths = app.RuntimePaths(
         root=root, database=root / "data/test.db",
@@ -108,6 +110,33 @@ def test_initial_dashboard_state_and_accessibility(window):
         widget.summary_cards[key].value.text()
         for key in ("total", "active", "completed", "errors")
     ] == ["0", "0", "0", "0"]
+
+
+def test_p36_2_legacy_monitoring_controls_are_hidden_not_deleted(window):
+    widget, _ = window
+    for legacy_widget in (
+        widget.open_button, widget.stop_browser_button,
+        widget.load_csv_button, widget.csv_filename, widget.csv_count,
+        widget.start_monitoring_button, widget.stop_monitoring_button,
+        widget.browser_badge, widget.monitor_badge,
+    ):
+        assert legacy_widget.isHidden()
+    # The underlying old code paths remain callable directly (not deleted);
+    # only the P.36.2 replacement decision removes them from the visible UI.
+    assert callable(widget.open_prisma)
+    assert callable(widget.select_csv)
+    assert callable(widget.start_monitoring)
+
+
+def test_p36_2_prisma_controls_exist_and_start_in_a_closed_retryable_state(window):
+    widget, _ = window
+    assert widget.open_prisma_button.text() == "Open Prisma"
+    assert widget.close_prisma_button.text() == "Close Prisma"
+    assert not widget.open_prisma_button.isHidden()
+    assert not widget.close_prisma_button.isHidden()
+    assert widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+    assert widget.prisma_badge.text() == "Prisma closed"
 
 
 def test_light_workspace_widgets_use_explicit_contrast_styles(window):
@@ -327,6 +356,423 @@ def test_browser_launch_failure_recovers_retry_controls(window, monkeypatch):
     assert widget.browser_badge.text() == "Error"
     critical.assert_called_once()
     assert "diagnostic detail" not in critical.call_args.args[2]
+
+
+def test_open_prisma_session_success_updates_badge_and_status(window, monkeypatch):
+    widget, _ = window
+    widget.prisma_lifecycle.open.return_value = 11
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="open")
+    ]
+    monkeypatch.setattr(widget._prisma_timer, "start", Mock())
+    monkeypatch.setattr(widget._prisma_timer, "stop", Mock())
+
+    widget._open_prisma_session()
+    widget._poll_prisma_lifecycle()
+
+    widget.prisma_lifecycle.open.assert_called_once_with()
+    assert widget._prisma_open
+    assert widget.prisma_badge.text() == "Prisma open"
+    assert "PRISMA opened" in widget.status.text()
+    assert not widget.open_prisma_button.isEnabled()
+    assert widget.close_prisma_button.isEnabled()
+
+
+def test_repeated_open_prisma_click_is_a_safe_no_op_while_active(window):
+    widget, _ = window
+    widget.prisma_lifecycle.open.return_value = 11
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+
+    widget._open_prisma_session()
+
+    widget.prisma_lifecycle.open.assert_not_called()
+
+
+def test_close_prisma_with_no_active_session_is_idempotent(window):
+    widget, _ = window
+
+    widget._close_prisma_session()
+    widget._close_prisma_session()
+
+    assert widget.prisma_lifecycle.close.call_count == 2
+    assert not widget._prisma_open
+    assert widget._active_prisma_generation is None
+    assert widget.prisma_badge.text() == "Prisma closed"
+    assert widget.status.text() == "PRISMA closed"
+
+
+def test_close_prisma_session_enters_a_stable_closing_state(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget._update_controls()
+
+    widget._close_prisma_session()
+
+    widget.prisma_lifecycle.close.assert_called_once_with()
+    assert widget._prisma_closing
+    assert widget._active_prisma_generation == 11
+    assert widget.prisma_badge.text() == "Closing Prisma…"
+    assert widget.status.text() == "Closing PRISMA…"
+    assert not widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+
+
+def test_repeated_close_click_while_closing_does_not_resignal(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget._update_controls()
+    widget._close_prisma_session()
+
+    widget._close_prisma_session()
+
+    widget.prisma_lifecycle.close.assert_called_once_with()
+
+
+def test_close_completed_event_restores_idle_controls_only_after_cleanup(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget._update_controls()
+    widget._close_prisma_session()
+    assert not widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+
+    widget.prisma_lifecycle.get_events.return_value = []
+    widget._poll_prisma_lifecycle()
+    assert widget._prisma_closing
+    assert not widget.open_prisma_button.isEnabled()
+    assert widget.prisma_badge.text() == "Closing Prisma…"
+
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="close")
+    ]
+    widget._poll_prisma_lifecycle()
+
+    assert not widget._prisma_closing
+    assert not widget._prisma_open
+    assert widget._active_prisma_generation is None
+    assert widget.prisma_badge.text() == "Prisma closed"
+    assert widget.status.text() == "PRISMA closed"
+    assert widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+
+
+def test_open_prisma_click_during_closing_is_a_deterministic_no_op(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget._update_controls()
+    widget._close_prisma_session()
+    widget.prisma_lifecycle.open.reset_mock()
+
+    widget._open_prisma_session()
+
+    widget.prisma_lifecycle.open.assert_not_called()
+    assert widget._active_prisma_generation == 11
+    assert not widget.open_prisma_button.isEnabled()
+
+
+def test_rapid_close_then_open_cannot_produce_overlapping_sessions(window):
+    widget, _ = window
+    widget.prisma_lifecycle.open.return_value = 11
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="open")
+    ]
+    widget._open_prisma_session()
+    widget._poll_prisma_lifecycle()
+    assert widget._prisma_open
+    widget.prisma_lifecycle.open.reset_mock()
+
+    widget._close_prisma_session()
+    widget._open_prisma_session()
+
+    widget.prisma_lifecycle.open.assert_not_called()
+
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="close")
+    ]
+    widget._poll_prisma_lifecycle()
+    assert widget.open_prisma_button.isEnabled()
+
+    widget.prisma_lifecycle.open.return_value = 12
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(12, True, kind="open")
+    ]
+    widget._open_prisma_session()
+    widget._poll_prisma_lifecycle()
+
+    widget.prisma_lifecycle.open.assert_called_once_with()
+    assert widget._prisma_open
+    assert widget._active_prisma_generation == 12
+
+
+def test_manual_prisma_closure_returns_a_retryable_state(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget._update_controls()
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(
+            11, False, "The PRISMA browser was closed manually.", kind="closed"
+        )
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert not widget._prisma_open
+    assert widget._active_prisma_generation is None
+    assert widget.prisma_badge.text() == "Prisma closed"
+    assert "Open Prisma to retry" in widget.status.text()
+    assert widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+
+
+def test_stale_prisma_event_does_not_change_dashboard(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(10, True, kind="open")
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert not widget._prisma_open
+    assert widget.prisma_badge.text() == "Prisma closed"
+
+
+def test_single_drain_with_open_then_manual_closed_loses_no_event(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="open"),
+        PrismaLifecycleEvent(
+            11, False, "The PRISMA browser was closed manually.", kind="closed"
+        ),
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert not widget._prisma_open
+    assert widget._active_prisma_generation is None
+    assert widget.prisma_badge.text() == "Prisma closed"
+    assert "Open Prisma to retry" in widget.status.text()
+    assert widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+    activity_texts = [
+        widget.activity_list.item(i).text()
+        for i in range(widget.activity_list.count())
+    ]
+    assert sum("Prisma closed manually" in text for text in activity_texts) == 1
+
+
+def test_single_drain_with_open_then_close_completed_loses_no_event(window):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_closing = True
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="open"),
+        PrismaLifecycleEvent(11, True, kind="close"),
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert not widget._prisma_open
+    assert not widget._prisma_closing
+    assert widget._active_prisma_generation is None
+    assert widget.prisma_badge.text() == "Prisma closed"
+    assert widget.status.text() == "PRISMA closed"
+    assert widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+
+
+def test_close_failure_event_locks_controls_with_a_stable_error(window, monkeypatch):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    widget._prisma_closing = True
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(
+            11, False,
+            "The PRISMA browser could not be confirmed closed.", kind="close",
+        )
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert not widget._prisma_open
+    assert not widget._prisma_closing
+    assert widget._prisma_close_error
+    assert widget.prisma_badge.text() == "Prisma close error"
+    assert not widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+    critical.assert_called_once()
+
+    widget.prisma_lifecycle.open.reset_mock()
+    widget._open_prisma_session()
+    widget.prisma_lifecycle.open.assert_not_called()
+
+    widget.prisma_lifecycle.close.reset_mock()
+    widget._close_prisma_session()
+    widget.prisma_lifecycle.close.assert_not_called()
+
+
+def test_single_drain_skips_stale_generation_events_mixed_with_active_ones(window):
+    widget, _ = window
+    widget._active_prisma_generation = 12
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="open"),
+        PrismaLifecycleEvent(
+            11, False, "The PRISMA browser was closed manually.", kind="closed"
+        ),
+        PrismaLifecycleEvent(12, True, kind="open"),
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert widget._prisma_open
+    assert widget._active_prisma_generation == 12
+    assert widget.prisma_badge.text() == "Prisma open"
+
+
+def test_open_prisma_startup_failure_shows_stable_english_error(window, monkeypatch):
+    widget, _ = window
+    widget.prisma_lifecycle.open.return_value = 11
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, False, "diagnostic detail", kind="open")
+    ]
+    monkeypatch.setattr(widget._prisma_timer, "start", Mock())
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._open_prisma_session()
+    widget._poll_prisma_lifecycle()
+
+    assert widget.open_prisma_button.isEnabled()
+    assert not widget.close_prisma_button.isEnabled()
+    assert widget.prisma_badge.text() == "Prisma error"
+    critical.assert_called_once()
+    assert "diagnostic detail" not in critical.call_args.args[2]
+
+
+def test_single_drain_stops_after_a_terminal_open_failure_avoiding_duplicate_dialogs(
+    window, monkeypatch
+):
+    widget, _ = window
+    widget._active_prisma_generation = 11
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, False, "diagnostic detail", kind="open"),
+        PrismaLifecycleEvent(
+            11, False, "The PRISMA browser was closed manually.", kind="closed"
+        ),
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    critical.assert_called_once()
+    assert widget.prisma_badge.text() == "Prisma error"
+
+
+def test_open_prisma_session_raising_synchronously_is_handled(window, monkeypatch):
+    widget, _ = window
+    widget.prisma_lifecycle.open.side_effect = RuntimeError("driver missing")
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+
+    widget._open_prisma_session()
+
+    assert not widget._prisma_open
+    assert widget._active_prisma_generation is None
+    assert widget.prisma_badge.text() == "Prisma error"
+
+
+def test_shutdown_closes_only_the_owned_prisma_session(window):
+    widget, browser = window
+
+    widget.closeEvent(Mock())
+
+    widget.prisma_lifecycle.close.assert_called_once_with()
+    browser.stop.assert_called_once_with()
+
+
+def test_shutdown_waits_boundedly_for_prisma_lifecycle_cleanup(window, monkeypatch):
+    widget, _ = window
+    widget.prisma_lifecycle.join.return_value = False
+    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
+    close_event = Mock()
+
+    widget.closeEvent(close_event)
+
+    widget.prisma_lifecycle.close.assert_called_once_with()
+    widget.prisma_lifecycle.join.assert_called_once_with(timeout=0.05)
+    close_event.ignore.assert_called_once_with()
+    close_event.accept.assert_not_called()
+    assert "PRISMA browser session is finishing safely" in widget.status.text()
+
+    widget.prisma_lifecycle.join.return_value = True
+    finished_event = Mock()
+    widget.closeEvent(finished_event)
+
+    finished_event.accept.assert_called_once_with()
+
+
+def test_shutdown_never_accepts_while_the_lifecycle_worker_is_still_alive(window, monkeypatch):
+    widget, _ = window
+    widget.prisma_lifecycle.join.return_value = False
+    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
+    widget.closeEvent(Mock())
+    widget._prisma_shutdown_deadline = time.monotonic() - 1
+
+    still_alive_event = Mock()
+    widget.closeEvent(still_alive_event)
+
+    still_alive_event.accept.assert_not_called()
+    still_alive_event.ignore.assert_called_once_with()
+    assert "longer than expected" in widget.status.text()
+
+    another_event = Mock()
+    widget.closeEvent(another_event)
+
+    another_event.accept.assert_not_called()
+    another_event.ignore.assert_called_once_with()
+
+    widget.prisma_lifecycle.join.return_value = True
+    finished_event = Mock()
+    widget.closeEvent(finished_event)
+
+    finished_event.accept.assert_called_once_with()
+
+
+def test_shutdown_never_accepts_when_close_cleanup_could_not_be_confirmed(
+    window, monkeypatch
+):
+    widget, _ = window
+    widget.prisma_lifecycle.join.return_value = True
+    widget.prisma_lifecycle.state = PrismaLifecycleState.CLOSE_FAILED
+    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
+
+    first_event = Mock()
+    widget.closeEvent(first_event)
+
+    first_event.accept.assert_not_called()
+    first_event.ignore.assert_called_once_with()
+    assert "cannot exit safely" in widget.status.text()
+
+    second_event = Mock()
+    widget.closeEvent(second_event)
+
+    second_event.accept.assert_not_called()
+    second_event.ignore.assert_called_once_with()
+
+    widget.prisma_lifecycle.state = PrismaLifecycleState.IDLE
+    finished_event = Mock()
+    widget.closeEvent(finished_event)
+
+    finished_event.accept.assert_called_once_with()
 
 
 def test_search_and_status_changes_refresh_visible_rows_immediately(window):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -45,6 +46,7 @@ from prisma_page import (
     PrismaPageUnavailableError,
 )
 from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
+from prisma_lifecycle import PrismaLifecycleController, PrismaLifecycleState
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
@@ -63,6 +65,7 @@ from ui_components import (
 from version import APP_DISPLAY_NAME, __version__
 
 DEFAULT_MONITORING_INTERVAL_SECONDS = 30.0
+PRISMA_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -91,10 +94,16 @@ class PrismaMonitorApp(QMainWindow):
         self.setMinimumSize(1080, 680)
         self.resize(1280, 800)
         self.browser = BrowserController()
+        self.prisma_lifecycle = PrismaLifecycleController()
         self._logger = logging.getLogger(LOGGER_NAME)
         self._is_closing = False
         self._browser_ready = False
         self._active_browser_launch: int | None = None
+        self._active_prisma_generation: int | None = None
+        self._prisma_open = False
+        self._prisma_closing = False
+        self._prisma_close_error = False
+        self._prisma_shutdown_deadline: float | None = None
         self._auction_records: list[AuctionCsvRecord] = []
         self._monitoring_thread: threading.Thread | None = None
         self._monitoring_stop_event: threading.Event | None = None
@@ -110,6 +119,9 @@ class PrismaMonitorApp(QMainWindow):
         self._browser_timer = QTimer(self)
         self._browser_timer.setInterval(50)
         self._browser_timer.timeout.connect(self._poll_browser_launch)
+        self._prisma_timer = QTimer(self)
+        self._prisma_timer.setInterval(50)
+        self._prisma_timer.timeout.connect(self._poll_prisma_lifecycle)
         self._build_ui()
         self._update_controls()
         self._add_activity("Application ready")
@@ -153,15 +165,42 @@ class PrismaMonitorApp(QMainWindow):
         self.open_button = self._button("Open Browser", self.open_prisma, primary=True,
             tooltip="Open a PrismaFunction-managed PRISMA browser session")
         self.stop_browser_button = self._button("Stop Browser", self.stop_work)
-        self._side_group(side, "BROWSER", self.open_button, self.stop_browser_button)
+        browser_heading = self._side_group(side, "BROWSER", self.open_button, self.stop_browser_button)
         self.load_csv_button = self._button("Load Monitoring CSV", self.select_csv, primary=True)
         self.csv_filename = QLabel("No CSV selected")
         self.csv_filename.setObjectName("filename")
         self.csv_count = QLabel("0 records loaded")
-        self._side_group(side, "DATA SOURCE", self.load_csv_button, self.csv_filename, self.csv_count)
+        data_source_heading = self._side_group(
+            side, "DATA SOURCE", self.load_csv_button, self.csv_filename, self.csv_count
+        )
         self.start_monitoring_button = self._button("Start Monitoring", self.start_monitoring, primary=True)
         self.stop_monitoring_button = self._button("Stop Monitoring", self.stop_monitoring)
-        self._side_group(side, "MONITORING", self.start_monitoring_button, self.stop_monitoring_button)
+        monitoring_heading = self._side_group(
+            side, "MONITORING", self.start_monitoring_button, self.stop_monitoring_button
+        )
+        # P.36.2: the manual CSV workflow replaces the live monitoring dashboard,
+        # scheduler, and automated monitoring workflow (see ROADMAP.md). These
+        # controls stay in the codebase for now (full removal is P.36.10) but are
+        # hidden so they cannot be triggered through the UI and do not appear as
+        # an active product workflow alongside the new PRISMA lifecycle controls.
+        for widget in (
+            browser_heading, self.open_button, self.stop_browser_button,
+            data_source_heading, self.load_csv_button, self.csv_filename, self.csv_count,
+            monitoring_heading, self.start_monitoring_button, self.stop_monitoring_button,
+        ):
+            widget.hide()
+        self.open_prisma_button = self._button(
+            "Open Prisma", self._open_prisma_session, primary=True,
+            tooltip=(
+                "Open the official PRISMA auctions page in an "
+                "application-owned browser session"
+            ),
+        )
+        self.close_prisma_button = self._button(
+            "Close Prisma", self._close_prisma_session,
+            tooltip="Close the PrismaFunction-managed PRISMA browser session",
+        )
+        self._side_group(side, "PRISMA", self.open_prisma_button, self.close_prisma_button)
         side.addStretch()
         self.import_date = QDateEdit(QDate.currentDate())
         self.import_date.setCalendarPopup(True)
@@ -209,8 +248,13 @@ class PrismaMonitorApp(QMainWindow):
         self.browser_badge.setObjectName("browserBadge")
         self.monitor_badge = QLabel("Monitoring idle")
         self.monitor_badge.setObjectName("monitorBadge")
+        self.browser_badge.hide()
+        self.monitor_badge.hide()
+        self.prisma_badge = QLabel("Prisma closed")
+        self.prisma_badge.setObjectName("browserBadge")
         header.addWidget(self.browser_badge)
         header.addWidget(self.monitor_badge)
+        header.addWidget(self.prisma_badge)
         main.addLayout(header)
         cards = QHBoxLayout()
         self.summary_cards: dict[str, SummaryCard] = {}
@@ -295,15 +339,17 @@ class PrismaMonitorApp(QMainWindow):
         self.status_filter.currentTextChanged.connect(self.proxy_model.set_status)
         self._set_badge(self.browser_badge, "Disconnected", "idle")
         self._set_badge(self.monitor_badge, "Monitoring idle", "idle")
+        self._set_badge(self.prisma_badge, "Prisma closed", "idle")
 
     @staticmethod
-    def _side_group(layout: QLayout, label: str, *widgets: QWidget) -> None:
+    def _side_group(layout: QLayout, label: str, *widgets: QWidget) -> QLabel:
         heading = QLabel(label)
         heading.setObjectName("section")
         layout.addWidget(heading)
         for widget in widgets:
             layout.addWidget(widget)
         layout.addSpacing(13)
+        return heading
 
     def _set_badge(self, badge: QLabel, text: str, state: str) -> None:
         badge.setText(text)
@@ -344,6 +390,14 @@ class PrismaMonitorApp(QMainWindow):
         self.stop_monitoring_button.setEnabled(monitoring)
         self.process_button.setEnabled(not self._processing_active)
         self.import_date.setEnabled(not self._processing_active)
+        prisma_opening = self._active_prisma_generation is not None and not self._prisma_open
+        prisma_locked = self._prisma_closing or self._prisma_close_error
+        self.open_prisma_button.setEnabled(
+            not prisma_opening and not self._prisma_open and not prisma_locked
+        )
+        self.close_prisma_button.setEnabled(
+            (prisma_opening or self._prisma_open) and not prisma_locked
+        )
 
     def select_csv(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "Load Monitoring CSV", "", "CSV files (*.csv)")
@@ -434,6 +488,124 @@ class PrismaMonitorApp(QMainWindow):
         )
         self.status.setText("Failed to open the browser")
         self._add_activity("Browser error")
+
+    def _open_prisma_session(self) -> None:
+        if (
+            self._active_prisma_generation is not None
+            or self._prisma_open
+            or self._prisma_closing
+            or self._prisma_close_error
+        ):
+            return
+        try:
+            self.status.setText("Opening PRISMA…")
+            self._set_badge(self.prisma_badge, "Opening PRISMA…", "working")
+            self._active_prisma_generation = self.prisma_lifecycle.open()
+            self._prisma_timer.start()
+            self._update_controls()
+        except Exception as exc:
+            self._prisma_open_failed(exc)
+
+    def _poll_prisma_lifecycle(self) -> None:
+        if self._is_closing or self._active_prisma_generation is None:
+            self._prisma_timer.stop()
+            return
+        target_generation = self._active_prisma_generation
+        terminal_reached = False
+        controls_dirty = False
+        events = self.prisma_lifecycle.get_events()
+        for event in events:
+            if terminal_reached or event.generation != target_generation:
+                continue
+            if event.kind == "open":
+                if event.success:
+                    self._prisma_open = True
+                    self._set_badge(self.prisma_badge, "Prisma open", "ready")
+                    self.status.setText("PRISMA opened in the managed browser session.")
+                    self._add_activity("Prisma opened")
+                    controls_dirty = True
+                else:
+                    self._prisma_open_failed(event.error or "Unknown error")
+                    terminal_reached = True
+            elif event.kind == "close":
+                if event.success:
+                    self._active_prisma_generation = None
+                    self._prisma_open = False
+                    self._prisma_closing = False
+                    self._prisma_timer.stop()
+                    self._set_badge(self.prisma_badge, "Prisma closed", "idle")
+                    self.status.setText("PRISMA closed")
+                    self._add_activity("Prisma closed")
+                    controls_dirty = True
+                else:
+                    self._prisma_close_failed(event.error or "Unknown error")
+                terminal_reached = True
+            else:
+                self._active_prisma_generation = None
+                self._prisma_open = False
+                self._prisma_closing = False
+                self._prisma_timer.stop()
+                self._set_badge(self.prisma_badge, "Prisma closed", "idle")
+                self.status.setText("PRISMA was closed manually. Open Prisma to retry.")
+                self._add_activity("Prisma closed manually")
+                controls_dirty = True
+                terminal_reached = True
+        if controls_dirty:
+            self._update_controls()
+
+    def _prisma_open_failed(self, exc: Exception | str) -> None:
+        if self._is_closing:
+            return
+        self._active_prisma_generation = None
+        self._prisma_open = False
+        self._prisma_timer.stop()
+        safe_log(self._logger, logging.ERROR, "Open Prisma failed: %s", exc)
+        self._set_badge(self.prisma_badge, "Prisma error", "error")
+        self._update_controls()
+        self._show_error(
+            "Prisma Error",
+            "PRISMA could not be opened. Check Chrome or Edge and try again.",
+        )
+        self.status.setText("Failed to open PRISMA")
+        self._add_activity("Prisma error")
+
+    def _prisma_close_failed(self, exc: Exception | str) -> None:
+        self._active_prisma_generation = None
+        self._prisma_open = False
+        self._prisma_closing = False
+        self._prisma_close_error = True
+        self._prisma_timer.stop()
+        safe_log(self._logger, logging.ERROR, "Close Prisma cleanup failed: %s", exc)
+        self._set_badge(self.prisma_badge, "Prisma close error", "error")
+        self._update_controls()
+        self._show_error(
+            "Prisma Error",
+            "PRISMA could not be confirmed closed. Check Task Manager for a "
+            "lingering browser process, then restart PrismaFunction.",
+        )
+        self.status.setText(
+            "PRISMA could not be confirmed closed. Restart PrismaFunction after "
+            "checking Task Manager for a lingering browser process."
+        )
+        self._add_activity("Prisma close error")
+
+    def _close_prisma_session(self) -> None:
+        if self._prisma_closing or self._prisma_close_error:
+            return
+        had_active_session = self._active_prisma_generation is not None
+        self.prisma_lifecycle.close()
+        if not had_active_session:
+            self._prisma_open = False
+            self._set_badge(self.prisma_badge, "Prisma closed", "idle")
+            self.status.setText("PRISMA closed")
+            self._add_activity("Prisma closed")
+            self._update_controls()
+            return
+        self._prisma_closing = True
+        self._set_badge(self.prisma_badge, "Closing Prisma…", "working")
+        self.status.setText("Closing PRISMA…")
+        self._add_activity("Prisma closing")
+        self._update_controls()
 
     def create_monitoring_engine(self) -> MonitoringEngine:
         return MonitoringEngine(
@@ -723,6 +895,11 @@ class PrismaMonitorApp(QMainWindow):
             if self._monitoring_stop_event is not None:
                 self._monitoring_stop_event.set()
             self.browser.stop()
+            self._prisma_timer.stop()
+            self.prisma_lifecycle.close()
+            self._prisma_shutdown_deadline = (
+                time.monotonic() + PRISMA_SHUTDOWN_GRACE_SECONDS
+            )
         threads = (
             [self._monitoring_thread] if self._monitoring_thread else []
         ) + list(self._processing_threads)
@@ -734,6 +911,30 @@ class PrismaMonitorApp(QMainWindow):
             event.ignore()
             QTimer.singleShot(100, self.close)
             return
+        if not self.prisma_lifecycle.join(timeout=0.05):
+            if time.monotonic() < self._prisma_shutdown_deadline:
+                self.status.setText(
+                    "Closing; the PRISMA browser session is finishing safely."
+                )
+            else:
+                self.status.setText(
+                    "Closing is taking longer than expected while the PRISMA "
+                    "browser session finishes; PrismaFunction will exit as soon "
+                    "as it is safe to do so."
+                )
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        if self.prisma_lifecycle.state is PrismaLifecycleState.CLOSE_FAILED:
+            self.status.setText(
+                "PRISMA browser cleanup could not be confirmed; PrismaFunction "
+                "cannot exit safely. Close the browser window manually if it is "
+                "still open, then check Task Manager for a lingering process."
+            )
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        self._active_prisma_generation = None
         event.accept()
 
 
