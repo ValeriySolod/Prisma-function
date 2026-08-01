@@ -77,16 +77,22 @@ manual workflow than the automated/paired acquisition line P.35.2-P.35.5 pursued
 - All file processing happens only inside the Prisma Function program, after the user supplies the
   downloaded file to it.
 - The user manually closes PRISMA (a "closed Prisma" control) when finished.
-- Output is a `;`-delimited UTF-8 CSV with a fixed 12-field contract (auction date; exit market or
-  storage; entry market or storage; capacity type entry/exit/bundle; point name; product type;
-  flow start/end timestamps; booked capacity; computed flow-duration hours; tariff price; premium
-  price), filtered to auctions with booked capacity ≥ 1 MWh, all prices normalized to EUR/MWh/h, all
-  timestamps in CET/CEST, decimal separator `.`.
+- Output is a `;`-delimited UTF-8 CSV with a fixed 14-field contract (auction date; `Exit Market`;
+  `Exit Storage`; `Entry Market`; `Entry Storage`; capacity type entry/exit/bundle; point name;
+  product type; flow start/end timestamps; booked capacity; computed flow-duration hours; tariff
+  price; premium price), filtered to auctions with booked capacity ≥ 1 MWh, all prices normalized to
+  EUR/MWh/h, all timestamps in CET/CEST, decimal separator `.`. The specification's single combined
+  "Ринок виходу або Хранилище" / "Ринок входу або Хранилище" fields are resolved (see "Resolved
+  specification questions" below, P.36.5) into four always-present, side-specific columns: a Market
+  value populates only the corresponding Market column and a Storage value populates only the
+  corresponding Storage column; no value is copied into both columns and no opposite-side value is
+  inferred.
 - The program must also display the market/storage mapping referenced by the specification's
   attached screenshot; the screenshot has been supplied and reviewed (see "Resolved specification
   questions" below for its approved column contract).
-- PDF input is mentioned only as "CSV (PDF if needed)"; the condition that would require PDF is not
-  specified, so PDF support stays out of scope until authoritatively clarified.
+- PDF input is mentioned only as "CSV (PDF if needed)"; the customer has explicitly decided that PDF
+  input and PDF processing are excluded from the current product version (see "Resolved
+  specification questions" below, P.36.5). PDF support is not planned for the current version.
 
 P.35.2's automated CSV/PDF pairing, staging, and fingerprinting design conflicts with this manual
 model and was cancelled rather than adapted, per the sequence below (P.36).
@@ -115,18 +121,33 @@ model and was cancelled rather than adapted, per the sequence below (P.36).
   `https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions`. This is the same
   URL the existing (now superseded) monitoring subsystem already targets. This resolves former
   question 3.
+- **PDF trigger condition (resolved 2026-08-01, P.36.5).** The customer has explicitly decided that
+  PDF input and PDF processing are excluded from the current product version. "CSV файл (за потреби
+  pdf)" is treated as satisfied entirely by the CSV-only manual workflow already implemented through
+  P.36.4: no PDF file is selected, parsed, paired, staged, required, or used as runtime input in the
+  current version. This resolves the former "PDF trigger condition" question. The `P.36.5` "Optional
+  PDF support" implementation stage that previously occupied this roadmap slot is cancelled/superseded
+  by this decision (see the P.36 roadmap table below). Historical PDF evidence already used for
+  approved mapping catalog entries (for example `evidence/p35-1/Auction_Overview.pdf`) is unaffected:
+  excluding runtime PDF support does not invalidate or delete historical evidence or its manifests.
+  Dependency and obsolete-code removal remain scoped to `P.36.10`; no PDF library, evidence, test, or
+  code is removed by this decision.
+- **Exit/Entry market-or-storage output shape (resolved 2026-08-01, P.36.5).** The customer has
+  explicitly decided that Exit/Entry Market and Storage values must use separate, always-present
+  output columns instead of the specification's single combined "Ринок виходу або Хранилище" /
+  "Ринок входу або Хранилище" field per side. The authoritative output contract is now 14 fields, in
+  this order: auction date, `Exit Market`, `Exit Storage`, `Entry Market`, `Entry Storage`, capacity
+  type entry/exit/bundle, point name, product type, flow start/end timestamps, booked capacity,
+  computed flow-duration hours, tariff price, and premium price. A Market value populates only the
+  matching Market column and a Storage value populates only the matching Storage column; no value is
+  copied into both columns and no opposite-side value is inferred. This resolves the former
+  "Exit/Entry market-or-storage output shape" question. `P.36.6` is now unblocked.
 
 ### Unresolved specification questions (require authoritative clarification, not inferred)
 
-1. **PDF trigger condition.** "CSV файл (за потреби pdf)" states a PDF may be needed "if required,"
-   without stating when. Until clarified, PDF import (P.36.5) remains unimplemented/out of scope.
-2. **Exit/Entry market-or-storage output shape.** The specification's output contract lists a single
-   "Ринок виходу або Хранилище" (exit market-or-storage) and a single "Ринок входу або Хранилище"
-   (entry market-or-storage) field per row, rather than separate always-present exit/entry columns.
-   Whether this reuses the existing Market/Storage reference-catalog duality as-is, or requires a
-   restructured output shape, needs confirmation before P.36.6/P.36.7 are implemented.
-
-Neither remaining question is a P.36.2 prerequisite.
+None remain. Both previously open questions — the PDF trigger condition and the Exit/Entry
+market-or-storage output shape — were resolved on 2026-08-01 by explicit customer decision recorded
+in `P.36.5` above; see "Resolved specification questions" above for the full record.
 
 ## P.36 roadmap — manual PRISMA workflow (per `Prisma Function.odt`)
 
@@ -136,13 +157,13 @@ started until their applicable open questions are resolved.
 
 | ID | Stage | Status | Scope |
 |---|---|---|---|
-| P.36.1 | Adopt the authoritative specification: documentation and contracts only | ✅ Completed | Recorded the manual workflow, the 12-field output CSV contract (names, order, formats, units), and the open questions above. No application behavior changed. |
+| P.36.1 | Adopt the authoritative specification: documentation and contracts only | ✅ Completed | Recorded the manual workflow, the original 12-field output CSV contract (names, order, formats, units), and the open questions above. The output contract was later revised to 14 fields and both open questions were resolved by P.36.5. No application behavior changed. |
 | P.36.2 | Manual "Open Prisma" / "Close Prisma" lifecycle | ✅ Completed | A user-triggered "Open Prisma" control opens exactly `https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` in an application-owned browser session; a separate "Close Prisma" control closes only that owned session. No automated navigation, login, date-setting, filtering, or download. Manual closure (the browser window's own X button) is detected via layered browser/page/CDP `Target.targetDestroyed` signals, real-Windows-validated on 2026-08-01; temporary diagnostic logging used to validate that fix was removed afterward. The superseded monitoring dashboard/CSV-load/start-monitoring/stop-monitoring controls are hidden from the UI (not deleted) so they cannot run or conflict with these controls; full removal remains P.36.10. |
 | P.36.3 | Documents-based or user-selected download directory | ✅ Completed | Default the expected download location to the user's Documents folder; let the user choose a different folder explicitly. No hidden internal staging path. |
 | P.36.4 | Manual CSV selection and validation | ✅ Completed | A "Select CSV" control lets the user choose the manually downloaded official CSV from disk, seeded from the current download directory; `manual_csv_selection.py` validates it (existing, readable, regular file; no standard BOM signature; exact 35-column `;`-delimited header; the complete file, not only the header, validated as strict `cp1252` in bounded chunks) with typed accept/reject outcomes and no silent coercion. No row processing, PDF support, directory scanning, or output writing. |
-| P.36.5 | Optional PDF support | ⬜ Blocked on question 1 | Add PDF input only once the authoritative trigger condition is confirmed; otherwise stays explicitly out of scope. |
-| P.36.6 | Filtering, calculation, conversion, and mapping | ⬜ Planned (blocked on question 2) | Implement the ≥ 1 MWh filter, EUR/MWh/h normalization, CET/CEST timestamps, flow-duration-hours calculation, and market/storage mapping resolution for the 12-field contract. |
-| P.36.7 | Output CSV writer | ⬜ Planned | Emit the `;`-delimited, UTF-8, dot-decimal output file matching P.36.1's contract exactly. |
+| P.36.5 | Resolve PDF scope and output-column structure: documentation and contracts only | ✅ Completed | Recorded two explicit customer decisions: PDF input and PDF processing are excluded from the current product version (cancelling/superseding the former "Optional PDF support" implementation stage that previously occupied this slot), and the output contract uses four separate side-specific columns (`Exit Market`, `Exit Storage`, `Entry Market`, `Entry Storage`) instead of two combined fields. The authoritative output contract is now the 14-field structure recorded above and in `workflow_p.md` §1.1. No application behavior changed; no PDF library, evidence, test, or code was removed (that remains `P.36.10`). |
+| P.36.6 | Filtering, calculation, conversion, and mapping | ⬜ Planned — next recommended increment | Implement the ≥ 1 MWh filter, EUR/MWh/h normalization, CET/CEST timestamps, flow-duration-hours calculation, and market/storage mapping resolution for the 14-field contract (`Exit Market`, `Exit Storage`, `Entry Market`, `Entry Storage`, and the remaining unchanged fields). |
+| P.36.7 | Output CSV writer | ⬜ Planned | Emit the `;`-delimited, UTF-8, dot-decimal output file matching the authoritative 14-field contract (recorded in P.36.1, revised to four separate Market/Storage columns by P.36.5) exactly. |
 | P.36.8 | Mapping display in the UI | ⬜ Planned (not started) | Show the resolved market/storage mapping using the approved column contract: `Exit Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`, in this order. The supplied screenshot is a layout reference only; no screenshot row/cell value is authoritative mapping data. |
 | P.36.9 | Accumulation, deduplication, atomic publication, and recovery | ⬜ Planned | Reuse/adapt the existing atomic-publish, dedup, and SQLite-recovery patterns (P.33-P.34 series) for the single-CSV manual workflow; no PDF pairing or fingerprinting. |
 | P.36.10 | Remove obsolete browser automation and dependencies | ⬜ Planned | Physically remove the superseded monitoring dashboard, scheduler, live-status automation, and related code/dependencies that P.36.2 only disconnected from the UI, plus any automated source-acquisition code/dependencies confirmed obsolete by the authoritative spec (at minimum, the cancelled P.35.2 `pdfplumber`/`pdfminer` packaging changes never re-added). |
@@ -162,16 +183,21 @@ validation evidence is preserved in this document for historical record only.
 
 **P.24, P.25, P.33 through P.33.8, P.35, and P.35.1 are complete. P.35.2-P.35.5 are cancelled.**
 **P.36.1 is complete.** The mapping-display screenshot, monitoring-scope, and official-URL questions
-are now resolved (see "Resolved specification questions" above); two unrelated questions remain
-(PDF trigger, output shape), neither blocking P.36.2. **P.36.2 is complete**: the "Open Prisma" /
+are now resolved (see "Resolved specification questions" above). **P.36.2 is complete**: the "Open Prisma" /
 "Close Prisma" lifecycle is implemented and real-Windows-validated per `workflow_p.md`'s P.36.2
 completion note, with the superseded monitoring UI hidden. **P.36.3 is complete**: the expected
 download directory defaults to the current user's Documents folder and is explicitly selectable,
 session-scoped only, per `workflow_p.md`'s P.36.3 completion note. **P.36.4 is complete**: a
 "Select CSV" control validates a user-chosen file against the exact official PRISMA Export CSV
 contract with typed accept/reject outcomes and no silent coercion, per `workflow_p.md`'s P.36.4
-completion note. The next increment after P.36.4 merges is P.36.5, which remains blocked on
-unresolved specification question 1 (PDF trigger condition).
+completion note. **P.36.5 is complete**: the customer explicitly decided that PDF input/processing is
+excluded from the current product version (cancelling/superseding the former "Optional PDF support"
+stage) and that the output contract uses four separate side-specific columns (`Exit Market`, `Exit
+Storage`, `Entry Market`, `Entry Storage`) instead of two combined fields, making the authoritative
+output contract 14 fields; see "Resolved specification questions" above and `workflow_p.md`'s P.36.5
+completion note. No unresolved specification question remains. **The next recommended increment is
+P.36.6** (filtering, calculation, conversion, and mapping for the 14-field contract), which is now
+unblocked.
 
 ## Release target
 

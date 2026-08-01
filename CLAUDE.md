@@ -1,4 +1,4 @@
-# CLAUDE.md — Prisma-function (legacy)
+# CLAUDE.md — Prisma-function 
 
 Auto-loaded every session. Keep short — re-read on every turn.
 
@@ -39,9 +39,14 @@ design.
 
 P.36 is the authoritative forward roadmap for the manual PRISMA workflow:
 
-- P.36.1 documentation and contracts are complete; no application behavior changed.
-- P.36.2 is the next planned increment but remains blocked on unresolved specification questions 1 and 4.
-- Later P.36 increments must follow the dependency and blocking state recorded in
+- P.36.1–P.36.5 (documentation/contracts, Open/Close Prisma lifecycle, download
+  directory, manual CSV selection, and PDF-scope/output-contract resolution)
+  are complete. P.36.5 resolved the remaining specification questions: PDF
+  input/processing is excluded from the current version, and the approved
+  output contract has 14 columns.
+- No unresolved specification question remains. P.36.6 is unblocked and is the
+  next recommended implementation increment.
+- Later P.36 increments must follow the dependency and status recorded in
   `ROADMAP.md`.
 
 ## Separate CSV contracts — never conflate
@@ -54,8 +59,10 @@ through "Load Monitoring CSV".
 The legacy PRISMA Export CSV contract is cp1252, semicolon-delimited, and has 34
 fixed columns. Detection is header-based, never filename-based.
 
-The P.36 target output is a separate UTF-8, semicolon-delimited 12-field CSV
-contract defined by the authoritative specification and P.36.1. Do not reuse the
+The P.36 target output is a separate UTF-8, semicolon-delimited 14-field CSV
+contract defined by the authoritative specification, P.36.1, and P.36.5 (which
+resolved the two combined Market-or-Storage fields into four separate columns:
+Exit Market, Exit Storage, Entry Market, Entry Storage). Do not reuse the
 Prisma Function Mini contract by assumption.
 
 ## Non-negotiable rules
