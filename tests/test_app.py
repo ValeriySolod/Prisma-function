@@ -15,7 +15,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
 import app
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
+from csv_contracts import PRISMA_EXPORT_COLUMNS
 from download_directory import DownloadDirectoryError
+from manual_csv_selection import ManualCsvOutcome
 from monitoring import MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from prisma_page import (
@@ -274,6 +276,105 @@ def test_invalid_download_directory_selection_shows_generic_error_and_preserves_
     title, message = critical.call_args.args[1], critical.call_args.args[2]
     assert title == "Download Folder"
     assert str(missing) not in message
+
+
+def _write_valid_prisma_export(path):
+    path.write_bytes((";".join(PRISMA_EXPORT_COLUMNS) + "\r\n").encode("cp1252"))
+
+
+def test_manual_csv_dialog_starts_in_current_download_directory(window, monkeypatch):
+    widget, _ = window
+    dialog = Mock(return_value=("", ""))
+    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", dialog)
+
+    widget._select_manual_csv()
+
+    assert dialog.call_args.args[2] == str(widget._download_directory.current)
+
+
+def test_cancelling_manual_csv_dialog_is_a_no_op(window, monkeypatch):
+    widget, _ = window
+    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", Mock(return_value=("", "")))
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_manual_csv()
+
+    assert widget._manual_csv_selection.current is None
+    assert widget.manual_csv_label.text() == "No CSV selected"
+    critical.assert_not_called()
+
+
+def test_choosing_a_valid_manual_csv_updates_state_and_label(window, monkeypatch, tmp_path):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(target)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    assert widget._manual_csv_selection.current == target.resolve()
+    assert widget.manual_csv_label.text() == "PRISMA_Export.csv"
+    assert "PRISMA Export CSV selected" in widget.activity_list.item(0).text()
+
+
+def test_invalid_manual_csv_selection_shows_generic_error_and_preserves_state(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    valid = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(valid)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(valid), "CSV"))
+    )
+    widget._select_manual_csv()
+    previous = widget._manual_csv_selection.current
+    assert previous == valid.resolve()
+
+    missing = tmp_path / "does-not-exist.csv"
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(missing), "CSV"))
+    )
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_manual_csv()
+
+    assert widget._manual_csv_selection.current == previous
+    assert widget.manual_csv_label.text() == "PRISMA_Export.csv"
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Select CSV"
+    assert str(missing) not in message
+
+
+def test_rejected_manual_csv_header_mismatch_preserves_previous_selection(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    valid = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(valid)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(valid), "CSV"))
+    )
+    widget._select_manual_csv()
+
+    bad = tmp_path / "wrong-header.csv"
+    bad.write_bytes(b"a;b;c\r\n")
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(bad), "CSV"))
+    )
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_manual_csv()
+
+    assert widget._manual_csv_selection.current == valid.resolve()
+    critical.assert_called_once()
+    _, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert str(bad) not in message
 
 
 def test_csv_loading_populates_model_counters_and_activity(window, monkeypatch):

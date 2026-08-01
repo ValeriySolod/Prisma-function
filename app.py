@@ -40,6 +40,7 @@ from download_directory import (
     DownloadDirectorySelection,
     default_download_directory,
 )
+from manual_csv_selection import ManualCsvSelection, describe_rejection
 from monitoring import MonitoringEngine, MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from notifications import StatusChangeNotification
@@ -96,6 +97,7 @@ class PrismaMonitorApp(QMainWindow):
         super().__init__()
         self._runtime_paths = paths
         self._download_directory = DownloadDirectorySelection(download_directory)
+        self._manual_csv_selection = ManualCsvSelection()
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{__version__}")
         self.setMinimumSize(1080, 680)
         self.resize(1280, 800)
@@ -217,6 +219,17 @@ class PrismaMonitorApp(QMainWindow):
         self.download_directory_label.setAccessibleName("Expected download folder")
         self._side_group(
             side, "DOWNLOAD FOLDER", self.choose_download_directory_button, self.download_directory_label
+        )
+        self.choose_manual_csv_button = self._button(
+            "Select CSV", self._select_manual_csv,
+            tooltip="Select the manually downloaded official PRISMA Export CSV",
+        )
+        self.manual_csv_label = QLabel("No CSV selected")
+        self.manual_csv_label.setObjectName("filename")
+        self.manual_csv_label.setWordWrap(True)
+        self.manual_csv_label.setAccessibleName("Selected PRISMA Export CSV")
+        self._side_group(
+            side, "PRISMA EXPORT CSV", self.choose_manual_csv_button, self.manual_csv_label
         )
         side.addStretch()
         self.import_date = QDateEdit(QDate.currentDate())
@@ -434,6 +447,24 @@ class PrismaMonitorApp(QMainWindow):
         self.download_directory_label.setText(str(directory))
         self.status.setText("Download folder updated.")
         self._add_activity("Download folder changed")
+
+    def _select_manual_csv(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Select PRISMA Export CSV", str(self._download_directory.current), "CSV files (*.csv)"
+        )
+        if not selected:
+            return
+        result = self._manual_csv_selection.select(selected)
+        if not result.accepted:
+            safe_log(
+                self._logger, logging.WARNING,
+                "Manual PRISMA Export CSV selection rejected: %s", result.outcome.value,
+            )
+            self._show_error("Select CSV", describe_rejection(result.outcome))
+            return
+        self.manual_csv_label.setText(result.path.name)
+        self.status.setText("PRISMA Export CSV selected.")
+        self._add_activity("PRISMA Export CSV selected")
 
     def select_csv(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "Load Monitoring CSV", "", "CSV files (*.csv)")

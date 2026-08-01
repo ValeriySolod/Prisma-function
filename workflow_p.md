@@ -1764,3 +1764,118 @@ an invalid initial value; it creates no directory and applies no silent fallback
 `test_selection_rejects_inaccessible_initial_directory` to cover an existing initial directory
 being accepted and resolved, and a missing, file-path, or inaccessible initial directory being
 rejected. No other P.36.3 behavior or scope exclusion changed.
+
+#### P.36.4. Manual CSV selection and validation — Completed (2026-08-01)
+
+Per `Prisma Function.odt`, PrismaFunction never scans, monitors, or auto-discovers the manually
+downloaded official CSV: the user hands the program exactly one file, and the program validates
+it against the exact official contract before accepting it. This increment adds only that
+selection-and-validation control; it performs no row processing, filtering, mapping,
+accumulation, deduplication, or output writing, and it does not change the existing "Import
+PRISMA Export" button/pipeline, which remains a separate, unmodified control scoped to later
+P.36 increments (P.36.6/P.36.7/P.36.9).
+
+`manual_csv_selection.py` adds a Qt-independent, filesystem-only boundary:
+
+- `validate_manual_csv()` opens the candidate once and returns an immutable
+  `ManualCsvValidationResult` (a frozen dataclass wrapping a typed `ManualCsvOutcome` enum and,
+  only on acceptance, the resolved `Path`). Checks run in order — existence, regular-file, opened
+  and non-empty, absence of a standard BOM signature (checked against the first four bytes: UTF-8,
+  UTF-16 LE/BE, and UTF-32 LE/BE all fold into the same `BOM_DETECTED` outcome, since the accepted
+  contract is simply "no BOM" and never distinguishes which encoding a BOM implies), strict
+  `cp1252` decoding of the header line, presence of the `;` delimiter, an exact tuple match
+  against `csv_contracts.PRISMA_EXPORT_COLUMNS` (imported, not duplicated) for the header, and
+  finally strict `cp1252` decoding of the *entire remaining file*, read in bounded 64 KiB chunks
+  via `_validate_remaining_encoding()` so the complete file is never held in memory at once and no
+  chunk, row, or decoded text is parsed, retained, returned, or logged — so every rejection is
+  distinguishable as exactly one of `NOT_FOUND`, `NOT_A_FILE`, `UNREADABLE`, `EMPTY_FILE`,
+  `BOM_DETECTED`, `ENCODING` (whether the invalid byte is in the header or anywhere later in the
+  file), `DELIMITER`, or `HEADER_MISMATCH` (covering missing, extra, reordered, and duplicate
+  columns alike, since only an exact-order, exact-membership tuple match is accepted). Any I/O
+  error while reading any part of the file, including after the header has already validated,
+  is caught by one outer boundary and reported as `UNREADABLE`. There is no delimiter guessing,
+  encoding fallback, header normalization, or partial header matching anywhere in the function.
+- `describe_rejection()` maps each non-accepted outcome to a stable, English, path-free message
+  from a fixed dictionary; no candidate path or file content ever reaches a returned message.
+- `ManualCsvSelection` tracks at most one currently accepted file for the running session,
+  starting at `current = None` (there is no default, unlike the download directory). Its
+  `select()` calls `validate_manual_csv()` and only updates `current` on acceptance; a rejected
+  candidate always leaves the previous `current` unchanged, matching
+  `DownloadDirectorySelection`'s existing no-silent-fallback contract. The selection is
+  session-scoped only, for the same reasons already recorded for P.36.3.
+
+`app.py`'s `PrismaMonitorApp` adds a "PRISMA EXPORT CSV" sidebar group (placed directly under
+"DOWNLOAD FOLDER") with a "Select CSV" button and a label defaulting to "No CSV selected", plus
+one `ManualCsvSelection` instance owned by the window (no Qt widget holds validation logic).
+`_select_manual_csv()` opens `QFileDialog.getOpenFileName` restricted to `*.csv` and seeded with
+`self._download_directory.current` (the current session's validated download directory), so the
+chooser always starts where the user was told to expect the download; an empty result (Cancel) is
+a strict no-op — no state mutation, no dialog, no status-bar text. A validated selection updates
+both `ManualCsvSelection.current` and the label (to `Path.name`, the safe basename only, never the
+full path) and appends an activity entry; a rejected selection logs the typed `ManualCsvOutcome`
+value via `safe_log` (never the candidate path or file content) and shows a generic, path-free
+English `QMessageBox` titled "Select CSV" via the existing `_show_error()` helper, leaving the
+prior accepted selection and label untouched. This increment does not read, transform, or persist
+any row from the selected file, does not add PDF support, does not scan or monitor the download
+directory, does not configure browser downloads or automate PRISMA navigation, and does not change
+the completed P.36.2 "Open Prisma" / "Close Prisma" lifecycle or the P.36.3 download-directory
+contract.
+
+Regression coverage in `tests/test_manual_csv_selection.py` (35 tests) covers: acceptance of the
+exact official header; rejection of a missing path, a directory path, an unreadable file
+(`Path.open` failure), an empty file, each of the five standard BOM signatures (UTF-8, UTF-16
+LE/BE, UTF-32 LE/BE, parametrized), an undefined-in-`cp1252` byte in the header (wrong encoding),
+a comma-delimited header (wrong delimiter), a missing/extra/reordered/duplicate header column
+(all `HEADER_MISMATCH`), and non-`.csv`-extension files in both directions (content-based
+rejection of a `.txt` file with garbage content, and content-based acceptance of a valid `.dat`
+file), proving the extension and dialog filter are never trusted; acceptance of a valid header
+followed by valid `cp1252` data; rejection of an invalid `cp1252` byte occurring only after a
+valid header, both within and beyond the first bounded chunk (the latter via a monkeypatched
+smaller `_CHUNK_SIZE` forcing multiple read iterations); rejection via `UNREADABLE` of a
+simulated I/O failure that occurs only after the header has already been read successfully (a
+`Path.open` wrapper that fails reads once the header is consumed); every non-accepted
+`ManualCsvOutcome` maps to a non-empty, ASCII (path-free) message; and `ManualCsvSelection`
+starting with no current file, updating only on a valid candidate, and leaving `current` unchanged
+after a rejected candidate both before and after an initial valid selection, including after a
+mid-file encoding failure, with the rejection message proven not to contain the rejected path.
+`tests/test_app.py` adds coverage for the chooser starting in the current download directory,
+Cancel being a strict no-op, a valid selection updating both state and label, an invalid
+(missing-path) selection showing a generic "Select CSV" error whose message excludes the rejected
+path while state and label stay at the previous valid selection, and a header-mismatch rejection
+likewise preserving the previous selection without exposing the rejected path. The full pytest
+suite (565 tests, up from 556), project-wide Python compilation (`compileall`, excluding `.venv`,
+`build`, `.git`, `__pycache__`, and cache/backup directories), `git diff --check`, and
+`git diff --no-ext-diff` all passed for this increment; no packaging files
+(`PrismaFunction.spec`, `requirements.txt`, the Inno Setup installer), bundled resources, or
+dependencies changed — `manual_csv_selection.py` uses only the stdlib (`csv`, `dataclasses`,
+`enum`, `pathlib`) plus the existing `csv_contracts` module already bundled via `app.py`'s
+PyInstaller analysis — so `validate_package.py` was not required.
+
+**Review correction (2026-08-01).** A confirmed review finding noted two gaps: (1)
+`validate_manual_csv()` decoded only the first physical line as `cp1252`, so a file with an exact,
+ASCII-compatible header but invalid-`cp1252` bytes later in the file was accepted incorrectly,
+even though the accepted contract requires the whole file to be `cp1252`; and (2) BOM detection
+recognized only the UTF-8 signature, so a UTF-16 or UTF-32 BOM was misclassified as a delimiter or
+header failure instead of `BOM_DETECTED`, even though the accepted contract is simply "no BOM."
+`validate_manual_csv()` now also validates strict `cp1252` decoding across the complete remaining
+file after the header matches, via `_validate_remaining_encoding()`, reading bounded 64 KiB chunks
+so memory use stays constant regardless of file size and no chunk, row, or decoded text is parsed,
+retained, returned, or logged; any I/O error anywhere in that read, not only at `open()`, is caught
+by the same outer boundary and reported as `UNREADABLE`. BOM detection now recognizes the standard
+UTF-8, UTF-16 LE, UTF-16 BE, UTF-32 LE, and UTF-32 BE signatures against the file's first four
+bytes and reports `BOM_DETECTED` for any of them identically, since the contract never needs to
+distinguish which encoding a BOM implies. The exact-header source of truth
+(`csv_contracts.PRISMA_EXPORT_COLUMNS`), exact semicolon-delimited header matching, immutable
+typed outcomes, session-state preservation after rejection, path-free UI messages and logs, and
+every existing P.36.2/P.36.3 behavior and P.36.4 exclusion are unchanged. Nine tests were added to
+`tests/test_manual_csv_selection.py` (26 to 35) covering the six scenarios above plus the
+UTF-16/UTF-32 BOM variants; no `tests/test_app.py` change was needed since the UI layer only
+consumes the already-typed `ManualCsvOutcome`/`describe_rejection()` boundary, which did not
+change shape.
+
+Not yet done: `P.36.5` onward (optional PDF support, filtering/calculation/mapping, output
+writing, mapping display, accumulation/recovery, obsolete-code removal, packaging/installer
+validation, and final regression/acceptance). This new "Select CSV" control is not yet wired into
+the existing "Import PRISMA Export" pipeline (`start_processing()`); that remains a later
+increment's decision, consistent with this increment's explicit "no processing, filtering,
+mapping, accumulation, deduplication, persistence, or output-row writing" scope boundary.
