@@ -138,7 +138,7 @@ started until their applicable open questions are resolved.
 |---|---|---|---|
 | P.36.1 | Adopt the authoritative specification: documentation and contracts only | ✅ Completed | Recorded the manual workflow, the 12-field output CSV contract (names, order, formats, units), and the open questions above. No application behavior changed. |
 | P.36.2 | Manual "Open Prisma" / "Close Prisma" lifecycle | ✅ Completed | A user-triggered "Open Prisma" control opens exactly `https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` in an application-owned browser session; a separate "Close Prisma" control closes only that owned session. No automated navigation, login, date-setting, filtering, or download. Manual closure (the browser window's own X button) is detected via layered browser/page/CDP `Target.targetDestroyed` signals, real-Windows-validated on 2026-08-01; temporary diagnostic logging used to validate that fix was removed afterward. The superseded monitoring dashboard/CSV-load/start-monitoring/stop-monitoring controls are hidden from the UI (not deleted) so they cannot run or conflict with these controls; full removal remains P.36.10. |
-| P.36.3 | Documents-based or user-selected download directory | ⬜ Planned | Default the expected download location to the user's Documents folder; let the user choose a different folder explicitly. No hidden internal staging path. |
+| P.36.3 | Documents-based or user-selected download directory | ✅ Completed | Default the expected download location to the user's Documents folder; let the user choose a different folder explicitly. No hidden internal staging path. |
 | P.36.4 | Manual CSV selection and validation | ⬜ Planned | User selects the manually downloaded official CSV from disk; validate its exact header/encoding contract; typed accept/reject, no silent coercion. |
 | P.36.5 | Optional PDF support | ⬜ Blocked on question 1 | Add PDF input only once the authoritative trigger condition is confirmed; otherwise stays explicitly out of scope. |
 | P.36.6 | Filtering, calculation, conversion, and mapping | ⬜ Planned (blocked on question 2) | Implement the ≥ 1 MWh filter, EUR/MWh/h normalization, CET/CEST timestamps, flow-duration-hours calculation, and market/storage mapping resolution for the 12-field contract. |
@@ -165,8 +165,10 @@ validation evidence is preserved in this document for historical record only.
 are now resolved (see "Resolved specification questions" above); two unrelated questions remain
 (PDF trigger, output shape), neither blocking P.36.2. **P.36.2 is complete**: the "Open Prisma" /
 "Close Prisma" lifecycle is implemented and real-Windows-validated per `workflow_p.md`'s P.36.2
-completion note, with the superseded monitoring UI hidden. The next increment after P.36.2 merges
-is P.36.3.
+completion note, with the superseded monitoring UI hidden. **P.36.3 is complete**: the expected
+download directory defaults to the current user's Documents folder and is explicitly selectable,
+session-scoped only, per `workflow_p.md`'s P.36.3 completion note. The next increment after
+P.36.3 merges is P.36.4.
 
 ## Release target
 

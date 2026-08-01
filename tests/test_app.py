@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
 import app
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
+from download_directory import DownloadDirectoryError
 from monitoring import MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from prisma_page import (
@@ -47,7 +48,9 @@ def window(qt_app, monkeypatch, tmp_path):
         result=root / "data/result/test.xlsx",
         state=root / "state/test.json", log=root / "logs/test.log",
     )
-    widget = app.PrismaMonitorApp(paths)
+    download_directory = tmp_path / "Documents"
+    download_directory.mkdir()
+    widget = app.PrismaMonitorApp(paths, download_directory)
     yield widget, browser
     widget._is_closing = True
     widget._monitoring_thread = None
@@ -216,6 +219,61 @@ def test_cancel_csv_dialog_preserves_state(window, monkeypatch):
     assert dialog.call_args.args[1] == "Load Monitoring CSV"
     load.assert_not_called()
     assert widget.csv_path.text() == ""
+
+
+def test_download_directory_defaults_to_provided_documents_folder(window):
+    widget, _ = window
+    assert widget.download_directory_label.text() == str(widget._download_directory.current)
+    assert widget.download_directory_label.text().endswith("Documents")
+
+
+def test_choosing_a_valid_download_directory_updates_state_and_label(window, monkeypatch, tmp_path):
+    widget, _ = window
+    chosen = tmp_path / "Chosen Downloads"
+    chosen.mkdir()
+    monkeypatch.setattr(
+        app.QFileDialog, "getExistingDirectory", Mock(return_value=str(chosen))
+    )
+
+    widget._select_download_directory()
+
+    assert widget._download_directory.current == chosen.resolve()
+    assert widget.download_directory_label.text() == str(chosen.resolve())
+
+
+def test_cancelling_download_directory_dialog_preserves_current_directory(window, monkeypatch):
+    widget, _ = window
+    previous = widget._download_directory.current
+    monkeypatch.setattr(
+        app.QFileDialog, "getExistingDirectory", Mock(return_value="")
+    )
+
+    widget._select_download_directory()
+
+    assert widget._download_directory.current == previous
+    assert widget.download_directory_label.text() == str(previous)
+
+
+def test_invalid_download_directory_selection_shows_generic_error_and_preserves_state(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    previous = widget._download_directory.current
+    missing = tmp_path / "does-not-exist"
+    monkeypatch.setattr(
+        app.QFileDialog, "getExistingDirectory", Mock(return_value=str(missing))
+    )
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_download_directory()
+
+    assert widget._download_directory.current == previous
+    assert widget.download_directory_label.text() == str(previous)
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Download Folder"
+    assert str(missing) not in message
 
 
 def test_csv_loading_populates_model_counters_and_activity(window, monkeypatch):

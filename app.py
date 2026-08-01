@@ -35,6 +35,11 @@ from PySide6.QtWidgets import (
 
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
+from download_directory import (
+    DownloadDirectoryError,
+    DownloadDirectorySelection,
+    default_download_directory,
+)
 from monitoring import MonitoringEngine, MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from notifications import StatusChangeNotification
@@ -87,9 +92,10 @@ class WorkerSignals(QObject):
 
 
 class PrismaMonitorApp(QMainWindow):
-    def __init__(self, paths: RuntimePaths) -> None:
+    def __init__(self, paths: RuntimePaths, download_directory: Path) -> None:
         super().__init__()
         self._runtime_paths = paths
+        self._download_directory = DownloadDirectorySelection(download_directory)
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{__version__}")
         self.setMinimumSize(1080, 680)
         self.resize(1280, 800)
@@ -201,6 +207,17 @@ class PrismaMonitorApp(QMainWindow):
             tooltip="Close the PrismaFunction-managed PRISMA browser session",
         )
         self._side_group(side, "PRISMA", self.open_prisma_button, self.close_prisma_button)
+        self.choose_download_directory_button = self._button(
+            "Choose Download Folder", self._select_download_directory,
+            tooltip="Choose the folder where the manually downloaded PRISMA CSV is expected",
+        )
+        self.download_directory_label = QLabel(str(self._download_directory.current))
+        self.download_directory_label.setObjectName("filename")
+        self.download_directory_label.setWordWrap(True)
+        self.download_directory_label.setAccessibleName("Expected download folder")
+        self._side_group(
+            side, "DOWNLOAD FOLDER", self.choose_download_directory_button, self.download_directory_label
+        )
         side.addStretch()
         self.import_date = QDateEdit(QDate.currentDate())
         self.import_date.setCalendarPopup(True)
@@ -398,6 +415,25 @@ class PrismaMonitorApp(QMainWindow):
         self.close_prisma_button.setEnabled(
             (prisma_opening or self._prisma_open) and not prisma_locked
         )
+
+    def _select_download_directory(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose Download Folder", str(self._download_directory.current)
+        )
+        if not selected:
+            return
+        try:
+            directory = self._download_directory.select(selected)
+        except DownloadDirectoryError as exc:
+            safe_log(self._logger, logging.ERROR, "Download directory selection rejected: %s", exc)
+            self._show_error(
+                "Download Folder",
+                "The selected folder is not valid. Choose an existing, accessible folder.",
+            )
+            return
+        self.download_directory_label.setText(str(directory))
+        self.status.setText("Download folder updated.")
+        self._add_activity("Download folder changed")
 
     def select_csv(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "Load Monitoring CSV", "", "CSV files (*.csv)")
@@ -944,6 +980,7 @@ def main() -> int:
     application.setApplicationVersion(__version__)
     initialization_error = None
     paths = None
+    download_directory = None
     try:
         paths = runtime_paths()
         logger, log_path = initialize_runtime_logging(paths.log)
@@ -953,6 +990,7 @@ def main() -> int:
                 "Check LOCALAPPDATA and folder permissions, then retry."
             )
         migrate_legacy_runtime_data(paths=paths, logger=logger)
+        download_directory = default_download_directory()
     except Exception as exc:
         initialization_error = str(exc)
         if any(getattr(handler, "baseFilename", None) for handler in logging.getLogger(LOGGER_NAME).handlers):
@@ -965,7 +1003,7 @@ def main() -> int:
             f"No legacy data was discarded. {initialization_error}",
         )
         return 1
-    window = PrismaMonitorApp(paths)
+    window = PrismaMonitorApp(paths, download_directory)
     window.show()
     return application.exec()
 

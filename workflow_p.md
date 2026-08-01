@@ -1667,8 +1667,100 @@ or an ambiguous owned-target baseline) — never periodic snapshots, heartbeats,
 CDP target-create/info-change event, and never URLs, titles, page content, credentials, cookies,
 storage, or form data.
 
-Not yet done: `P.36.3` onward (download directory, CSV selection, mapping, output writing), and
-the physical removal of the superseded monitoring/dashboard/scheduler code (P.36.10). P.36.2
-itself is complete: the real Windows X-button test above confirms the accepted behavior, the
-temporary diagnostics used to correlate that test have been removed, the focused and full test
-suites pass, and no critical review finding remains open.
+Not yet done: `P.36.4` onward (CSV selection, mapping, output writing), and the physical removal
+of the superseded monitoring/dashboard/scheduler code (P.36.10). P.36.2 itself is complete: the
+real Windows X-button test above confirms the accepted behavior, the temporary diagnostics used
+to correlate that test have been removed, the focused and full test suites pass, and no critical
+review finding remains open.
+
+#### P.36.3. Documents-based or user-selected download directory — Completed (2026-08-01)
+
+Per `Prisma Function.odt` ("папку для завантаження створюємо в document користувача або
+пропонувати вибір папки користувачу" — the download folder is created under the user's Documents
+folder, or the user is offered a folder choice), this increment tracks only which existing,
+accessible directory the user currently expects their manually downloaded PRISMA CSV to be in.
+It performs no download, staging, scanning, or monitoring of that directory — file acquisition
+stays entirely manual per the authoritative specification, and CSV selection/validation is
+separately scoped to P.36.4.
+
+`download_directory.py` adds a Qt-independent, browser-automation-independent boundary:
+
+- `default_download_directory()` resolves the current Windows user's Documents folder in three
+  tiers, none of which hardcode a username or machine-specific path: first the
+  `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders`
+  registry `Personal` value (so a redirected Documents folder, e.g. by OneDrive or a domain
+  policy, is honored), then `%USERPROFILE%\Documents`, then the interpreter's own home-directory
+  resolution — mirroring `runtime_paths.windows_local_app_data()`'s existing fallback style for
+  consistency. Every tier is dependency-injectable (`environ`, `registry`, `platform` parameters)
+  so tests never depend on the developer machine's real registry, username, or profile layout.
+- `validate_download_directory()` is a typed boundary: it accepts only a path that exists,
+  resolves to a directory (not a file), and is readable, raising `DownloadDirectoryError`
+  otherwise. It never silently falls back to a different directory.
+- `DownloadDirectorySelection` tracks exactly one active directory for the running session. Its
+  constructor also calls `validate_download_directory()` on the initial value, so a missing,
+  inaccessible, or file-path initial directory raises `DownloadDirectoryError` immediately instead
+  of becoming a silently-accepted, unvalidated `current` (fixed as a P.36.3 review finding; see
+  below). Its `select()` method calls the same validator and only replaces `current` on success; a
+  rejected candidate leaves `current` unchanged, matching the required no-silent-fallback contract.
+
+**Persistence decision (recorded, not inferred).** The selected directory is session-scoped only
+and is not written to disk. The repository's only existing persistence mechanisms are the SQLite
+operations ledger and the legacy `prisma_import_state.json` (see `prisma_import_workflow.py`),
+both narrowly typed to the PRISMA source-import acceptance lifecycle (accepted sources, their
+SHA-256 digests, and dates) — not a general-purpose UI-preference store. Repurposing either for
+an unrelated single UI selection, or inventing a new settings file, was judged out of scope for
+this bounded increment per the task's own explicit fallback rule ("if persistence is not
+authorized by the specification or existing architecture, keep the selection session-scoped and
+document that decision"); `Prisma Function.odt` itself does not require the choice to survive a
+restart. A future increment may introduce a general settings mechanism if the authoritative
+specification or customer explicitly requests persisted UI preferences.
+
+`app.py`'s `PrismaMonitorApp` adds a "DOWNLOAD FOLDER" sidebar group with a "Choose Download
+Folder" button and a label showing the current expected directory, using stable English UI text
+throughout. `main()` resolves `default_download_directory()` once at startup inside the same
+guarded initialization block already used for `runtime_paths()`/logging/migration, so a resolution
+failure surfaces through the existing fatal "PrismaFunction Data Error" dialog instead of an
+unhandled crash; the resolved value is passed into `PrismaMonitorApp.__init__`, which owns exactly
+one `DownloadDirectorySelection` instance — no Qt widget holds path-validation logic itself.
+`_select_download_directory()` opens `QFileDialog.getExistingDirectory` seeded with the current
+directory; an empty result (Cancel) is a no-op that leaves the active directory and label
+untouched; a validated selection updates both the label and the active directory; a rejected
+selection logs the concrete `DownloadDirectoryError` via `safe_log` (preserving error context for
+diagnostics) but shows only a generic, path-free English message in the UI dialog, so a rejected
+path is never echoed back to the user. This increment does not change the completed P.36.2 "Open
+Prisma" / "Close Prisma" lifecycle, does not configure Playwright/browser downloads, and does not
+create, clean, or scan any directory.
+
+Regression coverage in `tests/test_download_directory.py` covers: default resolution via the
+registry `Personal` value, including `%VAR%` expansion; fallback to `USERPROFILE` when the
+registry is unavailable; fallback to the interpreter's home directory when `USERPROFILE` is
+unset; the registry tier being skipped off Windows; the resolved default not being nested under
+the application's own `LOCALAPPDATA`-based runtime-data root; acceptance of an existing directory;
+rejection of a missing path, a file path, and an inaccessible directory, in every case via the
+typed `DownloadDirectoryError`; and `DownloadDirectorySelection` starting at its initial directory,
+updating on a valid selection, and leaving `current` unchanged after a rejected missing-path or
+file-path selection. `tests/test_app.py` adds coverage for the sidebar label reflecting the
+constructor-supplied default directory, a valid chooser selection updating both state and label,
+a cancelled chooser dialog leaving the active directory and label unchanged, and an invalid
+selection showing a generic "Download Folder" error dialog whose message text does not contain
+the rejected path while the active directory and label remain unchanged; the existing `window`
+fixture now constructs `PrismaMonitorApp` with an explicit `tmp_path`-based Documents directory so
+no test depends on the developer machine's real Documents folder or username. The full pytest
+suite (525 tests, up from 503), project-wide Python compilation (`compileall`, excluding `.venv`,
+`build`, `.git`, `__pycache__`, and cache/backup directories), and `git diff --check` all passed
+for this increment; no packaging files, bundled resources, or dependencies changed (only stdlib
+`os`/`pathlib`/`winreg` are used), so `validate_package.py` was not required.
+
+**Review correction (2026-08-01).** A confirmed review finding noted that
+`DownloadDirectorySelection.__init__` stored its `initial` argument as-is (`Path(initial)`)
+without validating it, so a missing, inaccessible, or file-path initial directory would become an
+unvalidated `current` instead of raising, breaking the class's own documented invariant that it
+tracks only an existing, accessible directory. The constructor now calls
+`validate_download_directory(initial)` and raises the existing typed `DownloadDirectoryError` for
+an invalid initial value; it creates no directory and applies no silent fallback, matching
+`select()`'s existing contract. `tests/test_download_directory.py` adds
+`test_selection_normalizes_initial_directory`, `test_selection_rejects_missing_initial_directory`,
+`test_selection_rejects_file_initial_path`, and
+`test_selection_rejects_inaccessible_initial_directory` to cover an existing initial directory
+being accepted and resolved, and a missing, file-path, or inaccessible initial directory being
+rejected. No other P.36.3 behavior or scope exclusion changed.
