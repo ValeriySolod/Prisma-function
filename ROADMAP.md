@@ -102,9 +102,10 @@ P.36.8, P.36.10, P.36.11, and P.36.12 remain planned support/finalization stages
 
 ### P.36.13 — Date-range selection inside Prisma Function
 
-**Status:** 🟡 Implemented on `feature/p36-13-date-range-selection`; pending review and merge. Not yet
-merged to `main`, and the feature branch has not been deleted, so this increment is not marked
-Completed under the project Definition of Done.
+**Status:** ✅ Completed. Merged to `main` via PR #59 (merge commit `ff07b68`), containing
+implementation commit `fb0cc89`. The `feature/p36-13-date-range-selection` branch has not been
+deleted yet; branch cleanup remains a separate open action and does not change this increment's
+completed status.
 **Dependencies required before implementation:** P.36.2 completed.
 
 **Objective:** Let the user select and validate a start date and an end date inside Prisma Function.
@@ -155,7 +156,7 @@ importer, or any download workflow; the completed P.36.2–P.36.4 behavior is un
 - relevant focused tests, full regression tests required by project rules, compilation, and `git diff --check` pass;
 - `workflow_p.md` and this roadmap record the final implemented behavior and exact executed validation results.
 
-**Verified evidence (2026-08-02, not yet merged):** `tests/test_date_range_selection.py` (17 tests) and
+**Verified evidence (2026-08-02, merged via PR #59, merge commit `ff07b68`):** `tests/test_date_range_selection.py` (17 tests) and
 the 10 focused P.36.13 tests in `tests/test_app.py` passed; the complete suite passed with 592 tests
 (up from 565) in 15.33s; project-wide `compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`)
 exited 0, with one pre-existing, unrelated `.pytest_tmp` permission warning predating this increment;
@@ -298,7 +299,7 @@ manual Windows workflow beyond this isolated startup/shutdown smoke check was pe
 ## Next recommended increment
 
 1. Complete and review the documentation correction across `ROADMAP.md`, `workflow_p.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
-2. Implement P.36.13 as one bounded, independently tested increment.
+2. P.36.13 is implemented and merged to `main` via PR #59 (merge commit `ff07b68`); it is completed.
 3. Resolve the P.36.14 decision gate before preparing its implementation task.
 
 The obsolete 14-column P.36.6 prompt must not be executed.

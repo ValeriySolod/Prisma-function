@@ -2036,17 +2036,20 @@ definitions) are suspended and must not be implemented, and the next recommended
 `P.36.13`.**
 
 Not yet done: `P.36.8` (mapping display), `P.36.10` (obsolete-code removal), `P.36.11`
-(packaging/installer validation), `P.36.12` (final regression/acceptance), and the `P.36.13`-`P.36.16`
-replacement increments defined in `ROADMAP.md`'s "P.36 roadmap correction (2026-08-02)".
+(packaging/installer validation), `P.36.12` (final regression/acceptance), and the `P.36.14`-`P.36.16`
+replacement increments defined in `ROADMAP.md`'s "P.36 roadmap correction (2026-08-02)". `P.36.13` is
+completed; see the section immediately below.
 
-#### P.36.13. Date-range selection inside Prisma Function — Implemented, pending review and merge (2026-08-02)
+#### P.36.13. Date-range selection inside Prisma Function — Completed, merged to `main` (2026-08-02)
 
-Per `ROADMAP.md`'s "P.36 roadmap correction (2026-08-02)", `P.36.13` is the current forward increment:
+Per `ROADMAP.md`'s "P.36 roadmap correction (2026-08-02)", `P.36.13` was the current forward increment:
 it lets the user select and validate a start date and an end date inside Prisma Function, independent
 from PRISMA navigation, download, transformation, mapping, or publication, which remain scoped to
-`P.36.14`-`P.36.16`. This increment is implemented on `feature/p36-13-date-range-selection` but has
-not been merged to `main` and the feature branch has not been deleted, so it is not marked Completed
-under the project Definition of Done; see the "Verified evidence" paragraph below.
+`P.36.14`-`P.36.16`. This increment was implemented on `feature/p36-13-date-range-selection` and merged
+to `main` via PR #59 (merge commit `ff07b68`, containing implementation commit `fb0cc89`). The
+`feature/p36-13-date-range-selection` branch has not been deleted yet; that cleanup is a separate open
+action and does not change this increment's completed status. See the "Verified evidence" paragraph
+below.
 
 `date_range_selection.py` adds a Qt-independent boundary, matching the existing
 `download_directory.py`/`manual_csv_selection.py` pattern:
@@ -2118,7 +2121,7 @@ directory and manual CSV selection remain unchanged. Every existing P.36.2-P.36.
 `tests/test_app.py` is unmodified and continues to pass, confirming that lifecycle open/close, download
 directory selection, and manual CSV selection behavior is preserved unchanged.
 
-**Verified evidence (2026-08-02, not yet merged).** `tests/test_date_range_selection.py` (17 tests)
+**Verified evidence (2026-08-02, merged via PR #59, merge commit `ff07b68`).** `tests/test_date_range_selection.py` (17 tests)
 and the 10 focused P.36.13 tests in `tests/test_app.py` passed. The complete pytest suite passed with
 592 tests (up from 565, the exact +27 expected from this increment), in 15.33s. Project-wide Python
 compilation (`compileall`, excluding `.venv`, `build`, `.git`, `__pycache__`) exited 0; the run also
@@ -2128,7 +2131,8 @@ directory dated 2026-07-19 that predates this increment and was not created or m
 publication, and no `P.36.14`-`P.36.16` behavior was added or exercised by this increment or its
 tests; all Qt tests run under `QT_QPA_PLATFORM=offscreen` with deterministic fixed dates, never the
 developer machine's current date, locale, timezone, Documents directory, browser, or network. This
-increment is not merged to `main`, and `feature/p36-13-date-range-selection` has not been deleted.
+increment is merged to `main` via PR #59 (merge commit `ff07b68`); `feature/p36-13-date-range-selection`
+has not been deleted yet.
 
 **Fresh packaging evidence (2026-08-02, final-review follow-up).** The packaging check recorded above
 at the time had validated a pre-existing `dist/PrismaFunction` build (dated 2026-07-19) that predated
