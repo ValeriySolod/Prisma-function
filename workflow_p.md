@@ -12,53 +12,46 @@ This section is the permanent product acceptance baseline for the entire **Prism
 
 1. PRISMA is the source platform for European gas-capacity auction data.
 2. The application processes official PRISMA auction exports.
-3. The relevant source period starts from the selected first day of a month.
+3. The user selects a start date and an end date inside Prisma Function; there is no first-day-of-month restriction on the start date, and the date range must otherwise follow the validation rules defined for `P.36.13`.
 4. Only auctions with booked capacity of at least 1000 kWh/h after supported unit normalization are relevant. This threshold corresponds to the established PRISMA import and live-filter contract.
-5. The transformed output is a fixed, ordered 14-field contract (see the `P.36.5` completion note
-   below, under "4. Порядок створення програми", for the full authoritative record). In order, the
-   transformed output must expose:
-   - auction date;
-   - `Exit Market`: the exit-side Market value only, populated only when official PRISMA evidence
-     resolves the exit-side network point to a Market;
-   - `Exit Storage`: the exit-side Storage value only, populated only when official PRISMA evidence
-     resolves the exit-side network point to a Storage facility;
-   - `Entry Market`: the entry-side Market value only, populated only when official PRISMA evidence
-     resolves the entry-side network point to a Market;
-   - `Entry Storage`: the entry-side Storage value only, populated only when official PRISMA
-     evidence resolves the entry-side network point to a Storage facility;
-   - capacity direction: entry, exit, or bundle;
-   - network point name, for example `VGS Storage Hub`;
-   - product type: `WD`, `Day Ahead`, `Month`, `Quarter`, or `Year`;
-   - flow start date and time;
-   - flow end date and time;
-   - booked capacity in kWh/h;
-   - runtime duration in hours;
-   - auction tariff in EUR/MWh/h;
-   - auction premium in EUR/MWh/h.
+5. The transformed output is a fixed, ordered **12-field** contract (see `ROADMAP.md`'s "Resolved
+   specification questions" 2026-08-02 correction entry and "P.36 roadmap correction (2026-08-02)"
+   for the full authoritative record; this corrects a 2026-08-01 `P.36.5` decision that had briefly
+   revised this to a 14-field, four-column structure — see the `P.36.5` completion note below, under
+   "4. Порядок створення програми", which records that history and its 2026-08-02 correction). In
+   order, the transformed output must expose:
+   - Auction Date;
+   - `Exit Market`: the exit-side market **or** exit-side storage name — whichever official PRISMA
+     evidence resolves the exit-side network point to, under `P.33.3`'s `ReferenceClassification`
+     (`market` or `storage`). There is no separate `Exit Storage` output column.
+   - `Entry Market`: the entry-side market **or** entry-side storage name — whichever official
+     PRISMA evidence resolves the entry-side network point to. There is no separate `Entry Storage`
+     output column.
+   - Capacity Type: entry, exit, or bundle;
+   - Network Point Name, for example `VGS Storage Hub`;
+   - Product Type: `WD`, `Day Ahead`, `Month`, `Quarter`, or `Year`;
+   - Flow Start (date and time);
+   - Flow End (date and time);
+   - Booked Capacity in kWh/h;
+   - Flow Duration Hours;
+   - Tariff Price in EUR/MWh/h;
+   - Premium Price in EUR/MWh/h.
 
-   Each side's classification is mutually exclusive under `P.33.3`'s `ReferenceClassification`
-   (`market` or `storage`): a resolved side is never both. If approved side-specific evidence
-   resolves the exit side to a Market, `Exit Market` is populated and `Exit Storage` is left empty
-   because it is non-applicable to that resolution, not because the value is unresolved; the same
-   rule applies symmetrically to `Exit Storage`/`Exit Market` when the exit side resolves to a
-   Storage facility, and to `Entry Market`/`Entry Storage` for the entry side. This intentionally
-   empty non-applicable counterpart column is not an unresolved-value fallback and must not, by
-   itself, reject the row. A Market value must never be copied into a Storage column, a Storage
-   value must never be copied into a Market column, and no value may ever be inferred for the
-   opposite side: `Exit Market`/`Exit Storage` are resolved only from exit-side evidence, and `Entry
-   Market`/`Entry Storage` are resolved only from entry-side evidence, per items 6-11 below.
+   `Exit Market`/`Entry Market` are resolved only from their own side's evidence: `Exit Market` only
+   from exit-side evidence, `Entry Market` only from entry-side evidence, per items 6-11 below. No
+   value is ever inferred for the opposite side.
 
    The existing authoritative Market/Storage enrichment rule (`P.33.3`) governs the genuinely
-   unresolved case, distinct from the non-applicable counterpart above: if a required side is
-   missing, or a required side's network point cannot be resolved to either an approved Market
-   alias or an approved Storage alias, the entire row is rejected, with a typed enrichment reason
-   code plus the affected field, side, and unchanged source-value context. P.36.6 must apply this
-   existing reject rule; it is not a new P.36.6 choice, and no placeholder or silent skip is
-   introduced for a genuinely unresolved side. This is distinct from the separate
-   `P.33.6`/`P.33.7` historical-backfill skip-and-audit behavior, which governs only
-   already-persisted rows in an explicit, opt-in maintenance operation that `P.33.7` confirms "is
-   never called by ... CSV import ... export"; it does not apply to new-row enrichment and must not
-   be conflated with the P.36 output contract.
+   unresolved case: if a required side is missing, or a required side's network point cannot be
+   resolved to either an approved Market alias or an approved Storage alias, the entire row is
+   rejected, with a typed enrichment reason code plus the affected field, side, and unchanged
+   source-value context. The `P.36.15` transformation increment (see `ROADMAP.md`'s "P.36 roadmap
+   correction (2026-08-02)") must apply this existing reject rule; it is not a new choice for that
+   increment, and no placeholder or silent skip is introduced for a genuinely unresolved side. This
+   is distinct from the separate `P.33.6`/`P.33.7` historical-backfill skip-and-audit behavior,
+   which governs only already-persisted rows in an explicit, opt-in maintenance operation that
+   `P.33.7` confirms "is never called by ... CSV import ... export"; it does not apply to new-row
+   enrichment and must not be conflated with the P.36 output contract.
 6. Market and storage enrichment must use only official PRISMA evidence.
 7. A Market mapping may be added only when an exact Auction ID links:
    - the exact side-specific network-point name and identifier from the CSV export;
@@ -1806,7 +1799,9 @@ it against the exact official contract before accepting it. This increment adds 
 selection-and-validation control; it performs no row processing, filtering, mapping,
 accumulation, deduplication, or output writing, and it does not change the existing "Import
 PRISMA Export" button/pipeline, which remains a separate, unmodified control scoped to later
-P.36 increments (P.36.6/P.36.7/P.36.9).
+P.36 increments — `P.36.15` (transformation) and `P.36.16` (publication), per `ROADMAP.md`'s "P.36
+roadmap correction (2026-08-02)"; the originally referenced `P.36.6`/`P.36.7`/`P.36.9` slots are
+suspended/superseded and were replaced by that correction.
 
 `manual_csv_selection.py` adds a Qt-independent, filesystem-only boundary:
 
@@ -1906,15 +1901,31 @@ UTF-16/UTF-32 BOM variants; no `tests/test_app.py` change was needed since the U
 consumes the already-typed `ManualCsvOutcome`/`describe_rejection()` boundary, which did not
 change shape.
 
-Not yet done: `P.36.6` onward (filtering/calculation/mapping, output writing, mapping display,
-accumulation/recovery, obsolete-code removal, packaging/installer validation, and final
-regression/acceptance) — see the `P.36.5` completion note immediately below for the resolved PDF
-scope and output-column structure that unblocks `P.36.6`. This new "Select CSV" control is not yet
-wired into the existing "Import PRISMA Export" pipeline (`start_processing()`); that remains a
-later increment's decision, consistent with this increment's explicit "no processing, filtering,
-mapping, accumulation, deduplication, persistence, or output-row writing" scope boundary.
+Not yet done: `P.36.8` (mapping display), `P.36.10` (obsolete-code removal), `P.36.11`
+(packaging/installer validation), `P.36.12` (final regression/acceptance), and the `P.36.13`-`P.36.16`
+replacement increments (date-range selection, application-managed download, transformation into the
+corrected 12-column output CSV contract, and publication) defined in `ROADMAP.md`'s "P.36 roadmap
+correction (2026-08-02)". See the `P.36.5` completion note immediately below for the resolved PDF
+scope (still authoritative) and the output-column-structure decision it originally recorded (later
+found incorrect and corrected on 2026-08-02). The former `P.36.6`/`P.36.7`/`P.36.9` slots this note
+previously referenced are suspended/superseded and must not be implemented. This new "Select CSV"
+control is not yet wired into the existing "Import PRISMA Export" pipeline (`start_processing()`);
+that remains a later increment's decision, consistent with this increment's explicit "no processing,
+filtering, mapping, accumulation, deduplication, persistence, or output-row writing" scope boundary.
 
 #### P.36.5. Resolve PDF scope and output-column structure — Completed (2026-08-01)
+
+> **2026-08-02 correction.** The "Output-column structure" decision recorded below (four separate
+> `Exit Market`/`Exit Storage`/`Entry Market`/`Entry Storage` columns, 14 fields total) was found
+> incorrect and is withdrawn. The authoritative output contract reverts to the original `Prisma
+> Function.odt` 12-field structure: a single `Exit Market` column (market or storage name) and a
+> single `Entry Market` column (market or storage name), with no separate Storage columns. See
+> `ROADMAP.md`'s "Resolved specification questions" (2026-08-02 entry) and "P.36 roadmap correction
+> (2026-08-02)" for the corrected record. The **PDF-scope decision** recorded below is unaffected and
+> remains authoritative. This note's original text is preserved below for the historical record only
+> and must not be treated as a current instruction where it describes the 14-field/four-column
+> structure. The former `P.36.6` slot this note originally unblocked is suspended/superseded; do not
+> implement it. The replacement increments are `P.36.13`-`P.36.16`.
 
 This increment is documentation and contracts only; it changes no application behavior, adds no
 row processing, filtering, conversion, mapping, output writing, UI, or persistence code, and
@@ -1973,9 +1984,13 @@ never invoked during CSV import or export, so it does not apply to the P.36 outp
 
 Both decisions were recorded as approved customer clarifications in `ROADMAP.md`'s "Resolved
 specification questions" section rather than as edits to `Prisma Function.odt` itself, which is not
-version-controlled in this repository. `P.36.6` (filtering, calculation, conversion, and mapping for
-the 14-field contract) is now unblocked and is the next recommended implementation increment.
+version-controlled in this repository. At the time, `P.36.6` (filtering, calculation, conversion, and
+mapping for the 14-field contract) was unblocked and recorded as the next recommended implementation
+increment. **This is superseded by the 2026-08-02 correction noted at the top of this section: the
+output-column-structure decision was withdrawn, `P.36.6` (and the dependent `P.36.7`/`P.36.9`
+definitions) are suspended and must not be implemented, and the next recommended increment is now
+`P.36.13`.**
 
-Not yet done: `P.36.6` onward (filtering/calculation/mapping, output writing, mapping display,
-accumulation/recovery, obsolete-code removal, packaging/installer validation, and final
-regression/acceptance).
+Not yet done: `P.36.8` (mapping display), `P.36.10` (obsolete-code removal), `P.36.11`
+(packaging/installer validation), `P.36.12` (final regression/acceptance), and the `P.36.13`-`P.36.16`
+replacement increments defined in `ROADMAP.md`'s "P.36 roadmap correction (2026-08-02)".
