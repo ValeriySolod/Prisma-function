@@ -1,209 +1,265 @@
 # Prisma-function Roadmap
 
-`ROADMAP.md` tracks implementation progress and remaining work. `workflow_p.md` remains the detailed source for the development workflow, requirements, validation rules, and Definition of Done.
+`ROADMAP.md` records implementation history and the current dependency-ordered product plan.
+`workflow_p.md` defines detailed engineering rules, validation requirements, and the Definition of Done.
+The newest explicitly approved customer requirements supersede older roadmap text when a conflict is recorded below.
 
 ## Status legend
 
 - ✅ Completed
 - 🟡 In progress / partially completed
-- 🟨 Documentation/contracts in progress (no application behavior change)
+- 🟨 Documentation/contracts in progress
 - ⬜ Planned
+- 🚫 Suspended / superseded; must not be implemented
 - ❌ Cancelled
 
-## Roadmap
+## Product direction
 
-| ID | Stage | Status | Current result | Remaining work |
-|---|---|---|---|---|
-| P.1 | Base project structure | ✅ Completed | Core project layout and entry points exist. | None. |
-| P.2 | Initial desktop UI | ✅ Completed | Initial desktop controls and status display exist. | None for this stage. |
-| P.3 | CSV processing and validation foundation | ✅ Completed | CSV parsing and validation foundations are implemented. | None for this stage. |
-| P.4 | Browser launch lifecycle and retry handling | ✅ Completed | Browser startup, cleanup, and retry lifecycle exist. | None for this stage. |
-| P.5 | CSV contract | ✅ Completed | Required fields and validation contract are defined. | None. |
-| P.6 | CSV loading and preview | ✅ Completed | CSV files can be loaded, validated, and previewed. | None for this stage. |
-| P.7 | Monitoring engine foundation | ✅ Completed | Core monitoring abstractions and execution flow exist. | Live status retrieval is tracked under P.23. |
-| P.8 | Monitoring scheduler | ✅ Completed | Interval-based monitoring scheduling exists. | None for this stage. |
-| P.9 | Monitoring lifecycle integration | ✅ Completed | Start, stop, and lifecycle coordination are integrated. | None for this stage. |
-| P.10 | Error handling and resource cleanup | 🟡 In progress / partially completed | Core failures and typed live-adapter failure boundaries are handled. | Complete session, timeout, DOM-change, unavailable-page, and manual-closure recovery. |
-| P.11 | Automated test coverage | 🟡 In progress / partially completed | Automated coverage includes live status parsing, deterministic row matching, mocked page extraction, and browser-thread dispatch. | Extend coverage for authentication, recovery, persistence, migration completion, and packaging behavior. |
-| P.17 | Remove the manual browser selector | ✅ Completed | Manual browser selection has been removed. | None. |
-| P.18 | Use the Windows default browser automatically | ✅ Completed | The Windows default browser is selected automatically. | None. |
-| P.19 | Select Qt GUI framework | ✅ Completed | PySide6 was selected. | None. |
-| P.20 | PySide6 migration | 🟡 In progress / partially completed | The PySide6 foundation is present. | Complete integration and UI state management in P.20.2. |
-| P.20.1 | PySide6 GUI foundation | ✅ Completed | The base PySide6 GUI and application structure exist. | None. |
-| P.20.2 | Complete PySide6 integration and UI state management | ⬜ Planned | Foundation is available from P.20.1. | Complete lifecycle integration, state transitions, and Qt-safe UI updates. |
-| P.22 | Validate the packaged executable on a clean Windows environment | 🟡 In progress | A second physical PC exposed an intermittent packaged-browser runtime crash. Clean-Windows validation has not passed. | Reproduce with P.22.1 diagnostics and complete all physical-PC checks. |
-| P.22.1 | Add persistent packaged-browser runtime diagnostics | ✅ Completed | Persistent startup and generation-scoped browser lifecycle logging was added for evidence collection; root cause is not yet determined. | Collect and analyze logs from the affected physical PC. |
-| P.23 | Live PRISMA auction monitoring | ✅ Completed | P.23.1-P.23.3 provide live retrieval, public-session classification, bounded lookups, typed DOM/unavailable failures, and generation-safe manual-closure recovery. | None for this stage. |
-| P.23.1 | Implement live PRISMA page adapter | ✅ Completed | Real-session validation confirmed navigation, delayed table loading, active date filtering, `Marketed >= 1000`, rendered `Auction ID`/`Status` headers, deterministic row matching, `Finished` to `Completed` normalization, typed filtered-row failures, diagnostics, and managed-browser cleanup. Live DOM corrections support the current collapsed filter panel and PRISMA's rendered header row. | None for this increment. |
-| P.23.2 | Add authentication/session handling if required | ✅ Completed | The current PRISMA auctions workflow is public. Generation-scoped validation accepts delayed public readiness and the harmless consent banner, detects login redirects/DOM signals, sanitizes diagnostics, and returns typed authentication-required or invalid-session failures. Credential persistence and login automation were intentionally not added. | None for this increment. |
-| P.23.3 | Handle timeout, unavailable page, changed DOM, and manual browser closure | ✅ Completed | Bounded live lookups, typed timeout/unavailable/DOM results, lifecycle-driven monitoring termination, idempotent cleanup, stable English UI messages, and stale-generation protection are covered by deterministic tests. | Manual real-session closure/disconnect timing validation remains recommended; no additional implementation is required for this increment. |
-| P.24 | Persist monitoring results and status changes | ✅ Completed | Actual live checks, transactional status transitions, and the latest successful per-auction baseline are stored in the runtime SQLite database; restart recovery, error/skip semantics, ordered reads, and persistence-before-UI emission are covered by tests. | No notification UI is included; P.25 remains separate. |
-| P.25 | Add user-visible status-change notifications | ✅ Completed | Current-cycle persisted `Changed` transitions produce exact, ordered, non-modal status-change entries in Recent activity; typed eligibility, exclusions, Qt signal delivery, single-cycle summaries, accessible distinction, and the shared 50-item bound are covered by tests. | Complete a manual Windows visual/accessibility smoke check with live transitions. |
-| P.26 | Move writable runtime data to the user data directory | ✅ Completed | SQLite, generated Excel, import state, and rotating logs use one `%LOCALAPPDATA%\PrismaFunction` boundary; confirmed source/package/temp legacy artifacts migrate with locking, verification, atomic publication, and deterministic conflict retention. | Complete the documented manual installed-package migration smoke check on Windows. |
-| P.27 | Package the application with PyInstaller | ✅ Completed | The authoritative windowed `PrismaFunction.spec` produces a validated `onedir` package with PySide6, the Qt Windows platform plugin, Playwright and its Node driver, application dependencies, and version metadata. Deterministic validation rejects missing runtime components, developer-only files, and writable runtime artifacts in the distribution. | Same-machine interactive launch checks remain manual; clean-machine validation is P.28. |
-| P.28 | Validate the executable on a clean Windows environment | 🟡 In progress | The 2026-07-18 physical Windows package test passed the exercised startup, Chrome, monitoring, header-only import, runtime-path, cleanup, and relaunch checks, but its recorded outcome is Partial / Blocked. | Repeat on a standard non-administrator computer without developer tools; test a data-bearing export, Edge, unsupported-default-browser handling, and restart baseline persistence. See `P28_VALIDATION_2026-07-18.md`. |
-| P.29 | Add project-wide Windows CI | ✅ Completed | Windows CI runs the full pytest suite, Python compilation, and PyInstaller packaging validation on pushes and pull requests for `main`, with manual dispatch support. | None. |
-| P.30 | Final release readiness and versioned release archive | ✅ Completed (repository-side) | Version 1.0.0 metadata, deterministic versioned ZIP and SHA-256 workflow, tests, build instructions, release notes, and a final checklist are complete. | Run and record manual packaged-app, archive, checksum, and second-PC validation; tag and publish only after merge. |
-| P.31 | Modern PySide6 monitoring dashboard | ✅ Completed | Responsive light workspace and graphite sidebar, truthful summary cards, model-backed searchable/filterable auction table, browser and monitoring state badges, activity feed, accessible controls, and focused offscreen UI coverage are implemented without changing managed-browser ownership. | Complete manual Windows scaling checks at 125%, 150%, 175%, and 200%. |
-| P.32 | Windows installer and uninstaller using Inno Setup | ✅ Completed (repository-side) | A version-controlled, per-user, signed-ready Inno Setup definition installs the validated PyInstaller onedir package, creates Start Menu and optional desktop shortcuts, and preserves runtime data during upgrade and uninstall. Deterministic contract tests and build/validation documentation are included. | Build and manually validate the installer and uninstaller on a standard non-administrator Windows computer; sign release candidates before publication. |
-| P.33 | Unified PRISMA CSV import foundation | ✅ Completed | P.33.1-P.33.8 provide separate contracts, audited import, recoverable cumulative persistence, atomic deterministic output, explicit transactional historical Market / Storage backfill, and an expanded evidence-backed reference catalog. | Expand the reference catalog only from authoritative evidence. |
-| P.33.1 | Separate and detect both CSV contracts | ✅ Completed | Exact headers, encodings, delimiters, typed detection outcomes, duplicate rejection, and regression-safe routing are implemented and validated. | None for this increment. |
-| P.33.2 | Import complete original PRISMA exports | ✅ Completed | Typed imported/filtered/rejected results account for every source row; supported capacity and EUR tariff conversions, direction/network selection, strict dates, and product-duration rules are validated. | None. |
-| P.33.3 | Add market and storage reference enrichment | ✅ Completed | Direction-authoritative enrichment exposes side-specific canonical names and market/storage classifications in detailed records; required-side mismatches are typed rejections, irrelevant sides are preserved but ignored, and the 18-field normalized/process_csv contract remains unchanged. | Expand the catalog only when additional authoritative mappings are confirmed. |
-| P.33.4 | Add controlled daily source updates | ✅ Completed | Immutable typed state/results, exact-byte SHA-256 identity, authoritative import validation, stable apply/unchanged/reject decisions, and a pure timezone-aware daily due policy are implemented for caller-supplied local files. | None. |
-| P.33.5 | Integrate the completed import workflow | ✅ Completed | SQLite-led recovery, atomic Excel publication, exact-retry repair, truthful stored summaries, deferred shutdown, and source-date guidance are implemented and verified by the 299-test suite. | Manual Windows UI and file-lock smoke testing remains recommended. |
-| P.33.6 | Manual validation fixes | ✅ Completed | The Monitoring CSV action has unambiguous user-facing text; deterministic `Auctions` worksheet widths are applied and validated without Excel; exact retry repairs legacy default-width output without changing stored rows; historical backfill safety was investigated and documented. | Do not backfill automatically. A future explicit, transactional, idempotent, row-audited maintenance operation remains deferred, with its execution surface and durable audit format still to be decided. |
-| P.33.7 | Explicit historical Market / Storage backfill | ✅ Completed | `AuctionStorage.backfill_historical_market_storage()` fills only missing safely resolvable single-side values under `BEGIN IMMEDIATE`, preserves canonical equivalents/conflicts, and appends a durable run plus deterministic per-row audit with exact typed counters. | No automatic or force mode; bundle rows remain unresolvable because both source-side identities were not retained. |
-| P.33.8 | Expanded authoritative Market / Storage mapping | ✅ Completed | All 37 Exit and 37 Entry network-point aliases explicitly classified as `RESERVOIR` in the checked-in authoritative export resolve as side-specific Storage references; the five explicit Market mappings remain unchanged. | Add aliases only from checked-in authoritative evidence; do not infer cross-side equivalence. |
-| P.34.1 | Safe auction deduplication | ✅ Completed | Selected network-point IDs are mandatory and audited during import; storage rejects blank IDs and conflicting same-identity batches before auction mutation while preserving identical-duplicate accounting. | No schema migration; network-point names are never identity fallbacks. |
-| P.34.2 | Maximize the managed browser window | ✅ Completed | Chromium launches with `--start-maximized`, Playwright uses the native window size without a fixed viewport, regression coverage verifies both settings, and the maximized Windows behavior passed manual validation. | None. |
-| P.35 | Authoritative PRISMA reference catalog expansion | ✅ Completed | Every exact nonblank network-point name explicitly classified as `RESERVOIR` in the updated checked-in `Auction_overview.csv` resolves as a side-specific Storage alias: exactly 50 Exit and 51 Entry aliases. The five `mapping.csv` Market mappings and `VGS Storage Hub` canonical compatibility remain unchanged. | Add aliases only from exact checked-in side-specific evidence; do not infer relationships or mappings. |
-| P.35.1 | Expand authoritative Market mapping catalog (Batch 1) | ✅ Completed | Exactly two customer-approved side-specific aliases resolve to PSV and THE from Auction-ID-linked CSV/PDF evidence with normalized booked capacity of at least 1000 kWh/h, recorded in `evidence/p35-1/EVIDENCE_MANIFEST.md`. Existing Market mappings and the complete Storage catalog remain unchanged. | Twelve aliases from the preliminary 14-row candidate set were rejected below the capacity threshold. Other shared-ID rows were not reviewed or accepted, remain outside this batch, and provide no mappings. No completeness claim is made. |
-| P.35.2 | Deterministic user-supplied official CSV/PDF paired import | ❌ Cancelled (2026-07-28) | Was an in-progress uncommitted working-tree implementation adding automated CSV/PDF pair staging, geometry-based PDF parsing, and a paired-operation ledger. | Superseded by `Prisma Function.odt`, the sole authoritative specification, which requires a manual official-CSV download and processing flow, not automated/paired source acquisition. Cancelled without ever being committed; the diff was backed up to `Prisma-function-backups/p35.2-cancelled-2026-07-28/` before removal. See P.36 below. |
-| P.35.3 | Managed-browser automatic CSV/PDF acquisition | ❌ Cancelled (2026-07-28) | Was planned only; no code existed. | Superseded by the authoritative manual-download requirement. Automated acquisition is out of scope unless a future authoritative specification explicitly requests it. |
-| P.35.4 | Paired-source lifecycle and diagnostics hardening | ❌ Cancelled (2026-07-28) | Was planned only; no code existed. | Depended on P.35.2/P.35.3, both cancelled. |
-| P.35.5 | Installed-app paired acquisition validation | ❌ Cancelled (2026-07-28) | Was planned only; no code existed. | Depended on P.35.2/P.35.3, both cancelled. |
+`Prisma Function.odt` is the authoritative business specification. The customer clarifications recorded on 2026-08-02 establish this current workflow:
 
-## Authoritative specification pivot (2026-07-28)
+1. The user opens PRISMA from Prisma Function.
+2. The user selects a start date and an end date inside Prisma Function. There is no first-day-of-month restriction.
+3. The user initiates the official PRISMA CSV download through Prisma Function.
+4. Prisma Function uses a download directory created under the user's Documents directory or another existing directory explicitly selected by the user.
+5. Prisma Function validates and processes the downloaded CSV inside the application.
+6. As a fallback only, the user may explicitly select a previously downloaded CSV through the completed P.36.4 path.
+7. Prisma Function transforms accepted rows into the exact 12-column output CSV contract defined below.
+8. Prisma Function publishes the processed result using a publication mechanism that must be explicitly approved before P.36.16 implementation.
+9. The user closes the application-owned PRISMA session with the Close Prisma control when finished. Manual browser closure must also be detected safely.
 
-`Prisma Function.odt` (`C:\Users\portm\Desktop\Pisma mini\Prisma Function.odt`) is adopted as the
-**sole authoritative business specification** going forward. It describes a materially simpler,
-manual workflow than the automated/paired acquisition line P.35.2-P.35.5 pursued:
+The new workflow replaces the live-monitoring dashboard, scheduler, and automated monitoring product flow. Their completed records remain historical evidence; their removal is planned separately.
 
-- The user manually opens the official PRISMA site in a new browser tab (an "open Prisma" control)
-  and manually selects dates and downloads the official CSV export from that site themselves.
-- The download folder is either created under the user's Documents folder or explicitly chosen by
-  the user; there is no hidden internal staging directory.
-- All file processing happens only inside the Prisma Function program, after the user supplies the
-  downloaded file to it.
-- The user manually closes PRISMA (a "closed Prisma" control) when finished.
-- Output is a `;`-delimited UTF-8 CSV with a fixed 14-field contract (auction date; `Exit Market`;
-  `Exit Storage`; `Entry Market`; `Entry Storage`; capacity type entry/exit/bundle; point name;
-  product type; flow start/end timestamps; booked capacity; computed flow-duration hours; tariff
-  price; premium price), filtered to auctions with booked capacity ≥ 1 MWh, all prices normalized to
-  EUR/MWh/h, all timestamps in CET/CEST, decimal separator `.`. The specification's single combined
-  "Ринок виходу або Хранилище" / "Ринок входу або Хранилище" fields are resolved (see "Resolved
-  specification questions" below, P.36.5) into four always-present, side-specific columns: a Market
-  value populates only the corresponding Market column and a Storage value populates only the
-  corresponding Storage column; no value is copied into both columns and no opposite-side value is
-  inferred.
-- The program must also display the market/storage mapping referenced by the specification's
-  attached screenshot; the screenshot has been supplied and reviewed (see "Resolved specification
-  questions" below for its approved column contract).
-- PDF input is mentioned only as "CSV (PDF if needed)"; the customer has explicitly decided that PDF
-  input and PDF processing are excluded from the current product version (see "Resolved
-  specification questions" below, P.36.5). PDF support is not planned for the current version.
+## Authoritative output CSV contract
 
-P.35.2's automated CSV/PDF pairing, staging, and fingerprinting design conflicts with this manual
-model and was cancelled rather than adapted, per the sequence below (P.36).
+The processed output contains exactly these 12 columns, in this exact order and spelling:
 
-### Resolved specification questions
+1. `Auction Date`
+2. `Exit Market`
+3. `Entry Market`
+4. `Capacity Type`
+5. `Network Point Name`
+6. `Product Type`
+7. `Flow Start`
+8. `Flow End`
+9. `Booked Capacity`
+10. `Flow Duration Hours`
+11. `Tariff Price`
+12. `Premium Price`
 
-- **Mapping-display screenshot (resolved 2026-08-01).** The screenshot referenced by
-  `Prisma Function.odt` ("згідно доданого скріншоту") has been supplied and reviewed. Its approved
-  presentation contract for the P.36.8 mapping display is exactly these columns, in this order:
-  `Exit Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`. The
-  screenshot is a visual layout reference only: no screenshot row or cell value is copied, inferred,
-  or treated as authoritative mapping data. P.36.8 mapping values must still come only from approved
-  authoritative evidence under the existing Market/Storage catalog rules (`workflow_p.md` §1.1, items
-  6-14): no fuzzy, substring, geographic, TSO/EIC, identifier-only, cross-side, or other inferred
-  matching. This resolves former question 2 and removes the P.36.8 screenshot blocker; P.36.8 itself
-  remains unstarted (see the P.36 roadmap table below).
-- **Scope boundary against the existing monitoring product (resolved 2026-08-01).** The customer has
-  explicitly decided that the new manual CSV workflow **replaces** the existing live PRISMA
-  monitoring dashboard, scheduler, and automated monitoring workflow (P.7-P.25, P.31). They are not
-  intended to coexist in the final product. This resolves former question 1. Full physical removal
-  of the superseded monitoring subsystem remains scoped to P.36.10; P.36.2 only disconnects the parts
-  of the UI that would otherwise conflict with the new "Open Prisma" / "Close Prisma" controls (see
-  the P.36.2 completion note in `workflow_p.md`).
-- **Official auction-resource link (resolved 2026-08-01).** The customer has explicitly approved the
-  exact URL the "Open Prisma" control must open:
-  `https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions`. This is the same
-  URL the existing (now superseded) monitoring subsystem already targets. This resolves former
-  question 3.
-- **PDF trigger condition (resolved 2026-08-01, P.36.5).** The customer has explicitly decided that
-  PDF input and PDF processing are excluded from the current product version. "CSV файл (за потреби
-  pdf)" is treated as satisfied entirely by the CSV-only manual workflow already implemented through
-  P.36.4: no PDF file is selected, parsed, paired, staged, required, or used as runtime input in the
-  current version. This resolves the former "PDF trigger condition" question. The `P.36.5` "Optional
-  PDF support" implementation stage that previously occupied this roadmap slot is cancelled/superseded
-  by this decision (see the P.36 roadmap table below). Historical PDF evidence already used for
-  approved mapping catalog entries (for example `evidence/p35-1/Auction_Overview.pdf`) is unaffected:
-  excluding runtime PDF support does not invalidate or delete historical evidence or its manifests.
-  Dependency and obsolete-code removal remain scoped to `P.36.10`; no PDF library, evidence, test, or
-  code is removed by this decision.
-- **Exit/Entry market-or-storage output shape (resolved 2026-08-01, P.36.5).** The customer has
-  explicitly decided that Exit/Entry Market and Storage values must use separate, always-present
-  output columns instead of the specification's single combined "Ринок виходу або Хранилище" /
-  "Ринок входу або Хранилище" field per side. The authoritative output contract is now 14 fields, in
-  this order: auction date, `Exit Market`, `Exit Storage`, `Entry Market`, `Entry Storage`, capacity
-  type entry/exit/bundle, point name, product type, flow start/end timestamps, booked capacity,
-  computed flow-duration hours, tariff price, and premium price. A Market value populates only the
-  matching Market column and a Storage value populates only the matching Storage column; no value is
-  copied into both columns and no opposite-side value is inferred. This resolves the former
-  "Exit/Entry market-or-storage output shape" question. `P.36.6` is now unblocked.
+Contract rules:
 
-### Unresolved specification questions (require authoritative clarification, not inferred)
+- `Exit Market` contains the resolved exit market or exit storage name.
+- `Entry Market` contains the resolved entry market or entry storage name.
+- There are no separate `Exit Storage` or `Entry Storage` output columns.
+- The mapping presentation in the UI does not add, remove, rename, or reorder output CSV columns.
+- The mapping presentation uses exactly this hierarchy and order: `Exit Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`.
+- Mapping values must come only from approved authoritative evidence. No fuzzy, substring, geographic, identifier-only, TSO-name, cross-side, or other inferred matching is permitted.
+- PDF input and runtime PDF processing remain excluded from the current version. Historical PDF evidence already accepted for mapping-catalog entries remains valid.
+- Existing approved requirements for the booked-capacity threshold, supported normalization, timestamps, decimal representation, typed rejection, and preservation of source error context remain authoritative unless a later explicit customer decision supersedes them.
 
-None remain. Both previously open questions — the PDF trigger condition and the Exit/Entry
-market-or-storage output shape — were resolved on 2026-08-01 by explicit customer decision recorded
-in `P.36.5` above; see "Resolved specification questions" above for the full record.
+## Completed and historical roadmap
 
-## P.36 roadmap — manual PRISMA workflow (per `Prisma Function.odt`)
-
-Each increment below is small and independently testable. **P.36.1 is completed and introduced
-only documentation and contracts — no application behavior changes.** Later increments are not
-started until their applicable open questions are resolved.
-
-| ID | Stage | Status | Scope |
+| ID | Stage | Status | Current result / disposition |
 |---|---|---|---|
-| P.36.1 | Adopt the authoritative specification: documentation and contracts only | ✅ Completed | Recorded the manual workflow, the original 12-field output CSV contract (names, order, formats, units), and the open questions above. The output contract was later revised to 14 fields and both open questions were resolved by P.36.5. No application behavior changed. |
-| P.36.2 | Manual "Open Prisma" / "Close Prisma" lifecycle | ✅ Completed | A user-triggered "Open Prisma" control opens exactly `https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` in an application-owned browser session; a separate "Close Prisma" control closes only that owned session. No automated navigation, login, date-setting, filtering, or download. Manual closure (the browser window's own X button) is detected via layered browser/page/CDP `Target.targetDestroyed` signals, real-Windows-validated on 2026-08-01; temporary diagnostic logging used to validate that fix was removed afterward. The superseded monitoring dashboard/CSV-load/start-monitoring/stop-monitoring controls are hidden from the UI (not deleted) so they cannot run or conflict with these controls; full removal remains P.36.10. |
-| P.36.3 | Documents-based or user-selected download directory | ✅ Completed | Default the expected download location to the user's Documents folder; let the user choose a different folder explicitly. No hidden internal staging path. |
-| P.36.4 | Manual CSV selection and validation | ✅ Completed | A "Select CSV" control lets the user choose the manually downloaded official CSV from disk, seeded from the current download directory; `manual_csv_selection.py` validates it (existing, readable, regular file; no standard BOM signature; exact 35-column `;`-delimited header; the complete file, not only the header, validated as strict `cp1252` in bounded chunks) with typed accept/reject outcomes and no silent coercion. No row processing, PDF support, directory scanning, or output writing. |
-| P.36.5 | Resolve PDF scope and output-column structure: documentation and contracts only | ✅ Completed | Recorded two explicit customer decisions: PDF input and PDF processing are excluded from the current product version (cancelling/superseding the former "Optional PDF support" implementation stage that previously occupied this slot), and the output contract uses four separate side-specific columns (`Exit Market`, `Exit Storage`, `Entry Market`, `Entry Storage`) instead of two combined fields. The authoritative output contract is now the 14-field structure recorded above and in `workflow_p.md` §1.1. No application behavior changed; no PDF library, evidence, test, or code was removed (that remains `P.36.10`). |
-| P.36.6 | Filtering, calculation, conversion, and mapping | ⬜ Planned — next recommended increment | Implement the ≥ 1 MWh filter, EUR/MWh/h normalization, CET/CEST timestamps, flow-duration-hours calculation, and market/storage mapping resolution for the 14-field contract (`Exit Market`, `Exit Storage`, `Entry Market`, `Entry Storage`, and the remaining unchanged fields). |
-| P.36.7 | Output CSV writer | ⬜ Planned | Emit the `;`-delimited, UTF-8, dot-decimal output file matching the authoritative 14-field contract (recorded in P.36.1, revised to four separate Market/Storage columns by P.36.5) exactly. |
-| P.36.8 | Mapping display in the UI | ⬜ Planned (not started) | Show the resolved market/storage mapping using the approved column contract: `Exit Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`, in this order. The supplied screenshot is a layout reference only; no screenshot row/cell value is authoritative mapping data. |
-| P.36.9 | Accumulation, deduplication, atomic publication, and recovery | ⬜ Planned | Reuse/adapt the existing atomic-publish, dedup, and SQLite-recovery patterns (P.33-P.34 series) for the single-CSV manual workflow; no PDF pairing or fingerprinting. |
-| P.36.10 | Remove obsolete browser automation and dependencies | ⬜ Planned | Physically remove the superseded monitoring dashboard, scheduler, live-status automation, and related code/dependencies that P.36.2 only disconnected from the UI, plus any automated source-acquisition code/dependencies confirmed obsolete by the authoritative spec (at minimum, the cancelled P.35.2 `pdfplumber`/`pdfminer` packaging changes never re-added). |
-| P.36.11 | Windows packaging and installer validation | ⬜ Planned | Update `PrismaFunction.spec`, `validate_package.py`, and the Inno Setup installer for the final dependency set; validate the packaged build. |
-| P.36.12 | Regression and clean-Windows acceptance tests | ⬜ Planned | Full pytest regression plus a manual clean-Windows acceptance checklist matching the specification's expected result (relevant-only auctions, correct output format, mapping display). |
+| P.1–P.9 | Project, UI, CSV, browser, monitoring, and scheduling foundations | ✅ Completed | Historical foundations implemented. The monitoring product direction is superseded by P.36, but completion history is preserved. |
+| P.10–P.11 | Error handling, cleanup, and automated coverage | 🟡 Partially completed | Existing coverage remains useful. Remaining work must be evaluated against the final P.36 architecture. |
+| P.17–P.19 | Default-browser and PySide6 decisions | ✅ Completed | Manual browser selection removed; Windows default Chrome/Edge and PySide6 selected. |
+| P.20 | PySide6 migration | 🟡 Partially completed | Foundation is complete; any remaining integration must follow the final P.36 UI. |
+| P.20.1 | PySide6 GUI foundation | ✅ Completed | Base GUI and application structure exist. |
+| P.20.2 | Complete legacy PySide6 monitoring UI integration | 🚫 Superseded by P.36 | Do not complete the superseded monitoring UI as a separate product objective. |
+| P.22–P.22.1 | Packaged-browser validation and diagnostics | 🟡 Partially completed | Diagnostics exist; final physical validation belongs to the final P.36 package. |
+| P.23–P.25 | Live monitoring, persistence, and notifications | ✅ Completed; product flow superseded | Preserve implementation history and reusable components, but do not extend the live-monitoring product flow. |
+| P.26–P.32 | Runtime paths, packaging, CI, dashboard, installer, and release foundations | ✅ Repository-side foundations completed | Revalidate packaging, installer, and clean-Windows behavior after the P.36 dependency set is final. |
+| P.33–P.33.8 | PRISMA CSV import, persistence, publication, enrichment, and mapping foundations | ✅ Completed | Reuse only compatible, tested business and safety boundaries. Do not restore superseded output shapes. |
+| P.34.1 | Safe auction deduplication | ✅ Completed | Existing identity, conflict, and audit behavior is available for reuse if the approved P.36 publication design needs it. |
+| P.34.2 | Maximize managed browser window | ✅ Completed | Real-Windows behavior validated. |
+| P.35–P.35.1 | Authoritative mapping catalog expansion | ✅ Completed | Preserve exact side-specific evidence and regression rules. |
+| P.35.2–P.35.5 | Paired CSV/PDF acquisition line | ❌ Cancelled | Do not restore the cancelled paired-source or PDF-processing design. |
 
-## Current key limitation
+Detailed historical records and test counts remain in `workflow_p.md` and Git history. This summary must not be used to claim that an unrun current test suite has passed.
 
-The live monitoring adapter and dashboard are superseded by the manual CSV
-workflow per the customer's 2026-08-01 replacement decision (see "Resolved
-specification questions" above). Their code remains in the repository — P.36.2
-only hides the conflicting UI controls — and physical removal is P.36.10. No
-further live-monitoring validation is planned; the adapter's prior real-session
-validation evidence is preserved in this document for historical record only.
+## P.36 implementation roadmap
+
+### Completed foundations
+
+| ID | Stage | Status | Current result / current role |
+|---|---|---|---|
+| P.36.1 | Adopt the authoritative specification | ✅ Completed | Documentation baseline created. Its obsolete 14-column interpretation is superseded by the 2026-08-02 12-column clarification. |
+| P.36.2 | Open Prisma / Close Prisma lifecycle | ✅ Completed | Application-owned PRISMA session, safe close behavior, and manual-closure detection implemented. |
+| P.36.3 | Documents-based or user-selected download directory | ✅ Completed | Existing accessible directory selection is implemented and session-scoped. Directory creation and managed-download integration remain P.36.14 concerns. |
+| P.36.4 | Manual CSV selection and validation | ✅ Completed as fallback | Exact official-export validation exists. Manual selection is a fallback path, not the primary product workflow. |
+| P.36.5 | PDF-scope decision | ✅ Completed in part; output-shape decision superseded | Runtime PDF input remains excluded. The former 14-column output decision is withdrawn and must not guide implementation. |
+
+### Suspended obsolete increments
+
+| ID | Former stage | Status | Disposition |
+|---|---|---|---|
+| P.36.6 | Filtering/calculation/mapping for a 14-column output | 🚫 Suspended / superseded | The old P.36.6 prompt must not be executed. Replaced by P.36.15. |
+| P.36.7 | 14-column output CSV writer | 🚫 Suspended / superseded | Replaced by P.36.15. |
+| P.36.9 | Accumulation/deduplication/atomic publication under the withdrawn design | 🚫 Suspended / superseded | Publication is redefined by P.36.16 after its decision gate. |
+
+P.36.8, P.36.10, P.36.11, and P.36.12 remain planned support/finalization stages. They must be scheduled only when their dependencies below are satisfied and must use the 12-column contract.
+
+### P.36.13 — Date-range selection inside Prisma Function
+
+**Status:** ⬜ Planned — next implementation increment
+**Dependencies required before implementation:** P.36.2 completed.
+
+**Objective:** Let the user select and validate a start date and an end date inside Prisma Function.
+
+**Included scope:**
+
+- Qt-independent date-range value and validation boundary;
+- start-date and end-date controls in the application;
+- validation that both dates are present and the end date is not earlier than the start date;
+- stable English validation messages and deterministic UI state;
+- safe retry after correction.
+
+**Excluded scope:**
+
+- first-day-of-month restriction;
+- PRISMA navigation, form automation, or download;
+- CSV transformation, mapping, output writing, or publication;
+- invented PRISMA-specific date limits not present in authoritative requirements.
+
+**Acceptance criteria and focused tests:**
+
+- valid same-day and multi-day ranges are accepted;
+- missing and reversed ranges are rejected without changing the last accepted range;
+- UI controls reflect the accepted range and remain retryable after errors;
+- no browser or file operation occurs;
+- relevant focused tests, full regression tests required by project rules, compilation, and `git diff --check` pass;
+- `workflow_p.md` and this roadmap record the final implemented behavior and exact executed validation results.
+
+### P.36.14 — User-initiated, application-managed PRISMA CSV download
+
+**Status:** ⬜ Planned; blocked by decision gate
+**Dependencies required before implementation:** P.36.2, P.36.3, and P.36.13 completed.
+
+**Decision gate before implementation:** Approve the exact supported browser/download mechanism and verified PRISMA interaction required to apply the selected dates and initiate the official CSV export. Also decide file naming, completion detection, collision behavior, and whether the Documents subdirectory is created automatically or selected when absent. Do not infer these details and do not restore P.35.2–P.35.5.
+
+**Objective:** On an explicit user action, use the application-owned PRISMA session and accepted date range to obtain the official CSV in the approved download directory.
+
+**Included scope:**
+
+- one explicit user-triggered download action;
+- exact approved date-range transfer to PRISMA;
+- download destination integration with P.36.3;
+- bounded completion/failure handling, cancellation, safe retry, and no orphaned browser/file state;
+- validation of the downloaded file through the existing official-export boundary.
+
+**Excluded scope:**
+
+- background scheduling, live monitoring, hidden downloads, login/credential automation, PDF acquisition, or paired staging;
+- transformation, mapping, result publication, or speculative duplicate policy.
+
+**Acceptance criteria and focused tests:**
+
+- no download can begin without an accepted date range and valid destination;
+- exactly one user action starts one managed attempt;
+- success identifies one complete validated official CSV; partial/temporary files are never accepted;
+- errors preserve actionable internal context without exposing sensitive paths/data and allow retry;
+- manual selection through P.36.4 remains available only as fallback;
+- focused state-machine, directory, date-transfer, completion, cancellation, failure, and retry tests pass;
+- approved real-Windows/real-PRISMA validation is recorded before completion;
+- documentation records the approved mechanism and exact executed validation results.
+
+### P.36.15 — Transform into the exact 12-column output CSV contract
+
+**Status:** ⬜ Planned
+**Dependency required before implementation:** P.36.14 completed.
+
+**Objective:** Transform the validated official PRISMA CSV into the exact 12-column contract defined in this roadmap.
+
+**Included scope:**
+
+- parsing only through the approved validated-input boundary;
+- approved booked-capacity filtering and supported unit/price normalization;
+- capacity-type, product-type, flow-start, flow-end, and duration calculation under existing authoritative rules;
+- exact side-specific evidence-based resolution into the combined `Exit Market` and `Entry Market` fields;
+- immutable typed row outcomes that account for accepted, filtered, and rejected source rows;
+- deterministic `;`-delimited UTF-8 output serialization with exact header order and dot decimals.
+
+**Excluded scope:**
+
+- separate `Exit Storage` or `Entry Storage` fields;
+- fuzzy/inferred/cross-side mapping;
+- UI mapping presentation;
+- publication destination, accumulation, deduplication, or recovery behavior not explicitly approved for P.36.16;
+- PDF input.
+
+**Acceptance criteria and focused tests:**
+
+- header is exactly the 12 names above in the exact order, with no extra columns;
+- storage names are written into the relevant Market field according to side, never into a separate storage field;
+- every source row has one deterministic typed outcome;
+- filters, conversions, timestamps, durations, price fields, mapping success, unresolved mapping, malformed input, and exact serialization are covered;
+- no output is published on a failed transformation;
+- focused tests, full regression tests, compilation, and whitespace validation pass;
+- documentation records field-level source/transform rules and exact executed validation results.
+
+### P.36.16 — Publish the processed result
+
+**Status:** ⬜ Planned; blocked by decision gate
+**Dependency required before implementation:** P.36.15 completed.
+
+**Decision gate before implementation:** The customer must define “publication”: destination, filename, overwrite/versioning behavior, whether results accumulate across runs, duplicate identity and conflict behavior, recovery expectations, and the user-visible success artifact. No implementation begins until these are explicit.
+
+**Objective:** Publish a successfully transformed 12-column result atomically using the approved publication contract.
+
+**Included scope after approval:**
+
+- atomic write/replace behavior appropriate to the approved destination;
+- deterministic naming and collision behavior;
+- truthful success/failure UI and recoverable retry;
+- reuse of compatible P.33/P.34 transaction, audit, deduplication, and recovery patterns only where the approved contract requires them.
+
+**Excluded scope:**
+
+- inventing a destination or accumulation policy;
+- publishing partial or failed transformations;
+- changing the 12-column contract;
+- unrelated export formats or cloud services.
+
+**Acceptance criteria and focused tests:**
+
+- publication exactly matches the approved decision-gate contract;
+- interrupted or failed publication never exposes a partial final artifact;
+- overwrite, collision, duplicate, retry, and recovery behavior is deterministic and tested where applicable;
+- UI reports the real final state and artifact without leaking sensitive data;
+- focused tests, full regression tests, compilation, and whitespace validation pass;
+- documentation records the approved publication contract and exact executed validation results.
+
+### Remaining support and finalization stages
+
+| ID | Stage | Status | Dependencies and scope |
+|---|---|---|---|
+| P.36.8 | Mapping display in the UI | ⬜ Planned | Requires P.36.15. Display exactly `Exit Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`; it must not change output CSV fields. |
+| P.36.10 | Remove superseded monitoring and obsolete dependencies | ⬜ Planned | Begin only after the final P.36 runtime flow is integrated and covered. Remove only code proven unreachable/obsolete; preserve required browser, mapping, import, audit, and packaging boundaries. |
+| P.36.11 | Windows packaging and installer validation | ⬜ Planned | Requires the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16. Update and validate PyInstaller and Inno Setup artifacts. |
+| P.36.12 | Regression and clean-Windows acceptance | ⬜ Planned | Final gate after all required P.36 implementation and packaging stages. Run the full suite and the approved real-Windows end-to-end checklist. |
+
+## Current blockers and risks
+
+- P.36.14 cannot start until the application-managed browser/download mechanism and file-completion rules are explicitly approved and validated against the real PRISMA site.
+- P.36.16 cannot start until “publication” is explicitly defined.
+- `ROADMAP.md`, `workflow_p.md`, and `CLAUDE.md` must remain synchronized on the active 12-column contract and P.36 dependency order.
+- Completed P.36.4 remains useful as fallback, but treating it as the primary flow would contradict the current specification.
+- The superseded monitoring subsystem remains present until P.36.10; new work must not accidentally reconnect it as the product workflow.
 
 ## Next recommended increment
 
-**P.24, P.25, P.33 through P.33.8, P.35, and P.35.1 are complete. P.35.2-P.35.5 are cancelled.**
-**P.36.1 is complete.** The mapping-display screenshot, monitoring-scope, and official-URL questions
-are now resolved (see "Resolved specification questions" above). **P.36.2 is complete**: the "Open Prisma" /
-"Close Prisma" lifecycle is implemented and real-Windows-validated per `workflow_p.md`'s P.36.2
-completion note, with the superseded monitoring UI hidden. **P.36.3 is complete**: the expected
-download directory defaults to the current user's Documents folder and is explicitly selectable,
-session-scoped only, per `workflow_p.md`'s P.36.3 completion note. **P.36.4 is complete**: a
-"Select CSV" control validates a user-chosen file against the exact official PRISMA Export CSV
-contract with typed accept/reject outcomes and no silent coercion, per `workflow_p.md`'s P.36.4
-completion note. **P.36.5 is complete**: the customer explicitly decided that PDF input/processing is
-excluded from the current product version (cancelling/superseding the former "Optional PDF support"
-stage) and that the output contract uses four separate side-specific columns (`Exit Market`, `Exit
-Storage`, `Entry Market`, `Entry Storage`) instead of two combined fields, making the authoritative
-output contract 14 fields; see "Resolved specification questions" above and `workflow_p.md`'s P.36.5
-completion note. No unresolved specification question remains. **The next recommended increment is
-P.36.6** (filtering, calculation, conversion, and mapping for the 14-field contract), which is now
-unblocked.
+1. Complete and review the documentation correction across `ROADMAP.md`, `workflow_p.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
+2. Implement P.36.13 as one bounded, independently tested increment.
+3. Resolve the P.36.14 decision gate before preparing its implementation task.
+
+The obsolete 14-column P.36.6 prompt must not be executed.
 
 ## Release target
 
-- **Minimum usable version:** real PRISMA status retrieval, safe monitoring, and result persistence.
-- **Stable Windows v1.0:** completed PySide6 migration, PyInstaller `onedir` build, clean-machine validation, documentation, version metadata, and a release archive.
+- **Minimum usable P.36 version:** user selects dates, initiates a managed official CSV download, receives a correct published 12-column result, and can close/reopen the owned PRISMA session safely.
+- **Stable Windows release:** completed mapping display, obsolete-code removal, final dependency packaging, installer validation, full regression suite, and real clean-Windows acceptance evidence.
 
 ## Maintenance note
 
-Statuses must be updated after each merged increment.
+Update statuses only after the increment is implemented, reviewed, merged, and its required tests/validation have actually passed. Preserve historical completion records while marking superseded requirements unambiguously.

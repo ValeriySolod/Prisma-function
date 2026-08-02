@@ -5,12 +5,13 @@ Auto-loaded every session. Keep short — re-read on every turn.
 ## Project identity
 
 PrismaFunction is a single-user Windows desktop application built with PySide6.
-It monitors live PRISMA auction status and separately processes official PRISMA
-Export CSV files into cumulative local data and user-facing output.
+It processes official PRISMA Export CSV files into a transformed, published
+output. The former live-monitoring dashboard, scheduler, and automated
+monitoring flow are superseded by the P.36 workflow below; their code remains
+until removed by P.36.10.
 
-A separate successor, Prisma Function Mini (`Prisma-function-mini`), has its own
-M-series roadmap and a different output contract. Never mix the two projects or
-roadmaps.
+Do not import requirements, contracts, or roadmap items from Prisma Function
+Mini (`Prisma-function-mini`) or any other unrelated or deleted project.
 
 ## Source of truth — read before any change
 
@@ -19,10 +20,13 @@ roadmaps.
 - Read the architecture and technical documentation referenced by those files.
 - Inspect relevant production code, tests, configuration, and packaging files.
 - Run `git status --short --branch` before starting.
-- Treat repository evidence as authoritative when it is newer than this file.
+- Priority when sources conflict: the newest explicitly approved customer
+  decision, then the newest authoritative specification (`Prisma
+  Function.odt`), then the corrected `ROADMAP.md` and `workflow_p.md`, then
+  implementation evidence in the repository, then this file.
 
 `Prisma Function.odt` is the sole authoritative business specification for the
-P.36 manual-workflow line. Never infer missing requirements.
+P.36 line. Never infer missing requirements.
 
 ## Current roadmap state
 
@@ -37,15 +41,24 @@ P.35.2–P.35.5 were cancelled on 2026-07-28. Do not restore their automated
 CSV/PDF pairing, staging, fingerprinting, or browser-driven source-acquisition
 design.
 
-P.36 is the authoritative forward roadmap for the manual PRISMA workflow:
+P.36 is the authoritative forward roadmap. Its current workflow is: the user
+selects a date range in Prisma Function, the application performs a
+user-initiated, application-managed PRISMA CSV download, the downloaded CSV is
+transformed into the 12-column output contract below, and the result is
+published. Manual selection of an already-downloaded CSV (`P.36.4`) is a
+fallback path only, not the primary workflow.
 
-- P.36.1–P.36.5 (documentation/contracts, Open/Close Prisma lifecycle, download
-  directory, manual CSV selection, and PDF-scope/output-contract resolution)
-  are complete. P.36.5 resolved the remaining specification questions: PDF
-  input/processing is excluded from the current version, and the approved
-  output contract has 14 columns.
-- No unresolved specification question remains. P.36.6 is unblocked and is the
-  next recommended implementation increment.
+- P.36.1–P.36.5 are complete. P.36.5 resolved the PDF-scope question — PDF
+  input/processing stays excluded from the current version — but its separate
+  14-column/four-field-split output decision was withdrawn by a 2026-08-02
+  customer correction and must not guide implementation.
+- P.36.6, P.36.7, and P.36.9 are suspended/superseded. The old 14-field
+  P.36.6 prompt must not be executed.
+- P.36.13 (date-range selection) is the next replacement increment, subject to
+  the current branch/merge state recorded in `ROADMAP.md`. P.36.14
+  (application-managed download) and P.36.16 (publication) each retain an
+  explicit, unresolved decision gate — do not implement either until its gate
+  is resolved.
 - Later P.36 increments must follow the dependency and status recorded in
   `ROADMAP.md`.
 
@@ -59,11 +72,16 @@ through "Load Monitoring CSV".
 The legacy PRISMA Export CSV contract is cp1252, semicolon-delimited, and has 34
 fixed columns. Detection is header-based, never filename-based.
 
-The P.36 target output is a separate UTF-8, semicolon-delimited 14-field CSV
-contract defined by the authoritative specification, P.36.1, and P.36.5 (which
-resolved the two combined Market-or-Storage fields into four separate columns:
-Exit Market, Exit Storage, Entry Market, Entry Storage). Do not reuse the
-Prisma Function Mini contract by assumption.
+The P.36 target output is a separate UTF-8, semicolon-delimited CSV contract
+with exactly these 12 columns, in this order: `Auction Date`, `Exit Market`,
+`Entry Market`, `Capacity Type`, `Network Point Name`, `Product Type`,
+`Flow Start`, `Flow End`, `Booked Capacity`, `Flow Duration Hours`,
+`Tariff Price`, `Premium Price`. `Exit Market`/`Entry Market` hold the
+resolved market or storage name for their own side; there are no separate
+`Exit Storage`/`Entry Storage` output columns. A UI mapping presentation may
+additionally show `Network Point Name`, `TSO Name Exit`, and `TSO Name Entry`,
+but must never add, remove, rename, or reorder the 12 output columns. Do not
+reuse the Prisma Function Mini contract by assumption.
 
 ## Non-negotiable rules
 
@@ -78,9 +96,12 @@ Prisma Function Mini contract by assumption.
 - Every catalog expansion is an independently reviewed batch with regression
   tests for exact-side resolution and no cross-side leakage, plus recorded
   SHA-256 evidence digests.
-- Runtime data belongs only under `%LOCALAPPDATA%\PrismaFunction\`. Never write
-  runtime data to the installation directory, current working directory, or a
-  hidden staging path.
+- General application runtime data (SQLite, logs, import state) belongs only
+  under `%LOCALAPPDATA%\PrismaFunction\`. Never write it to the installation
+  directory, current working directory, or a hidden staging path.
+- P.36 downloaded and published user-facing files follow the approved
+  Documents-directory-or-user-selected-directory contract (`P.36.3`), not
+  `%LOCALAPPDATA%`.
 - Code, identifiers, comments, UI text, CSV headers and values, technical
   documentation, branch names, and commit messages must be English.
 - Never bypass PRISMA authentication, anti-bot protection, or terms.
