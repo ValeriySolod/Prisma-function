@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -35,6 +35,11 @@ from PySide6.QtWidgets import (
 
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
+from date_range_selection import (
+    DateRange,
+    DateRangeSelection,
+    describe_rejection as describe_date_range_rejection,
+)
 from download_directory import (
     DownloadDirectoryError,
     DownloadDirectorySelection,
@@ -98,6 +103,7 @@ class PrismaMonitorApp(QMainWindow):
         self._runtime_paths = paths
         self._download_directory = DownloadDirectorySelection(download_directory)
         self._manual_csv_selection = ManualCsvSelection()
+        self._date_range_selection = DateRangeSelection()
         self.setWindowTitle(f"{APP_DISPLAY_NAME} v{__version__}")
         self.setMinimumSize(1080, 680)
         self.resize(1280, 800)
@@ -230,6 +236,31 @@ class PrismaMonitorApp(QMainWindow):
         self.manual_csv_label.setAccessibleName("Selected PRISMA Export CSV")
         self._side_group(
             side, "PRISMA EXPORT CSV", self.choose_manual_csv_button, self.manual_csv_label
+        )
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setSpecialValueText("Not set")
+        self.start_date_edit.setDate(self.start_date_edit.minimumDate())
+        self.start_date_edit.setAccessibleName("Start date")
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setSpecialValueText("Not set")
+        self.end_date_edit.setDate(self.end_date_edit.minimumDate())
+        self.end_date_edit.setAccessibleName("End date")
+        self.validate_date_range_button = self._button(
+            "Validate Date Range", self._validate_date_range,
+            tooltip="Validate and accept the selected start and end date",
+        )
+        self.date_range_label = QLabel("No date range selected")
+        self.date_range_label.setObjectName("filename")
+        self.date_range_label.setWordWrap(True)
+        self.date_range_label.setAccessibleName("Accepted date range")
+        self._side_group(
+            side, "DATE RANGE",
+            self.start_date_edit, self.end_date_edit,
+            self.validate_date_range_button, self.date_range_label,
         )
         side.addStretch()
         self.import_date = QDateEdit(QDate.currentDate())
@@ -465,6 +496,40 @@ class PrismaMonitorApp(QMainWindow):
         self.manual_csv_label.setText(result.path.name)
         self.status.setText("PRISMA Export CSV selected.")
         self._add_activity("PRISMA Export CSV selected")
+
+    @staticmethod
+    def _read_optional_date(widget: QDateEdit) -> date | None:
+        if widget.date() == widget.minimumDate():
+            return None
+        return widget.date().toPython()
+
+    def _set_date_range_widgets(self, date_range: DateRange) -> None:
+        self.start_date_edit.setDate(
+            QDate(date_range.start.year, date_range.start.month, date_range.start.day)
+        )
+        self.end_date_edit.setDate(
+            QDate(date_range.end.year, date_range.end.month, date_range.end.day)
+        )
+
+    @staticmethod
+    def _format_date_range(date_range: DateRange) -> str:
+        return f"Accepted: {date_range.start.isoformat()} to {date_range.end.isoformat()}"
+
+    def _validate_date_range(self) -> None:
+        start = self._read_optional_date(self.start_date_edit)
+        end = self._read_optional_date(self.end_date_edit)
+        result = self._date_range_selection.select(start, end)
+        if not result.accepted:
+            safe_log(
+                self._logger, logging.WARNING,
+                "Date range validation rejected: %s", result.outcome.value,
+            )
+            self._show_error("Date Range", describe_date_range_rejection(result.outcome))
+            return
+        self._set_date_range_widgets(result.date_range)
+        self.date_range_label.setText(self._format_date_range(result.date_range))
+        self.status.setText("Date range accepted.")
+        self._add_activity("Date range accepted")
 
     def select_csv(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "Load Monitoring CSV", "", "CSV files (*.csv)")

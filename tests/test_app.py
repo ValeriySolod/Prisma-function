@@ -1,14 +1,14 @@
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
 
@@ -16,6 +16,7 @@ import app
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
 from csv_contracts import PRISMA_EXPORT_COLUMNS
+from date_range_selection import DateRange
 from download_directory import DownloadDirectoryError
 from manual_csv_selection import ManualCsvOutcome
 from monitoring import MonitoringResult
@@ -375,6 +376,175 @@ def test_rejected_manual_csv_header_mismatch_preserves_previous_selection(
     critical.assert_called_once()
     _, message = critical.call_args.args[1], critical.call_args.args[2]
     assert str(bad) not in message
+
+
+def test_date_range_controls_and_validate_action_are_visible(window):
+    # The `window` fixture never calls show() on the top-level QMainWindow, so
+    # QWidget.isVisible() is False for every widget regardless of hide()
+    # state. isHidden() and window() are independent of top-level show() and
+    # deterministically prove these controls are constructed, attached under
+    # the same top-level window, not explicitly hidden, and usable.
+    widget, _ = window
+
+    for control in (
+        widget.start_date_edit, widget.end_date_edit,
+        widget.validate_date_range_button, widget.date_range_label,
+    ):
+        assert not control.isHidden()
+        assert control.isEnabled()
+        assert control.window() is widget
+    assert widget.validate_date_range_button.text() == "Validate Date Range"
+
+
+def test_date_range_initial_state_is_deterministic_and_unset(window):
+    widget, _ = window
+
+    assert widget.start_date_edit.date() == widget.start_date_edit.minimumDate()
+    assert widget.end_date_edit.date() == widget.end_date_edit.minimumDate()
+    assert widget._date_range_selection.current is None
+    assert widget.date_range_label.text() == "No date range selected"
+
+
+def test_validating_same_day_range_accepts_and_updates_label(window):
+    widget, _ = window
+    widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    widget.end_date_edit.setDate(QDate(2026, 3, 1))
+
+    widget._validate_date_range()
+
+    assert widget._date_range_selection.current == DateRange(date(2026, 3, 1), date(2026, 3, 1))
+    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-01"
+    assert widget.start_date_edit.date() == QDate(2026, 3, 1)
+    assert widget.end_date_edit.date() == QDate(2026, 3, 1)
+    assert "Date range accepted" in widget.activity_list.item(0).text()
+
+
+def test_validating_multi_day_range_accepts_and_updates_label(window):
+    widget, _ = window
+    widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    widget.end_date_edit.setDate(QDate(2026, 3, 10))
+
+    widget._validate_date_range()
+
+    assert widget._date_range_selection.current == DateRange(date(2026, 3, 1), date(2026, 3, 10))
+    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-10"
+
+
+def test_validating_with_missing_start_date_shows_error_and_preserves_state(window, monkeypatch):
+    widget, _ = window
+    widget.end_date_edit.setDate(QDate(2026, 3, 10))
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._validate_date_range()
+
+    assert widget._date_range_selection.current is None
+    assert widget.date_range_label.text() == "No date range selected"
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Date Range"
+    assert message == "A start date is required."
+
+
+def test_validating_with_missing_end_date_shows_error_and_preserves_state(window, monkeypatch):
+    widget, _ = window
+    widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._validate_date_range()
+
+    assert widget._date_range_selection.current is None
+    assert widget.date_range_label.text() == "No date range selected"
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Date Range"
+    assert message == "An end date is required."
+
+
+def test_validating_reversed_range_shows_error_and_preserves_previous_accepted_range(
+    window, monkeypatch
+):
+    widget, _ = window
+    widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    widget.end_date_edit.setDate(QDate(2026, 3, 5))
+    widget._validate_date_range()
+    previous = widget._date_range_selection.current
+    assert previous == DateRange(date(2026, 3, 1), date(2026, 3, 5))
+
+    widget.start_date_edit.setDate(QDate(2026, 3, 9))
+    widget.end_date_edit.setDate(QDate(2026, 3, 1))
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._validate_date_range()
+
+    assert widget._date_range_selection.current == previous
+    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-05"
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Date Range"
+    assert message == "The end date must not be earlier than the start date."
+
+
+def test_date_range_controls_remain_enabled_and_retryable_after_error(window, monkeypatch):
+    widget, _ = window
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+
+    widget._validate_date_range()
+
+    assert widget.start_date_edit.isEnabled()
+    assert widget.end_date_edit.isEnabled()
+    assert widget.validate_date_range_button.isEnabled()
+
+
+def test_date_range_successful_retry_after_correction(window, monkeypatch):
+    widget, _ = window
+    widget.start_date_edit.setDate(QDate(2026, 3, 9))
+    widget.end_date_edit.setDate(QDate(2026, 3, 1))
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+    widget._validate_date_range()
+    assert widget._date_range_selection.current is None
+
+    widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    widget.end_date_edit.setDate(QDate(2026, 3, 9))
+
+    widget._validate_date_range()
+
+    assert widget._date_range_selection.current == DateRange(date(2026, 3, 1), date(2026, 3, 9))
+    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-09"
+
+
+def test_date_range_validation_triggers_no_browser_lifecycle_file_or_processing_operation(
+    window, monkeypatch
+):
+    widget, browser = window
+    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", Mock())
+    monkeypatch.setattr(app.QFileDialog, "getExistingDirectory", Mock())
+    thread_start = Mock()
+    monkeypatch.setattr(threading.Thread, "start", thread_start)
+    # The second _validate_date_range() call below uses a reversed (invalid)
+    # range, which reaches _show_error() -> QMessageBox.critical(). Without
+    # mocking it, that call opens a real blocking modal Qt event loop that
+    # never returns under the offscreen platform, hanging the test.
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+    previous_download_directory = widget._download_directory.current
+    widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    widget.end_date_edit.setDate(QDate(2026, 3, 5))
+
+    widget._validate_date_range()
+    widget.start_date_edit.setDate(QDate(2026, 3, 9))
+    widget.end_date_edit.setDate(QDate(2026, 3, 1))
+    widget._validate_date_range()
+
+    browser.open.assert_not_called()
+    widget.prisma_lifecycle.open.assert_not_called()
+    widget.prisma_lifecycle.close.assert_not_called()
+    app.QFileDialog.getOpenFileName.assert_not_called()
+    app.QFileDialog.getExistingDirectory.assert_not_called()
+    thread_start.assert_not_called()
+    assert widget._download_directory.current == previous_download_directory
+    assert widget._manual_csv_selection.current is None
 
 
 def test_csv_loading_populates_model_counters_and_activity(window, monkeypatch):

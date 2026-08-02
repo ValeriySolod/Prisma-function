@@ -102,10 +102,34 @@ P.36.8, P.36.10, P.36.11, and P.36.12 remain planned support/finalization stages
 
 ### P.36.13 — Date-range selection inside Prisma Function
 
-**Status:** ⬜ Planned — next implementation increment
+**Status:** 🟡 Implemented on `feature/p36-13-date-range-selection`; pending review and merge. Not yet
+merged to `main`, and the feature branch has not been deleted, so this increment is not marked
+Completed under the project Definition of Done.
 **Dependencies required before implementation:** P.36.2 completed.
 
 **Objective:** Let the user select and validate a start date and an end date inside Prisma Function.
+
+**Implemented result:** `date_range_selection.py` adds a Qt-independent, immutable `DateRange(start,
+end)` value, a typed `DateRangeOutcome` enum (`ACCEPTED`, `MISSING_START_DATE`, `MISSING_END_DATE`,
+`END_BEFORE_START`), `validate_date_range(start, end)`, `describe_rejection()`, and a session-scoped
+`DateRangeSelection` tracker whose `current` starts at `None` (no current-date default) and only
+advances to the validated `DateRange` on an accepted candidate; a rejected candidate never changes
+`current`. Checks run in a fixed order — missing start, then missing end, then end-before-start — so
+a candidate missing both dates deterministically reports `MISSING_START_DATE`. Neither the module nor
+its validation boundary reads the system clock; both dates are caller-supplied. `app.py`'s
+`PrismaMonitorApp` adds a "DATE RANGE" sidebar group (placed directly under "PRISMA EXPORT CSV") with
+`start_date_edit`/`end_date_edit` (`QDateEdit`, using Qt's own default minimum date as a "Not set"
+special-value sentinel so a genuinely missing date is representable and testable without inventing a
+new date limit) and one explicit "Validate Date Range" button wired to `_validate_date_range()`. On
+acceptance, both date controls are set to the accepted values and a read-only `date_range_label`
+shows `"Accepted: YYYY-MM-DD to YYYY-MM-DD"`; on rejection, a stable English `QMessageBox` (title
+"Date Range") reports the typed outcome's message, the previous accepted range and both controls'
+current values are left untouched, and the controls remain enabled for correction and retry. One
+`DateRangeSelection` instance is owned by the window, matching the existing `DownloadDirectorySelection`
+/`ManualCsvSelection` session-scoped-state pattern. This increment performs no browser, Playwright,
+PRISMA-page, filesystem, CSV, transformation, mapping, persistence, output-writing, or publication
+operation, and the accepted range is not wired into Open Prisma, Close Prisma, Select CSV, the legacy
+importer, or any download workflow; the completed P.36.2–P.36.4 behavior is unchanged.
 
 **Included scope:**
 
@@ -130,6 +154,30 @@ P.36.8, P.36.10, P.36.11, and P.36.12 remain planned support/finalization stages
 - no browser or file operation occurs;
 - relevant focused tests, full regression tests required by project rules, compilation, and `git diff --check` pass;
 - `workflow_p.md` and this roadmap record the final implemented behavior and exact executed validation results.
+
+**Verified evidence (2026-08-02, not yet merged):** `tests/test_date_range_selection.py` (17 tests) and
+the 10 focused P.36.13 tests in `tests/test_app.py` passed; the complete suite passed with 592 tests
+(up from 565) in 15.33s; project-wide `compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`)
+exited 0, with one pre-existing, unrelated `.pytest_tmp` permission warning predating this increment;
+and `git diff --check` passed. See `workflow_p.md`'s P.36.13 completion record for the full detail. No
+real-browser, real-PRISMA, filesystem, CSV-processing, publication, or later-increment behavior was
+added or exercised by this increment.
+
+**Fresh packaging evidence (2026-08-02, final-review follow-up).** The prior packaging check above
+validated a pre-existing `dist/PrismaFunction` build that predated this increment's `app.py` and
+`date_range_selection.py` changes. `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` was
+rerun to produce a fresh distribution from the current P.36.13 source (`PrismaFunction.exe` rebuilt
+2026-08-02, replacing the stale 2026-07-19 build), and `python validate_package.py` then passed against
+that fresh distribution. A smoke check launched the fresh `PrismaFunction.exe` with an isolated
+`LOCALAPPDATA` and a working directory outside the repository: the process started, reached a live main
+window (`MainWindowHandle` non-zero, title `PRISMA Monitor v1.0.0`, `Qt6Widgets.dll` loaded, confirming
+`PrismaMonitorApp.__init__` — including its `date_range_selection` import and "DATE RANGE" widget
+construction — completed without error), and then shut down cleanly via `CloseMainWindow()` (process
+exit code `0`, no forced kill needed). No `chrome.exe`, `msedge.exe`, or `node.exe` process was spawned
+by the smoke run, no `PrismaFunction.exe` process remained afterward, and the only filesystem writes
+were the isolated smoke `LOCALAPPDATA`'s log file — no writes reached the repository, `dist/PrismaFunction`
+itself, or a real Documents directory. No real PRISMA session, network activity, CSV selection, or
+manual Windows workflow beyond this isolated startup/shutdown smoke check was performed.
 
 ### P.36.14 — User-initiated, application-managed PRISMA CSV download
 
