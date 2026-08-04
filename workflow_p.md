@@ -3277,7 +3277,7 @@ deletion is a separate post-merge cleanup action not claimed here.
 code defects and the increment is merged to `main`. Per this increment's own criteria, the one remaining
 item is manual real-Windows/real-PRISMA validation — see "Manual validation" above.
 
-#### P.36.16. Publish the processed result — Decision gate resolved; implemented and automated-tested, not yet merged (2026-08-04)
+#### P.36.16. Publish the processed result — Decision gate resolved; implemented, automated-tested, and merged (2026-08-04, PR #63, merge commit `daf4760`)
 
 **Decision gate resolution.** Per this task's approved "option 2" customer decision (2026-08-04),
 publication accumulates results across runs into exactly one cumulative CSV per publication directory,
@@ -3294,7 +3294,8 @@ repeated among data rows, wrong delimiter, undecodable, wrong header, or being a
 failure that leaves the file completely unchanged — no repair is attempted and a symlink is never followed.
 Implemented
 on `feature/p36-16-cumulative-output`, branched from `main` at merge commit `c84344f` (the P.36.15 merge via
-PR #62), so P.36.15's completed implementation is already present on this branch.
+PR #62), so P.36.15's completed implementation is already present on this branch. Merged to `main` via PR
+#63 (merge commit `daf4760`, confirmed in Git history).
 
 **Design.** New module `prisma_publication.py`, Qt- and browser-independent, matching the existing
 `prisma_output.py`/`prisma_download.py` pattern (typed `str` `Enum` outcome, immutable frozen-dataclass
@@ -3438,8 +3439,259 @@ corresponding new/strengthened tests). `prisma_output.py`, `processor.py`, `pris
 P.36.14/P.36.15 behavior, and all other existing code are unmodified. Not committed, pushed, merged, or
 rebased; the feature branch was not deleted.
 
-**Outstanding before this increment can be marked ✅ Completed:** merge to `main`, then manual
-real-Windows/real-PRISMA validation of the eventual wired-in workflow once a later increment adds the UI
-trigger, plus a genuine (non-skipped) run of the symlink-rejection test on a platform/session that permits
-symlink creation. Per this increment's own acceptance criteria, no additional automated work is
-outstanding.
+**Outstanding before this increment can be marked ✅ Completed (updated after the confirmed merge to
+`main` via PR #63, merge commit `daf4760`):** manual real-Windows/real-PRISMA validation of the eventual
+wired-in workflow once a later increment adds the UI trigger, plus a genuine (non-skipped) run of the
+symlink-rejection test on a platform/session that permits symlink creation. Per this increment's own
+acceptance criteria, no additional automated work is outstanding. Note: `P.36.8` (see the section
+immediately below) adds a UI mapping *display*, not a P.36.14→P.36.15→P.36.16 pipeline trigger — it does
+not wire this module in and does not change this outstanding item.
+
+#### P.36.8. Mapping display in the UI — Implemented, automated-tested, and manually validated on real Windows (manual-selection path), not yet merged (2026-08-04)
+
+Per `ROADMAP.md`'s "Remaining support and finalization stages" table, `P.36.8` displays exactly `Exit
+Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry` (this exact order and
+spelling) in the UI without changing the authoritative 12-column output CSV contract. Implemented on
+`feature/p36-8-mapping-display`, branched from `main` at merge commit `daf4760` (the P.36.16 merge via PR
+#63), so P.36.16's completed implementation is already present on this branch. Not yet merged.
+
+**Decision required and resolved before implementation.** Neither `ROADMAP.md` nor this file wires a
+completed P.36.15 import/transformation result into the UI: the "Next recommended increment" list in
+`ROADMAP.md` explicitly reserves "wiring a UI trigger for the complete P.36.14→P.36.15→P.36.16 pipeline"
+for a later increment, so P.36.8 had no existing trigger to reuse and needed its own read-only source of
+mapping evidence. Asked to choose between (a) a new explicit "Preview Mapping" button, or (b)
+auto-populating the display from the two already-existing, already-approved CSV-selection success paths
+(P.36.4 manual selection, P.36.14 managed download), the customer selected (b): no new button, no new
+persistence or publication behavior — the display simply reflects whatever CSV is currently the accepted
+selection.
+
+**Design.** New module `mapping_presentation.py`, Qt- and browser-independent, matching the existing
+`prisma_output.py`/`prisma_publication.py` pattern (frozen-dataclass row type, an explicit `__all__`, no
+parsing/matching/inference of its own). `MAPPING_DISPLAY_FIELDS = ("Exit Market", "Entry Market", "Network
+Point Name", "TSO Name Exit", "TSO Name Entry")` is the authoritative five-field order/spelling from
+`ROADMAP.md`'s "Authoritative output CSV contract" section. `MappingDisplayRow` is an immutable
+five-field row. `build_mapping_rows(import_result)` selects `exit_market`/`entry_market`/`network_point`/
+`tso_exit`/`tso_entry` straight through from each row in `import_result.rows` — the same already-accepted,
+already-enriched row shape `prisma_output.transform_row()` consumes for the 12-column contract, produced
+by `processor.import_prisma_export()` (P.33/P.36.4, unchanged) — with no matching, inference, or
+cross-side substitution of its own. Because `PrismaImportResult.rows` already excludes filtered and
+rejected rows (they only ever appear in `PrismaImportResult.issues`), a filtered/rejected-only import (or
+any import with zero accepted rows) naturally yields an empty tuple, never an error, with no separate
+"is this import interesting" branch needed in the presentation boundary itself.
+
+**Qt view/model.** `ui_components.py` adds `MappingTableModel(QAbstractTableModel)`, matching the existing
+`AuctionTableModel` construction pattern exactly (fixed `HEADERS`, `rowCount`/`columnCount`/`headerData`/
+`data`). `HEADERS = MAPPING_DISPLAY_FIELDS`, so the model can never drift from the presentation module's
+authoritative field list. `set_rows()` performs `beginResetModel()`/`self.rows = tuple(rows)`/
+`endResetModel()` — a full wholesale replace, never an incremental patch — so a new CSV selection's refresh
+can never leave a row from a previous, unrelated selection visible.
+
+**UI wiring.** `app.py` adds one new content panel ("Mapping": `self.mapping_table_model`,
+`self.mapping_table`, `self.mapping_empty_label`) alongside the existing auction and activity panels, with
+`_update_mapping_empty_state()` toggling the table/empty-label visibility deterministically from
+`rowCount()`. `_refresh_mapping_display(path)` is the one shared refresh boundary both existing
+CSV-selection success paths call: it invokes `processor.import_prisma_export(path)` — a read-only re-run
+of the exact P.36.15 import/enrichment boundary, writing no output file and performing no browser,
+network, or publication operation — and on success replaces the table via `build_mapping_rows()`; on a
+typed `PrismaImportError`/`CsvFormatError`/`OSError` it clears the table (`set_rows(())`, never leaving a
+stale row from the previous selection) and shows one fixed, path-free English message via the existing
+`_show_error()` helper ("The mapping evidence for the selected PRISMA Export CSV could not be displayed."),
+never the raw exception text or the file path. `_select_manual_csv()` (P.36.4) and `_handle_download_event()`
+(P.36.14) each call `_refresh_mapping_display(result.path)` exactly once, and only after their own existing
+CSV-contract acceptance check already succeeded — a rejected candidate at that existing boundary still
+returns before ever reaching the mapping refresh, exactly as it did before this increment. No other
+call site, workflow trigger, persistence contract, or publication behavior was added; `prisma_output.py`,
+`prisma_publication.py`, `processor.py`, `prisma_references.py`, and every other existing module are
+unmodified.
+
+**Automated evidence (2026-08-04).** New `tests/test_mapping_presentation.py` (11 tests) covers the exact
+`MAPPING_DISPLAY_FIELDS` order/spelling; pure field mapping and row-order preservation against a directly
+constructed `PrismaImportResult`; an empty accepted result and a filtered/rejected-only result both
+yielding an empty tuple; a regression proving an entry-only row's exit-side fields stay exactly empty
+rather than being inferred from the entry side; and, through the real `processor.import_prisma_export`
+boundary with the authoritative default reference catalog, an exit-only row resolving a Market
+(`"VIP DK-THE (H646) (H646)"` → `THE`), an entry-only row resolving a Storage name
+(`"VGS Storage Hub (4290)"` → `VGS Storage Hub`), a bundle row using the real evidenced dual-sided alias
+`"Arnoldstein Exit"` (which resolves to `CEGH` on the exit side and `PSV` on the entry side under
+`prisma_references.DEFAULT_PRISMA_REFERENCES`) proving side-specific resolution is never swapped or
+cross-contaminated even when the identical source string appears on both sides of one row, multi-row order
+preservation across two accepted rows, and a filtered+rejected-only source (one row below the
+booked-capacity threshold, one row with an unknown network-point reference) producing an empty
+presentation with zero exceptions raised.
+
+`tests/test_app.py` gained 9 tests: exact mapping-table header order/labels via `headerData()`; the initial
+empty/hidden state before any CSV is selected; a header-only (zero-data-row) CSV selection leaving the
+display empty and hidden; a two-row CSV populating the table with the exact expected Exit/Entry Market,
+Network Point Name, and TSO Name Exit/Entry values in exact source order (one entry-only Storage row, one
+exit-only Market row); a filtered+rejected-only CSV leaving the display empty; selecting a second, different
+(header-only) CSV after a populated first selection fully replacing the table's rows (proving no stale-row
+retention across a replacement selection); a simulated `processor.import_prisma_export` failure (raising
+`PrismaImportError` with an internal, file-path-bearing message) clearing the table and showing only the
+fixed, path-free error message — proving no internal exception detail or file path leaks into the UI; the
+managed-download success path (P.36.14, `_handle_download_event`) also populating the table, proving both
+existing trigger points are wired identically; and a regression proving the refresh path never calls
+`prisma_output.write_prisma_output` or `prisma_publication.publish_cumulative_output` (each monkeypatched
+to raise `AssertionError` if invoked) and records zero additional mock calls against the browser or
+PRISMA-lifecycle controllers — proving that rendering/refreshing the mapping view alone triggers no
+output-writing, publication, browser, download, or monitoring operation. One pre-existing test,
+`test_light_workspace_widgets_use_explicit_contrast_styles`, was updated in place to add "Mapping" to its
+expected set of `contentSectionLabel` section headings, since the new panel legitimately changes what that
+assertion counts — an in-scope adjustment to an existing assertion the new panel changes, not unrelated
+churn.
+
+**Test-infrastructure fix required to keep the suite reliable (2026-08-04).** Adding the new per-window
+`MappingTableModel`/`QTableView` — one additional Python-subclassed `QAbstractTableModel` per
+`PrismaMonitorApp` instance, alongside the existing `AuctionTableModel` — made a pre-existing, previously
+latent shutdown-time defect in `tests/test_app.py`'s `window` fixture reproduce reliably. Every
+`PrismaMonitorApp` instance holds self-referencing `QTimer`-to-bound-method cycles (for example
+`self._browser_timer` connected to `self._poll_browser_launch`), which plain Python reference counting
+never reclaims — only the cyclic garbage collector does, and nothing invoked it between tests. Across the
+roughly 90 `PrismaMonitorApp` instances the full `tests/test_app.py` suite creates and closes, this let
+unreachable-but-uncollected Qt object graphs accumulate and eventually get torn down in one large,
+unordered batch at interpreter shutdown, crashing the test process with a Windows heap-corruption exit
+code (`STATUS_HEAP_CORRUPTION`). This was isolated, not guessed: a controlled `git stash` bisection
+confirmed the unmodified `main` baseline ran the full suite cleanly across multiple repeated runs with zero
+crashes, while the branch with only this increment's production code (and none of its new tests) already
+reproduced the crash non-deterministically (passing on some runs, crashing on others) — proving the
+trigger was the additional per-window Qt object count, not a defect in any specific new test's logic. The
+`window` fixture now explicitly `del`s its `widget`/`browser` references and calls `gc.collect()`
+immediately after `_close_app(widget)`, so each window's cyclic garbage is reclaimed promptly and
+individually instead of piling up for one large, risky batch at process exit. This fully eliminated the
+crash: 4/4 clean runs of `tests/test_app.py` alone and 4/4 clean runs of the complete suite, both before
+and after this fix was isolated as the cause. This is a test-infrastructure-only change confined to
+`tests/test_app.py`'s fixture teardown; no production code changed as a result, and no other test's
+behavior or assertions were altered by it.
+
+The complete pytest suite passed with **821 tests passed, 1 skipped** (up from 801 passed/1 skipped after
+the P.36.16 merge; +20, the exact sum of the 11 new `test_mapping_presentation.py` tests and the 9 new
+`test_app.py` tests). Project-wide `python -m compileall` (excluding `.venv`, `build`, `.git`,
+`__pycache__`, `dist`) exited `0`, with the same pre-existing, unrelated `.pytest_tmp` permission warning
+recorded in every prior entry in this file. `git diff --check` passed.
+
+**Packaging evidence (2026-08-04), and why a rebuild was required this time.** Unlike `P.36.15`/`P.36.16`
+(neither imported by `app.py`), this increment changes `app.py` itself — the exact file
+`PrismaFunction.spec`'s `Analysis(["app.py"], ...)` statically analyzes — adding imports of the new
+`mapping_presentation.py` module, `processor.import_prisma_export`/`PrismaImportError`,
+`csv_contracts.CsvFormatError`, and `ui_components.MappingTableModel`, plus new widgets constructed in
+`_build_ui()`. A packaging rebuild was therefore required and performed, not skipped on the P.36.15/P.36.16
+rationale. `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` succeeded and produced a fresh
+`dist/PrismaFunction/PrismaFunction.exe`; no `.spec` change was needed, since PyInstaller's static import
+discovery picked up `mapping_presentation.py` automatically through `app.py`'s and `ui_components.py`'s own
+imports, the same pattern prior P.36 increments recorded for their own new modules. `python
+validate_package.py` then passed against that fresh distribution. No packaged-executable launch, real
+browser, or real-PRISMA validation was performed beyond this static packaging check.
+
+**Scope discipline.** Confined to `mapping_presentation.py` (new), `ui_components.py` (new
+`MappingTableModel` plus its import of `mapping_presentation`), `app.py` (new "Mapping" panel, the
+`_update_mapping_empty_state()`/`_refresh_mapping_display()` helpers, and one new call site added at the
+end of each of `_select_manual_csv()` and `_handle_download_event()`), `tests/test_mapping_presentation.py`
+(new), and `tests/test_app.py` (9 new tests, the `window` fixture's `gc.collect()` cleanup, and the one
+pre-existing label-set assertion described above). `prisma_output.py`, `prisma_publication.py`,
+`processor.py`, `prisma_references.py`, `prisma_download.py`, `prisma_lifecycle.py`,
+`download_directory.py`, `date_range_selection.py`, `manual_csv_selection.py`, the 12-column output CSV
+contract, and every other completed P.36.2–P.36.4/P.36.13–P.36.16 behavior are unmodified. Not committed,
+pushed, merged, or rebased; the feature branch was not deleted.
+
+**Manual validation.** Not performed and not required by this increment's own acceptance criteria in
+isolation (`_refresh_mapping_display()` performs no browser, network, filesystem-download, or PRISMA
+session operation — it only re-parses an already-on-disk, already-validated CSV). Real-Windows manual
+validation remains appropriate before this increment is marked ✅ Completed: confirm the "Mapping" panel
+renders the five fields in the correct order for a real downloaded or manually selected PRISMA Export CSV,
+and confirm it refreshes correctly (no stale rows) when a second CSV is selected. (A later validation round
+recorded below found there is no user-accessible refresh action that would let a tester move or delete the
+selected file between selection and refresh, so that specific scenario is not deterministically reproducible
+through the UI and was explicitly skipped rather than treated as outstanding.)
+
+**Review fix (2026-08-04): rejected CSV replacement left stale mapping rows visible.** Review found that
+`_refresh_mapping_display()`'s failure branch was the only place clearing the mapping table; both
+`_select_manual_csv()` and `_handle_download_event()` return immediately — before ever calling
+`_refresh_mapping_display()` — when the existing `ManualCsvSelection`/P.36.4 CSV-contract check rejects the
+newly selected/downloaded candidate. Concretely: select a valid CSV (populating the Mapping table), then
+select or download a second CSV that fails that existing contract check (wrong header, wrong delimiter,
+etc.) — the table still showed the *first* CSV's rows, a stale-mapping-evidence regression against the
+approved requirement that a failed replacement must never retain previous mapping rows.
+
+**Fix.** A new shared helper, `_clear_mapping_display()` — wrapping the exact `set_rows(())`/
+`_update_mapping_empty_state()` pair `_refresh_mapping_display()`'s own failure branch already used inline
+— is now also called from both `_select_manual_csv()`'s and `_handle_download_event()`'s existing `if not
+result.accepted:` rejection branches, immediately before their existing `_show_error()` call. Every other
+line in both branches — the rejection message, `status` text, `_add_activity()` call, and the preserved
+`_manual_csv_selection.current`/`manual_csv_label` state — is unchanged, so all existing P.36.4/P.36.14
+rejection behavior is preserved exactly. Two cases outside this fix's scope were deliberately left
+untouched: cancelling the manual file-selection dialog (`if not selected: return`, which returns before
+`ManualCsvSelection.select()` is ever called — no replacement operation occurred, so the mapping table is
+correctly left as-is); and `_handle_download_event()`'s separate `event.success is False` branch (the
+managed download itself failed before any candidate CSV existed, so there is nothing to "replace" either).
+
+**Regression tests.** `tests/test_app.py` gained two tests:
+`test_rejected_manual_csv_replacement_clears_previous_mapping_rows` (select a valid CSV, confirm the table
+has one row, then select a wrong-header CSV and confirm the table is empty and the empty-state label is
+shown) and `test_rejected_download_csv_replacement_clears_previous_mapping_rows` (the same sequence via two
+`_handle_download_event()` calls). The pre-existing `test_cancelling_manual_csv_dialog_is_a_no_op` test was
+left unmodified — cancellation never reaches the mapping-refresh or mapping-clear code path either before
+or after this fix, so its existing assertions already fully cover that case; no new assertion was needed to
+prove cancellation does not clear mapping rows, since nothing in the cancellation path touches
+`mapping_table_model` at all.
+
+**Automated evidence.** The complete pytest suite passed with **823 tests passed, 1 skipped** (up from 821
+passed/1 skipped; +2, the two new regression tests above). Project-wide `python -m compileall` (excluding
+`.venv`, `build`, `.git`, `__pycache__`, `dist`) exited `0`, with the same pre-existing, unrelated
+`.pytest_tmp` permission warning recorded in every prior entry in this file. `git diff --check` passed.
+Because this fix changes `app.py` itself, `python -m PyInstaller --clean --noconfirm PrismaFunction.spec`
+was rerun (succeeded, fresh `dist/PrismaFunction/PrismaFunction.exe`) and `python validate_package.py`
+passed against it, matching this section's own established packaging-rebuild rationale above.
+
+**Scope discipline.** Confined to `app.py` (new `_clear_mapping_display()` helper plus one new call site in
+each of `_select_manual_csv()`'s and `_handle_download_event()`'s existing rejection branches) and
+`tests/test_app.py` (the two new regression tests). No new trigger, button, persistence behavior, output
+writing, publication, browser operation, or dependency was introduced; `mapping_presentation.py`,
+`ui_components.py`, `prisma_output.py`, `prisma_publication.py`, `processor.py`, and every other existing
+module are unmodified.
+
+**Regression-coverage strengthening (2026-08-04): cancellation after a populated selection.** The existing
+`test_cancelling_manual_csv_dialog_is_a_no_op` test only proved cancellation was a no-op starting from the
+empty, nothing-selected state; it did not prove cancellation leaves an already-populated Mapping table
+untouched. A new test,
+`test_cancelling_manual_csv_dialog_after_a_valid_selection_preserves_mapping_rows`, selects a valid CSV
+first (populating the Mapping table with one row), then cancels the next manual file-selection dialog, and
+asserts the previous selection, label, mapping row count, and table visibility all remain exactly unchanged
+and `QMessageBox.critical` is never called — proving `_select_manual_csv()`'s existing `if not selected:
+return` early exit (before `ManualCsvSelection.select()`, `_refresh_mapping_display()`, or
+`_clear_mapping_display()` are ever reached) genuinely leaves a populated Mapping table alone. The
+pre-existing empty-state test was left completely unmodified, so both starting conditions now have
+dedicated coverage. No production code changed — this is a pure test-coverage addition confirming the
+existing cancellation code path already behaved correctly. The complete pytest suite passed with **824
+tests passed, 1 skipped** (up from 823 passed/1 skipped; +1, this new test). Project-wide `python -m
+compileall` and `git diff --check` both passed. No packaging rebuild was required or performed: this
+change is confined to `tests/test_app.py`, and no production module or `app.py` import changed.
+
+**Real-Windows manual validation (2026-08-04, reported by the customer).** Prisma Function was run from
+source (`python app.py`) on a real Windows desktop, not as the packaged executable: the packaged
+`PrismaFunction.exe` was blocked by Windows Application Control on that machine, so this validation pass
+exercised the same application code from source instead. The Mapping panel was exercised through the manual
+CSV-selection (P.36.4) trigger path:
+
+- the Mapping panel rendered the five columns — `Exit Market`, `Entry Market`, `Network Point Name`,
+  `TSO Name Exit`, `TSO Name Entry` — in this exact required order;
+- selecting a valid PRISMA Export CSV rendered its mapping rows successfully;
+- replacement behavior was checked (selecting a further CSV correctly refreshes the table);
+- selecting an invalid CSV showed the existing rejection message and correctly cleared all previously
+  displayed Mapping rows, confirming this section's "Review fix" above on a real Windows session, not only
+  in the automated suite;
+- no issues were observed.
+
+This validation exercised only the manual-selection (P.36.4) trigger path. The managed-download (P.36.14)
+trigger path (`_handle_download_event`) was **not** exercised on real Windows during this validation pass,
+and its real-Windows validation remains outstanding — this record must not be read as covering it. Validating
+the packaged `PrismaFunction.exe` itself (rather than a from-source run) also remains outstanding, blocked by
+the Windows Application Control restriction noted above.
+
+**Outstanding before this increment can be marked ✅ Completed:** merge to `main`; real-Windows manual
+validation of the managed-download (P.36.14) trigger path populating/refreshing/clearing the Mapping panel
+identically to the now-validated manual-selection path; and validating the packaged `PrismaFunction.exe`
+itself once the Windows Application Control restriction noted above is resolved or an approved machine is
+available. Moving/deleting the selected file before a refresh was explicitly not tested and is not tracked
+as outstanding: there is no user-accessible refresh action in the current UI (the Mapping display only
+refreshes as a side effect of a new CSV selection/download succeeding), so this scenario is not
+deterministically reproducible through the UI and was skipped rather than treated as a pending validation
+item.

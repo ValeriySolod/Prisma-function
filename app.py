@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from auction_csv import AuctionCsvRecord, CsvValidationError, load_auction_csv
 from browser import BrowserController
+from csv_contracts import CsvFormatError
 from date_range_selection import (
     DateRange,
     DateRangeSelection,
@@ -47,6 +48,7 @@ from download_directory import (
     ensure_directory_exists,
 )
 from manual_csv_selection import ManualCsvSelection, describe_rejection
+from mapping_presentation import build_mapping_rows
 from monitoring import MonitoringEngine, MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from notifications import StatusChangeNotification
@@ -64,6 +66,7 @@ from prisma_download import (
 )
 from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
 from prisma_lifecycle import PrismaLifecycleController, PrismaLifecycleEvent, PrismaLifecycleState
+from processor import PrismaImportError, import_prisma_export
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
@@ -76,6 +79,7 @@ from ui_components import (
     ArrowComboBox,
     AuctionFilterModel,
     AuctionTableModel,
+    MappingTableModel,
     StatusDelegate,
     SummaryCard,
 )
@@ -376,6 +380,33 @@ class PrismaMonitorApp(QMainWindow):
         self.empty_label.setStyleSheet("color:#718096; padding:18px")
         panel_layout.addWidget(self.empty_label)
         main.addWidget(panel, 1)
+        mapping_panel = QFrame()
+        mapping_panel.setObjectName("panel")
+        mapping_layout = QVBoxLayout(mapping_panel)
+        mapping_layout.setContentsMargins(16, 14, 16, 10)
+        mapping_header = QHBoxLayout()
+        mapping_title = QLabel("Mapping")
+        mapping_title.setObjectName("contentSectionLabel")
+        mapping_header.addWidget(mapping_title)
+        mapping_header.addStretch()
+        mapping_layout.addLayout(mapping_header)
+        self.mapping_table_model = MappingTableModel(self)
+        self.mapping_table = QTableView()
+        self.mapping_table.setModel(self.mapping_table_model)
+        self.mapping_table.setAlternatingRowColors(True)
+        self.mapping_table.setSelectionBehavior(QTableView.SelectRows)
+        self.mapping_table.setAccessibleName("Mapping")
+        self.mapping_table.verticalHeader().hide()
+        mapping_hdr = self.mapping_table.horizontalHeader()
+        mapping_hdr.setSectionResizeMode(QHeaderView.Stretch)
+        mapping_layout.addWidget(self.mapping_table)
+        self.mapping_empty_label = QLabel(
+            "No mapping evidence to display. Select or download a PRISMA Export CSV."
+        )
+        self.mapping_empty_label.setAlignment(Qt.AlignCenter)
+        self.mapping_empty_label.setStyleSheet("color:#718096; padding:18px")
+        mapping_layout.addWidget(self.mapping_empty_label)
+        main.addWidget(mapping_panel)
         activity_panel = QFrame()
         activity_panel.setObjectName("panel")
         activity_layout = QVBoxLayout(activity_panel)
@@ -414,6 +445,7 @@ class PrismaMonitorApp(QMainWindow):
         self._set_badge(self.browser_badge, "Disconnected", "idle")
         self._set_badge(self.monitor_badge, "Monitoring idle", "idle")
         self._set_badge(self.prisma_badge, "Prisma closed", "idle")
+        self._update_mapping_empty_state()
 
     @staticmethod
     def _side_group(layout: QLayout, label: str, *widgets: QWidget) -> QLabel:
@@ -492,6 +524,45 @@ class PrismaMonitorApp(QMainWindow):
         self.status.setText("Download folder updated.")
         self._add_activity("Download folder changed")
 
+    def _update_mapping_empty_state(self) -> None:
+        has_rows = self.mapping_table_model.rowCount() > 0
+        self.mapping_table.setVisible(has_rows)
+        self.mapping_empty_label.setVisible(not has_rows)
+
+    def _clear_mapping_display(self) -> None:
+        """Discard any displayed mapping rows and show the empty state.
+
+        Used whenever a CSV replacement attempt does not end in a freshly
+        refreshed mapping display, so a rejected candidate can never leave a
+        previous selection's rows visible.
+        """
+        self.mapping_table_model.set_rows(())
+        self._update_mapping_empty_state()
+
+    def _refresh_mapping_display(self, path: Path) -> None:
+        """Refresh the P.36.8 mapping presentation for the current CSV selection.
+
+        Re-runs the read-only P.36.15 import/enrichment boundary
+        (`processor.import_prisma_export`, the same boundary
+        `prisma_output.write_prisma_output` already uses) purely to obtain
+        already-resolved mapping evidence for display; it writes no output
+        file and touches no browser, network, or publication behavior. A
+        failure clears the table rather than leaving stale rows from a
+        previous selection.
+        """
+        try:
+            imported = import_prisma_export(path)
+        except (PrismaImportError, CsvFormatError, OSError) as exc:
+            safe_log(self._logger, logging.ERROR, "Mapping preview failed: %s", exc)
+            self._clear_mapping_display()
+            self._show_error(
+                "Mapping",
+                "The mapping evidence for the selected PRISMA Export CSV could not be displayed.",
+            )
+            return
+        self.mapping_table_model.set_rows(build_mapping_rows(imported))
+        self._update_mapping_empty_state()
+
     def _select_manual_csv(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
             self, "Select PRISMA Export CSV", str(self._download_directory.current), "CSV files (*.csv)"
@@ -504,11 +575,13 @@ class PrismaMonitorApp(QMainWindow):
                 self._logger, logging.WARNING,
                 "Manual PRISMA Export CSV selection rejected: %s", result.outcome.value,
             )
+            self._clear_mapping_display()
             self._show_error("Select CSV", describe_rejection(result.outcome))
             return
         self.manual_csv_label.setText(result.path.name)
         self.status.setText("PRISMA Export CSV selected.")
         self._add_activity("PRISMA Export CSV selected")
+        self._refresh_mapping_display(result.path)
 
     @staticmethod
     def _read_optional_date(widget: QDateEdit) -> date | None:
@@ -731,12 +804,14 @@ class PrismaMonitorApp(QMainWindow):
             self.status.setText(
                 "The downloaded PRISMA CSV did not match the expected export format."
             )
+            self._clear_mapping_display()
             self._show_error("PRISMA Download", describe_rejection(result.outcome))
             self._add_activity("PRISMA CSV download validation failed")
             return
         self.manual_csv_label.setText(result.path.name)
         self.status.setText(f"PRISMA CSV downloaded: {result.path.name}")
         self._add_activity(f"PRISMA CSV downloaded: {result.path.name}")
+        self._refresh_mapping_display(result.path)
 
     def _prisma_open_failed(self, exc: Exception | str) -> None:
         if self._is_closing:

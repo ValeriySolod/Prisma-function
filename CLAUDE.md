@@ -54,11 +54,12 @@ fallback path only, not the primary workflow.
   customer correction and must not guide implementation.
 - P.36.6, P.36.7, and P.36.9 are suspended/superseded. The old 14-field
   P.36.6 prompt must not be executed.
-- P.36.13 (date-range selection) is the next replacement increment, subject to
-  the current branch/merge state recorded in `ROADMAP.md`. P.36.14
-  (application-managed download) and P.36.16 (publication) each retain an
-  explicit, unresolved decision gate — do not implement either until its gate
-  is resolved.
+- P.36.13–P.36.16 (date-range selection, application-managed download,
+  transformation into the 12-column contract, and publication) are each
+  implemented and merged to `main`; each still requires manual real-Windows/
+  real-PRISMA validation before it can be marked fully complete — see the
+  current status recorded in `ROADMAP.md`. P.36.8 (mapping display) is
+  implemented and automated-tested, not yet merged.
 - Later P.36 increments must follow the dependency and status recorded in
   `ROADMAP.md`.
 

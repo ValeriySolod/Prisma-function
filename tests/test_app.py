@@ -1,3 +1,4 @@
+import gc
 import os
 import threading
 import time
@@ -13,6 +14,8 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
 
 import app
+import prisma_output
+import prisma_publication
 from auction_csv import AuctionCsvRecord
 from browser import LaunchResult
 from csv_contracts import PRISMA_EXPORT_COLUMNS
@@ -20,7 +23,9 @@ from date_range_selection import DateRange
 from download_directory import DownloadDirectoryError
 from manual_csv_selection import ManualCsvOutcome
 from manual_csv_selection import describe_rejection as describe_manual_csv_rejection
+from mapping_presentation import MAPPING_DISPLAY_FIELDS
 from monitoring import MonitoringResult
+from processor import PrismaImportError
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from prisma_page import (
     LivePrismaStatusAdapter,
@@ -72,6 +77,14 @@ def window(qt_app, monkeypatch, tmp_path):
     widget, browser = _build_app(monkeypatch, tmp_path)
     yield widget, browser
     _close_app(widget)
+    # Each PrismaMonitorApp instance holds self-referencing QTimer/slot cycles
+    # (e.g. self._browser_timer -> self._poll_browser_launch -> self); plain
+    # refcounting never reclaims those, only Python's cyclic GC does. Forcing
+    # collection after every test keeps unreachable Qt object graphs from
+    # piling up across the whole session and being torn down in one large,
+    # unordered batch at interpreter shutdown.
+    del widget, browser
+    gc.collect()
 
 
 def record(
@@ -173,7 +186,7 @@ def test_light_workspace_widgets_use_explicit_contrast_styles(window):
 
     assert content is not None
     assert subtitle is not None
-    assert {label.text() for label in section_labels} == {"Recent activity", "Status:"}
+    assert {label.text() for label in section_labels} == {"Mapping", "Recent activity", "Status:"}
     assert widget.activity_list.objectName() == "activityList"
     assert widget.status_filter.currentText() == "All statuses"
 
@@ -303,6 +316,35 @@ def _write_valid_prisma_export(path):
     path.write_bytes((";".join(PRISMA_EXPORT_COLUMNS) + "\r\n").encode("cp1252"))
 
 
+_MAPPING_ROW_DEFAULTS = {
+    "Auction ID": "1", "Start of Auction": "01.01.2025 09:00",
+    "Marketed Capacity": "1000", "Unit Marketed Capacity": "kWh/h",
+    "Product Runtime Start": "02.01.2025 00:00", "Product Runtime End": "03.01.2025 00:00",
+    "Direction": "Entry", "Network Point Name Entry": "VGS Storage Hub (4290)",
+    "Network Point ID Entry": "ENTRY-1", "TSO Exit": "", "TSO Entry": "GUD",
+}
+
+
+def _write_prisma_export_with_rows(path, rows: list[dict]) -> None:
+    """Write a valid official PRISMA Export CSV with the given data rows.
+
+    Each row is `_MAPPING_ROW_DEFAULTS` with the given overrides applied;
+    unspecified contract columns are left blank.
+    """
+    import csv as csv_module
+
+    with path.open("w", encoding="cp1252", newline="") as handle:
+        writer = csv_module.DictWriter(
+            handle, fieldnames=PRISMA_EXPORT_COLUMNS, delimiter=";", extrasaction="raise"
+        )
+        writer.writeheader()
+        for overrides in rows:
+            full_row = dict.fromkeys(PRISMA_EXPORT_COLUMNS, "")
+            full_row.update(_MAPPING_ROW_DEFAULTS)
+            full_row.update(overrides)
+            writer.writerow(full_row)
+
+
 def test_manual_csv_dialog_starts_in_current_download_directory(window, monkeypatch):
     widget, _ = window
     dialog = Mock(return_value=("", ""))
@@ -324,6 +366,31 @@ def test_cancelling_manual_csv_dialog_is_a_no_op(window, monkeypatch):
     assert widget._manual_csv_selection.current is None
     assert widget.manual_csv_label.text() == "No CSV selected"
     critical.assert_not_called()
+
+
+def test_cancelling_manual_csv_dialog_after_a_valid_selection_preserves_mapping_rows(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    populated = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(populated, [{"Auction ID": "1"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(populated), "CSV"))
+    )
+    widget._select_manual_csv()
+    assert widget.mapping_table_model.rowCount() == 1
+
+    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", Mock(return_value=("", "")))
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_manual_csv()
+
+    assert widget._manual_csv_selection.current == populated.resolve()
+    assert widget.manual_csv_label.text() == "PRISMA_Export.csv"
+    critical.assert_not_called()
+    assert widget.mapping_table_model.rowCount() == 1
+    assert not widget.mapping_table.isHidden()
 
 
 def test_choosing_a_valid_manual_csv_updates_state_and_label(window, monkeypatch, tmp_path):
@@ -396,6 +463,254 @@ def test_rejected_manual_csv_header_mismatch_preserves_previous_selection(
     critical.assert_called_once()
     _, message = critical.call_args.args[1], critical.call_args.args[2]
     assert str(bad) not in message
+
+
+# --- P.36.8 mapping display ---------------------------------------------
+
+def test_mapping_table_headers_are_exact_order_and_labels(window):
+    widget, _ = window
+    assert widget.mapping_table.accessibleName() == "Mapping"
+    model = widget.mapping_table_model
+    assert model.columnCount() == len(MAPPING_DISPLAY_FIELDS)
+    headers = tuple(
+        model.headerData(column, Qt.Horizontal) for column in range(model.columnCount())
+    )
+    assert headers == MAPPING_DISPLAY_FIELDS
+
+
+def test_initial_mapping_display_is_empty_and_hidden(window):
+    widget, _ = window
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+    assert not widget.mapping_empty_label.isHidden()
+
+
+def test_selecting_a_csv_with_no_data_rows_leaves_mapping_display_empty(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(target)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+    assert not widget.mapping_empty_label.isHidden()
+
+
+def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [
+        {
+            "Auction ID": "1", "Direction": "Entry",
+            "Network Point Name Entry": "VGS Storage Hub (4290)",
+            "Network Point ID Entry": "ENTRY-1", "TSO Entry": "GUD",
+        },
+        {
+            "Auction ID": "2", "Direction": "Exit",
+            "Network Point Name Exit": "VIP DK-THE (H646) (H646)",
+            "Network Point ID Exit": "EXIT-1", "TSO Exit": "GTE", "TSO Entry": "",
+        },
+    ])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    model = widget.mapping_table_model
+    assert model.rowCount() == 2
+    assert not widget.mapping_table.isHidden()
+    assert widget.mapping_empty_label.isHidden()
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    # Deterministic order: rows appear exactly as they were in the source CSV.
+    assert (cell(0, 0), cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4)) == (
+        "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD",
+    )
+    assert (cell(1, 0), cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4)) == (
+        "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "",
+    )
+
+
+def test_filtered_and_rejected_only_csv_leaves_mapping_display_empty(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [
+        {"Auction ID": "1", "Marketed Capacity": "10"},  # below threshold: filtered
+        {"Auction ID": "2", "Network Point Name Entry": "Unknown Point"},  # rejected
+    ])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+
+
+def test_selecting_a_new_csv_replaces_previous_mapping_rows(window, monkeypatch, tmp_path):
+    widget, _ = window
+    first = tmp_path / "first.csv"
+    _write_prisma_export_with_rows(first, [{"Auction ID": "1"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(first), "CSV"))
+    )
+    widget._select_manual_csv()
+    assert widget.mapping_table_model.rowCount() == 1
+
+    second = tmp_path / "second.csv"
+    _write_valid_prisma_export(second)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(second), "CSV"))
+    )
+    widget._select_manual_csv()
+
+    # The replacement CSV has zero data rows: no stale row from the first
+    # selection may survive the refresh.
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+
+
+def test_mapping_refresh_failure_clears_table_and_shows_safe_error(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+    widget._select_manual_csv()
+    assert widget.mapping_table_model.rowCount() == 1
+
+    second = tmp_path / "second.csv"
+    _write_valid_prisma_export(second)
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(second), "CSV"))
+    )
+
+    def _raise(path):
+        raise PrismaImportError(f"internal failure reading {path}")
+
+    monkeypatch.setattr(app, "import_prisma_export", _raise)
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_manual_csv()
+
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Mapping"
+    assert str(second) not in message
+    assert message == (
+        "The mapping evidence for the selected PRISMA Export CSV could not be displayed."
+    )
+
+
+def test_downloaded_csv_populates_mapping_table(window, tmp_path):
+    widget, _ = window
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1"}])
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert widget.mapping_table_model.rowCount() == 1
+    assert not widget.mapping_table.isHidden()
+
+
+def test_rejected_manual_csv_replacement_clears_previous_mapping_rows(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    populated = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(populated, [{"Auction ID": "1"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(populated), "CSV"))
+    )
+    widget._select_manual_csv()
+    assert widget.mapping_table_model.rowCount() == 1
+
+    bad = tmp_path / "wrong-header.csv"
+    bad.write_bytes(b"a;b;c\r\n")
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(bad), "CSV"))
+    )
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._select_manual_csv()
+
+    critical.assert_called_once()
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+    assert not widget.mapping_empty_label.isHidden()
+
+
+def test_rejected_download_csv_replacement_clears_previous_mapping_rows(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    populated = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(populated, [{"Auction ID": "1"}])
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=populated)
+    )
+    assert widget.mapping_table_model.rowCount() == 1
+
+    bad = tmp_path / "bad-export.csv"
+    bad.write_text("not,the,right,header\n", encoding="utf-8")
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(12, True, kind="download", csv_path=bad)
+    )
+
+    critical.assert_called_once()
+    assert widget.mapping_table_model.rowCount() == 0
+    assert widget.mapping_table.isHidden()
+    assert not widget.mapping_empty_label.isHidden()
+
+
+def test_mapping_refresh_does_not_touch_output_writing_publication_or_browser(
+    window, monkeypatch, tmp_path
+):
+    widget, browser = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+    write_output = Mock(side_effect=AssertionError("write_prisma_output must not be called"))
+    publish = Mock(side_effect=AssertionError("publish_cumulative_output must not be called"))
+    monkeypatch.setattr(prisma_output, "write_prisma_output", write_output)
+    monkeypatch.setattr(prisma_publication, "publish_cumulative_output", publish)
+    browser_calls_before = list(browser.mock_calls)
+    lifecycle_calls_before = list(widget.prisma_lifecycle.mock_calls)
+
+    widget._select_manual_csv()
+
+    write_output.assert_not_called()
+    publish.assert_not_called()
+    assert list(browser.mock_calls) == browser_calls_before
+    assert list(widget.prisma_lifecycle.mock_calls) == lifecycle_calls_before
 
 
 def test_date_range_controls_and_validate_action_are_visible(window):
