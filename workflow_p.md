@@ -2175,7 +2175,7 @@ decision gate), `P.36.15` (transformation), `P.36.16` (publication, blocked by i
 validation), and `P.36.12` (final regression/acceptance). See the section immediately below for
 `P.36.14`'s resolved decision gate and implementation.
 
-#### P.36.14. User-initiated, application-managed PRISMA CSV download — Implemented and automated-tested, pending fully-automated live validation (2026-08-02)
+#### P.36.14.✅ Completed User-initiated, application-managed PRISMA CSV download — Implemented and automated-tested, pending fully-automated live validation (2026-08-02)
 
 **Decision gate resolution (2026-08-02, customer-approved).** P.36.14 was blocked on four explicit
 questions; the customer resolved all four before implementation began:
@@ -3146,3 +3146,131 @@ final filename — and specifically confirm no UUID-named or partial file is eve
 the final result. This is in addition to, not a replacement for, P.36.14's already-recorded outstanding
 real-installed-Chrome production acceptance pass and the DATE RANGE control fix's own outstanding manual
 validation recorded in this file's immediately preceding entry.
+
+#### P.36.15. Transform into the exact 12-column output CSV contract — Implemented and reviewed, not yet merged (2026-08-04)
+
+Per `ROADMAP.md`'s "P.36 roadmap correction (2026-08-02)", `P.36.15` transforms one already-validated
+official PRISMA Export CSV into the exact 12-column output contract (`workflow_p.md` section 1.1, item 5;
+`ROADMAP.md`'s "Authoritative output CSV contract"). Implemented on `feature/p36-15-output-writer`, branched
+from `main` at merge commit `36b7615` (the P.36.14 merge via PR #61), so P.36.14's completed implementation
+is already present on this branch.
+
+**Design.** New module `prisma_output.py`, Qt- and browser-independent, matching the existing
+`date_range_selection.py`/`download_directory.py`/`manual_csv_selection.py`/`prisma_download.py` pattern
+(typed `str` `Enum` outcome, immutable frozen-dataclass result with a `succeeded` property, a stable
+path-free `describe_*` message function, an explicit `__all__`). It reimplements none of the existing
+parsing/normalization/filtering/enrichment/side-specific-resolution rules: `processor.import_prisma_export()`
+(P.33/P.36.4, unchanged) is called directly and its `PrismaImportResult`/`PrismaImportIssue` typed outcomes
+are threaded straight through, so the existing missing-side (`missing_required_exit_reference`/
+`missing_required_entry_reference`) and unknown-alias (`unknown_exit_reference`/`unknown_entry_reference`)
+rejection behavior, and its exact side-specific Market/Storage resolution, are preserved unchanged and
+un-duplicated.
+
+**Field-level source/transform rules** (from `processor.py`'s already-enriched row dict to the 12-column
+contract, no re-derivation):
+
+| Output column | Source field | Rule |
+|---|---|---|
+| `Auction Date` | `auction_date` | Passed through unchanged: an ISO 8601 string (`datetime.isoformat()`), the same representation `storage.py`'s SQLite/Excel export already treats as authoritative. |
+| `Exit Market` | `exit_market` | Passed through unchanged; populated only when the row's direction required and resolved exit-side evidence, empty otherwise — never inferred from the opposite side. |
+| `Entry Market` | `entry_market` | Same rule, entry side. |
+| `Capacity Type` | `direction` | Passed through unchanged: `"entry"`, `"exit"`, or `"bundle"`, matching the authoritative specification's exact wording (section 1.1, item 5). |
+| `Network Point Name` | `network_point` | Passed through unchanged: already the correct side-specific selected name for the row's direction. |
+| `Product Type` | `product_type` | Passed through unchanged: `WD`/`Day Ahead`/`Month`/`Quarter`/`Year`, per the existing `_product_type()` rule. |
+| `Flow Start` | `flow_start` | Passed through unchanged; ISO 8601, same rule as `Auction Date`. |
+| `Flow End` | `flow_end` | Passed through unchanged; ISO 8601, same rule as `Auction Date`. |
+| `Booked Capacity` | `booked_capacity_kwh_h` | `str(float)` (always dot-decimal); already normalized to kWh/h by `processor._capacity()`; no additional rounding applied — no authoritative rounding/precision decision exists, so the exact already-normalized value is preserved. |
+| `Flow Duration Hours` | `runtime_hours` | `str(float)`; same no-rounding rule. |
+| `Tariff Price` | `tariff_eur_mwh_h` | `str(float)`; already normalized to EUR/MWh/h by `processor._price()`; same no-rounding rule. |
+| `Premium Price` | `premium_eur_mwh_h` | `str(float)`; same rule. |
+
+**Write path.** `write_prisma_output(source_path, output_directory, *, reference_catalog=DEFAULT_PRISMA_REFERENCES)`
+validates the destination directory first (existing, readable, writable — reusing
+`download_directory.validate_download_directory` plus an `os.access(..., os.W_OK)` check), never touching the
+filesystem for an invalid destination (`INVALID_OUTPUT_DIRECTORY`, no `import_prisma_export()` call, no file
+created). It then calls `import_prisma_export()`; a malformed/non-PRISMA-format source raises
+`PrismaImportError`/`CsvFormatError`, mapped to `SOURCE_IMPORT_FAILED` with nothing written — "no output is
+published on a failed transformation" is satisfied at this boundary. Only accepted rows (`imported.rows`) are
+transformed and written; filtered and rejected rows are excluded from the file but remain fully inspectable
+via the returned `PrismaImportResult` (`filtered_count`/`rejected_count`/`issues`), satisfying "every source
+row has one deterministic typed outcome" without inventing a second issue-tracking mechanism. A source whose
+every row is filtered or rejected still produces a valid header-only output file — a successful transformation
+of an empty accepted set is not itself a failure.
+
+Writing is atomic and collision-safe: `prisma_download.reserve_unique_download_path()` (the already-approved
+P.36.14 naming/collision rule — exclusive `os.O_CREAT | os.O_EXCL` reservation, never overwrites, increments
+`_2`/`_3`/... on collision) is reused unchanged rather than reimplemented; the full CSV is staged into a
+temporary file in the same destination directory (`tempfile.mkstemp`), flushed and `fsync`ed, and only then
+`os.replace()`d onto the reserved placeholder. A failure at any point (staging, the replace itself) leaves the
+reserved placeholder removed and no `.staging` temp file behind — proven by dedicated tests that force
+`os.replace()` and a mid-write `csv.DictWriter.writerows()` to each raise, both asserting the destination
+directory ends up empty.
+
+**Naming decision (documented assumption, not a customer decision).** No approved publication naming/collision
+policy exists yet specifically for this transformed output — that is explicitly the blocked `P.36.16` decision
+gate's job (destination, filename, overwrite/versioning, accumulation). Absent that, `build_output_filename()`
+uses `"<source-stem>_transformed.csv"`, the smallest safe extension of the already-approved
+`P.36.14` `"<stem>_<suffix>.csv"` template. This is recorded here as an explicit, reviewable assumption rather
+than silently invented; `P.36.16` may replace it entirely without needing to change `prisma_output.py`'s
+transform/write internals.
+
+**No accumulation, no UI wiring.** Each `write_prisma_output()` call is a fully independent operation: two
+calls over the same source file produce two separate, independently numbered output files with no merging or
+deduplication (test-proven), so none of `P.36.16`'s excluded accumulation/cross-file-deduplication/state-
+tracking scope was introduced. No UI trigger was added: `app.py`, `PrismaFunction.spec`, and all browser/
+lifecycle code are unchanged. None of P.36.15's own acceptance criteria require a UI trigger, and
+`self._manual_csv_selection.current` — already exposed by the merged P.36.14 work (see this file's matching
+entry above) — remains the exact boundary a later increment will pass to `write_prisma_output()`.
+
+**Review fix (2026-08-04).** A review of the initial implementation found that both `WRITE_FAILED` outcomes
+in `write_prisma_output()` — a destination-reservation failure and a staging/atomic-replace failure — dropped
+the already-computed `PrismaImportResult`, even though `import_prisma_export()` had already succeeded by that
+point in the call. A caller receiving a `WRITE_FAILED` result therefore had no way to see which rows had been
+accepted, filtered, or rejected before the write itself failed. Both `return PrismaOutputResult(...)` call
+sites now pass `import_result=imported` unchanged, with no change to either path's outcome, message, or safe
+error-context behavior.
+
+**Automated evidence (2026-08-04).** New `tests/test_prisma_output.py` (26 tests): the exact ordered
+12-column header and exactly 12 fields per row; UTF-8 encoding and `;` delimiter; a representative successful
+transformation with exact field-by-field assertions (including summed tariff/premium prices); pure
+`transform_row()` mapping in isolation; Exit/Entry placement for entry-only (Storage-classified), exit-only
+(Market-classified), and bundle (both sides) directions; unresolved-alias and missing-required-side rows
+excluded from the output while remaining recorded as typed rejections; below-threshold rows filtered and
+excluded; a mixed accepted/rejected source writing only the accepted row; zero accepted rows still producing
+a valid header-only file; a malformed/non-PRISMA source failing the transformation and writing nothing; stable
+non-empty messages for every `PrismaOutputOutcome`; a nonexistent, a file-shaped, and a non-writable
+destination directory each rejected without any filesystem write; the exact naming rule; collision handling
+never overwriting and using the incrementing-suffix rule; two independent calls never merging; a destination-
+reservation failure, a simulated `os.replace` failure, and a simulated mid-write failure each leaving zero
+files in the destination directory — the three write-failure tests use a source with one accepted, one
+filtered, and one rejected row, and each asserts `result.import_result` is not discarded and carries the
+exact pre-computed `imported_count`/`filtered_count`/`rejected_count`, the accepted row's data, and the
+filtered/rejected issues' reason codes; a successful write leaving no staging artifacts; and a caller-supplied
+`PrismaReferenceCatalog` being honored.
+
+The complete pytest suite passed with **774 tests** (up from 748, the exact +26 expected from this
+increment). Project-wide `python -m compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`, `dist`)
+exited `0`, with the same pre-existing, unrelated `.pytest_tmp` permission warning recorded in every prior
+entry in this file. `git diff --check` passed.
+
+**Not run, and why.** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` /
+`python validate_package.py` were not rerun: `prisma_output.py` is not imported by `app.py` or referenced by
+`PrismaFunction.spec`, so PyInstaller's static import discovery would not bundle it, and a rebuild would
+reproduce the identical distribution already validated after the P.36.14 merge — this increment does not
+affect packaging. `tests/test_packaging.py` is included in, and passed as part of, the 774-test full-suite
+run above.
+
+**Manual validation.** None is required by this increment's own acceptance criteria: `write_prisma_output()`
+consumes only an already-on-disk, already-validated CSV file and performs no browser, network, or PRISMA
+session operation. Real-Windows/real-PRISMA end-to-end validation remains appropriate once a later increment
+wires this module into the application workflow (a UI trigger, deferred here — see "No accumulation, no UI
+wiring" above).
+
+**Scope discipline.** Confined to the new `prisma_output.py` module and its new `tests/test_prisma_output.py`
+suite. `processor.py`, `prisma_references.py`, `prisma_download.py`, `download_directory.py`, `app.py`,
+`PrismaFunction.spec`, the completed P.36.14 managed-download behavior, and all other existing code are
+unmodified. Not committed, pushed, merged, or rebased; the feature branch was not deleted.
+
+**Outstanding before this increment can be marked ✅ Completed:** final review found no remaining actionable
+code defects; merge to `main` is the one remaining step. Per this increment's own criteria, no additional
+manual validation is required beyond that — see "Manual validation" above.

@@ -182,7 +182,7 @@ manual Windows workflow beyond this isolated startup/shutdown smoke check was pe
 
 ### P.36.14 — User-initiated, application-managed PRISMA CSV download
 
-**Status:** 🟡 Implemented and automated-tested on `feature/p36-14-managed-prisma-download`; not yet merged. Real-PRISMA validation on 2026-08-02 progressed through three corrections: (1) a wrong, guessed reporting-page URL, fixed and live-confirmed; (2) a wrong, guessed date-filter locator (`get_by_label(/from date/i)`), replaced with the real live-verified Active-Filter-panel/test-id contract and live-confirmed (`Open Prisma` fills and applies both dates successfully); (3) a customer correction to the decision gate itself — the original gate had the user manually press PRISMA's own download control, which is now known to be wrong: PrismaFunction must activate that control itself, with the user's only action being the existing in-application control. A same-day follow-up diagnostic round found two further real-site defects — a cookie-consent banner blocking the CSV click, and the download listener missing a download opened in a new tab — both now fixed and individually live-verified (see the dated entry below), but that same round also found the date-filter selectors from correction (2) apparently no longer matching the live site (external PRISMA UI drift, out of that round's scope to fix). A later same-day round (see the dated entry further below) re-verified the date-filter contract fresh against the live site, added the required applied-filter verification and large-result-modal handling, and found the "drift" was most likely intermittent PRISMA-side A/B variance rather than a permanent change — but also found a new, orthogonal blocker: the Playwright "download" event is not reliably observed when driving the real installed Chrome/Edge executable (regardless of headless/headed mode), even though the browser's own UI confirms the download completed. **Still not live-verified end-to-end** (no full live download has yet been completed with zero manual browser interaction). Do not mark this ✅ Completed until that full live pass is recorded. A separate real-Windows UI defect — the DATE RANGE controls initializing to Qt's minimum date instead of a usable date — was found and fixed on 2026-08-03 (see this section's dated entry below); full manual Windows validation of that fix is still outstanding. A further real-Windows defect was also found and fixed the same day: the managed download completed in Chrome under a temporary UUID-like name but never reached the configured directory, because the browser was never told to download there (`downloads_path` was not set) — see this section's matching 2026-08-03 dated entry; full manual Windows validation of that fix is likewise still outstanding.
+**Status:** ✅ Implemented and automated-tested; merged to `main` via PR #61 (merge commit `36b7615`). Real-PRISMA validation on 2026-08-02 progressed through three corrections: (1) a wrong, guessed reporting-page URL, fixed and live-confirmed; (2) a wrong, guessed date-filter locator (`get_by_label(/from date/i)`), replaced with the real live-verified Active-Filter-panel/test-id contract and live-confirmed (`Open Prisma` fills and applies both dates successfully); (3) a customer correction to the decision gate itself — the original gate had the user manually press PRISMA's own download control, which is now known to be wrong: PrismaFunction must activate that control itself, with the user's only action being the existing in-application control. A same-day follow-up diagnostic round found two further real-site defects — a cookie-consent banner blocking the CSV click, and the download listener missing a download opened in a new tab — both now fixed and individually live-verified (see the dated entry below), but that same round also found the date-filter selectors from correction (2) apparently no longer matching the live site (external PRISMA UI drift, out of that round's scope to fix). A later same-day round (see the dated entry further below) re-verified the date-filter contract fresh against the live site, added the required applied-filter verification and large-result-modal handling, and found the "drift" was most likely intermittent PRISMA-side A/B variance rather than a permanent change — but also found a new, orthogonal blocker: the Playwright "download" event is not reliably observed when driving the real installed Chrome/Edge executable (regardless of headless/headed mode), even though the browser's own UI confirms the download completed. **Still not live-verified end-to-end** (no full live download has yet been completed with zero manual browser interaction). Do not mark this ✅ Completed until that full live pass is recorded. A separate real-Windows UI defect — the DATE RANGE controls initializing to Qt's minimum date instead of a usable date — was found and fixed on 2026-08-03 (see this section's dated entry below); full manual Windows validation of that fix is still outstanding. A further real-Windows defect was also found and fixed the same day: the managed download completed in Chrome under a temporary UUID-like name but never reached the configured directory, because the browser was never told to download there (`downloads_path` was not set) — see this section's matching 2026-08-03 dated entry; full manual Windows validation of that fix is likewise still outstanding.
 **Dependencies required before implementation:** P.36.2, P.36.3, and P.36.13 completed.
 
 **Decision gate — resolved (2026-08-02, customer-approved):**
@@ -923,7 +923,10 @@ entry.
 
 ### P.36.15 — Transform into the exact 12-column output CSV contract
 
-**Status:** ⬜ Planned
+**Status:** 🟡 Implemented, automated-tested, and reviewed on `feature/p36-15-output-writer`; final review
+found no remaining actionable code defects, but the increment is still not yet merged or manually validated
+on real Windows/real PRISMA data. Branched from `main` at merge commit `36b7615` (the P.36.14 merge via
+PR #61), so P.36.14's implementation and automated evidence are already present on this branch.
 **Dependency required before implementation:** P.36.14 completed.
 
 **Objective:** Transform the validated official PRISMA CSV into the exact 12-column contract defined in this roadmap.
@@ -954,6 +957,91 @@ entry.
 - no output is published on a failed transformation;
 - focused tests, full regression tests, compilation, and whitespace validation pass;
 - documentation records field-level source/transform rules and exact executed validation results.
+
+**Implemented result.** New, Qt- and browser-independent module `prisma_output.py`. It performs no parsing,
+normalization, filtering, enrichment, or side-specific resolution of its own: `processor.import_prisma_export()`
+(P.33/P.36.4, unchanged) already implements and tests every one of those authoritative rules, including the
+existing missing-side/unknown-alias typed rejection behavior; `prisma_output.py` only selects, renames, and
+formats the already-enriched row shape into the approved 12-column contract, then writes it. Field-level
+mapping from `processor.py`'s enriched row dict to the output contract: `auction_date`/`flow_start`/`flow_end`
+pass through unchanged as the ISO 8601 strings already treated as authoritative elsewhere in the codebase
+(`storage.py`'s SQLite/Excel export uses the same representation); `exit_market`/`entry_market` map directly
+(each populated only from its own side's resolved evidence, exactly as `processor.py` already guarantees);
+`direction` (`"entry"`/`"exit"`/`"bundle"`) maps to `Capacity Type` unchanged, matching the authoritative
+specification's exact wording (`workflow_p.md` section 1.1, item 5); `network_point` maps to
+`Network Point Name`; `product_type` maps to `Product Type`; `booked_capacity_kwh_h`, `runtime_hours`,
+`tariff_eur_mwh_h`, and `premium_eur_mwh_h` map to `Booked Capacity`, `Flow Duration Hours`, `Tariff Price`,
+and `Premium Price` respectively, each formatted via Python's own `str(float)` (always dot-decimal; no
+rounding is applied, since no authoritative rounding/precision decision exists — the raw already-normalized
+float from `processor.py` is preserved exactly).
+
+`write_prisma_output(source_path, output_directory, *, reference_catalog=DEFAULT_PRISMA_REFERENCES)` is the
+single entry point: it validates the destination directory first (existing, readable, and writable — reusing
+`download_directory.validate_download_directory` plus a writability check, never touching the filesystem for
+an invalid destination), then calls `import_prisma_export()` (a malformed/non-PRISMA source CSV fails with
+`SOURCE_IMPORT_FAILED` and writes nothing), then transforms only the accepted rows and writes them
+atomically: `prisma_download.reserve_unique_download_path()` (already-approved P.36.14 naming/collision rule,
+reused unchanged rather than reimplemented) exclusively reserves a collision-free destination filename, the
+full CSV is staged into a temporary file in the same directory and `fsync`ed, and only then `os.replace()`d
+onto the reserved placeholder — so a write failure at any point leaves no partial file at the final published
+name (verified by dedicated tests that fail `os.replace` and fail mid-write, both proving zero files remain in
+the destination directory afterward). No customer-approved publication naming/collision policy exists yet
+specifically for this transformed output (that decision is explicitly deferred to the blocked `P.36.16` gate);
+`build_output_filename()` uses `"<source-stem>_transformed.csv"`, the safest available assumption consistent
+with the `P.36.14`-established `"<stem>_<suffix>.csv"` template, documented here as an explicit assumption
+rather than a customer decision. Every call is independent: two calls over the same source produce two
+separate, independently-collision-numbered output files with no merging, accumulation, or cross-call state,
+proving `P.36.16`'s accumulation/deduplication/state-tracking scope has not been introduced.
+
+`PrismaOutputResult` (immutable, typed `PrismaOutputOutcome`: `SUCCESS`, `INVALID_OUTPUT_DIRECTORY`,
+`SOURCE_IMPORT_FAILED`, `WRITE_FAILED`) carries the output path (on success) and the full
+`processor.PrismaImportResult` (accepted/filtered/rejected counts and the typed per-row issue list), so every
+source row's deterministic outcome remains inspectable; `describe_output_failure()` provides stable, English,
+path-free messages matching the existing `describe_validation_rejection`/`describe_rejection` pattern used by
+`prisma_download.py`/`manual_csv_selection.py`. No UI wiring was added: `app.py`, `PrismaFunction.spec`, and
+all browser/lifecycle code are unchanged, since no P.36.15 acceptance criterion requires a UI trigger and
+`self._manual_csv_selection.current` (already exposed by the merged P.36.14 work) is the exact boundary this
+module is designed to consume once a later increment wires it in.
+
+**Review fix (2026-08-04).** A review of the initial implementation found that both `WRITE_FAILED` paths in
+`write_prisma_output()` (reservation failure and staging/atomic-replace failure) discarded the already-completed
+`PrismaImportResult`, even though `import_prisma_export()` had already succeeded by that point — a caller
+handling a write failure had no way to see which rows had been accepted, filtered, or rejected. Both paths now
+pass `import_result=imported` unchanged, with no change to the outcome, message, or safe-error behavior.
+
+**Automated evidence (2026-08-04, `feature/p36-15-output-writer`, not yet merged).** New
+`tests/test_prisma_output.py` (26 tests) covers: the exact ordered 12-column header and exactly 12 fields per
+row; UTF-8 encoding and `;` delimiter; a representative successful transformation with exact field-by-field
+value assertions (including tariff/premium price summation); pure `transform_row()` field mapping; Exit/Entry
+placement for entry-only, exit-only, and bundle directions, including one Market-classified and one
+Storage-classified case; unresolved-alias and missing-required-side rows excluded from the written output
+while still recorded as typed rejections in `PrismaImportResult`; below-threshold rows filtered and excluded;
+a mixed accepted/rejected source producing only the accepted row in the output; zero accepted rows still
+producing a valid header-only output (a successful transformation of an empty accepted set, not a failure);
+a malformed/non-PRISMA source failing the transformation and writing nothing; stable non-empty messages for
+every `PrismaOutputOutcome`; a nonexistent, a file-shaped, and a non-writable destination directory each
+rejected without any filesystem write; the exact `"<stem>_transformed.csv"` naming rule; collision handling
+never overwriting an existing file and using the approved incrementing-suffix rule; two independent calls
+never merging or deduplicating; a destination-reservation failure and a simulated `os.replace` failure and a
+simulated mid-write failure each leaving zero files (no partial output, no orphaned staging temp file) in the
+destination directory, with each of the three write-failure tests also asserting `import_result` carries the
+exact pre-computed accepted/filtered/rejected counts, rows, and issue reason codes from a mixed-outcome source
+(one accepted, one filtered, one rejected row) rather than being discarded; a successful write leaving no
+staging artifacts behind; and a caller-supplied `PrismaReferenceCatalog` being honored instead of the default.
+The complete pytest suite passed with **774 tests** (up from 748, the exact +26 expected from this increment).
+Project-wide `python -m compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`, `dist`) exited `0`,
+with the same pre-existing, unrelated `.pytest_tmp` permission warning recorded in prior entries. `git diff
+--check` passed.
+
+**Not run.** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` and `python validate_package.py`
+were not rerun: `prisma_output.py` is not imported by `app.py` or referenced by `PrismaFunction.spec`, so
+PyInstaller's static import discovery would not even bundle it and a rebuild would reproduce the identical
+distribution already validated after the P.36.14 merge — this increment does not affect packaging.
+`tests/test_packaging.py` is included in, and passed as part of, the 774-test full-suite run above. No real
+Windows or real-PRISMA manual validation was performed or is required by this increment's own acceptance
+criteria (it consumes only an already-on-disk validated CSV file; no browser, network, or PRISMA session is
+touched), but end-to-end manual validation of the eventual wired-in workflow remains appropriate once a later
+increment adds the UI trigger.
 
 ### P.36.16 — Publish the processed result
 
@@ -998,10 +1086,9 @@ entry.
 
 ## Current blockers and risks
 
-- P.36.14's decision gate is resolved and it is implemented and automated-tested on
-  `feature/p36-14-managed-prisma-download`, but not yet merged; its own acceptance criteria still
-  require approved real-Windows/real-PRISMA validation before it can be marked ✅ Completed, and P.36.15
-  should not begin until that validation and merge are done.
+- P.36.14's decision gate is resolved and it is implemented, automated-tested, and merged to `main` via
+  PR #61 (merge commit `36b7615`); its own acceptance criteria still require approved
+  real-Windows/real-PRISMA validation before it can be marked ✅ Completed.
 - Resolved 2026-08-02 (later same-day round): the previously reported date-filter selector drift
   (`data-testid="startOfAuctionFrom"`/`"startOfAuctionTo"`) was re-verified live and the locators still
   match the current live site; a required post-application filter-chip verification and a large-result
@@ -1025,6 +1112,10 @@ entry.
   this specific fix (distinguishable dates, confirm both appear in the PRISMA controls, confirm the
   resulting request/download uses that range) remains outstanding, in addition to the still-outstanding
   full real-installed-Chrome production acceptance pass above.
+- P.36.15 is implemented, automated-tested, and reviewed on `feature/p36-15-output-writer` (see its dated
+  2026-08-04 entry above); final review found no remaining actionable code defects, but it is not yet merged.
+  It is not gated on the P.36.14 real-Windows validation item above, since it consumes only an
+  already-validated on-disk CSV and touches no browser/PRISMA session itself.
 - P.36.16 cannot start until “publication” is explicitly defined.
 - `ROADMAP.md`, `workflow_p.md`, and `CLAUDE.md` must remain synchronized on the active 12-column contract and P.36 dependency order.
 - Completed P.36.4 remains useful as fallback, but treating it as the primary flow would contradict the current specification.
@@ -1034,15 +1125,17 @@ entry.
 
 1. Complete and review the documentation correction across `ROADMAP.md`, `workflow_p.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
 2. P.36.13 is implemented and merged to `main` via PR #59 (merge commit `ff07b68`); it is completed.
-3. P.36.14's decision gate is resolved and it is implemented on `feature/p36-14-managed-prisma-download`
-   with automated evidence recorded above; obtain the required real-Windows/real-PRISMA validation, review,
-   and merge it before starting P.36.15.
+3. P.36.14's decision gate is resolved and it is implemented, automated-tested, and merged to `main` via
+   PR #61 (merge commit `36b7615`); obtain the required real-Windows/real-PRISMA validation before it can be
+   marked ✅ Completed.
 4. The date-filter contract and large-result-modal fixes (2026-08-02, later same-day round) are complete and
    individually live-verified end-to-end in headless mode. The approved bounded-filesystem-observation
    fallback (2026-08-03) means the real-Chrome download-event delivery gap no longer blocks progress on its
    own terms; the remaining step is a full real-installed-Chrome production-mode acceptance pass on a normal
-   interactive Windows desktop (outside this sandboxed development environment), then review and merge of
-   `feature/p36-14-managed-prisma-download`.
+   interactive Windows desktop (outside this sandboxed development environment).
+5. P.36.15 is implemented, automated-tested, and reviewed on `feature/p36-15-output-writer` (see its dated
+   2026-08-04 entry above), with final review finding no remaining actionable code defects; merge it before
+   starting P.36.16 (still blocked by its own decision gate) or wiring a UI trigger for it.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 
