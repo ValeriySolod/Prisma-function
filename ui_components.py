@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from auction_csv import AuctionCsvRecord
+from mapping_presentation import MAPPING_DISPLAY_FIELDS, MappingDisplayRow
 from monitoring import MonitoringResult
 
 
@@ -217,6 +218,51 @@ class AuctionTableModel(QAbstractTableModel):
                 for row in self.rows
             ),
         }
+
+
+class MappingTableModel(QAbstractTableModel):
+    """P.36.8 Qt presentation of already-resolved mapping evidence.
+
+    Consumes only `mapping_presentation.MappingDisplayRow` values built from
+    one already-completed P.36.15 import result; this model performs no
+    parsing, resolution, or business logic of its own, and never adds,
+    removes, renames, or reorders the five presentation fields.
+    """
+
+    HEADERS = MAPPING_DISPLAY_FIELDS
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.rows: tuple[MappingDisplayRow, ...] = ()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        if role not in (Qt.DisplayRole, Qt.AccessibleTextRole):
+            return None
+        row = self.rows[index.row()]
+        values = (
+            row.exit_market, row.entry_market, row.network_point_name,
+            row.tso_name_exit, row.tso_name_entry,
+        )
+        return values[index.column()]
+
+    def set_rows(self, rows: tuple[MappingDisplayRow, ...]) -> None:
+        """Replace the displayed rows wholesale so no stale row is ever retained."""
+        self.beginResetModel()
+        self.rows = tuple(rows)
+        self.endResetModel()
 
 
 class AuctionFilterModel(QSortFilterProxyModel):
