@@ -923,10 +923,9 @@ entry.
 
 ### P.36.15 — Transform into the exact 12-column output CSV contract
 
-**Status:** 🟡 Implemented, automated-tested, and reviewed on `feature/p36-15-output-writer`; final review
-found no remaining actionable code defects, but the increment is still not yet merged or manually validated
-on real Windows/real PRISMA data. Branched from `main` at merge commit `36b7615` (the P.36.14 merge via
-PR #61), so P.36.14's implementation and automated evidence are already present on this branch.
+**Status:** 🟡 Implemented, automated-tested, and reviewed; merged to `main` via PR #62 (merge commit
+`c84344f`). Final review found no remaining actionable code defects, but manual validation on real
+Windows/real PRISMA data is still outstanding, so this stays 🟡 rather than ✅.
 **Dependency required before implementation:** P.36.14 completed.
 
 **Objective:** Transform the validated official PRISMA CSV into the exact 12-column contract defined in this roadmap.
@@ -1045,26 +1044,55 @@ increment adds the UI trigger.
 
 ### P.36.16 — Publish the processed result
 
-**Status:** ⬜ Planned; blocked by decision gate
+**Status:** 🟡 Decision gate resolved (customer-approved "option 2", 2026-08-04); implemented and
+automated-tested on `feature/p36-16-cumulative-output`, branched from `main` at merge commit `c84344f`
+(the P.36.15 merge via PR #62). Not yet merged, and not yet manually validated on real Windows/real
+PRISMA data.
 **Dependency required before implementation:** P.36.15 completed.
 
-**Decision gate before implementation:** The customer must define “publication”: destination, filename, overwrite/versioning behavior, whether results accumulate across runs, duplicate identity and conflict behavior, recovery expectations, and the user-visible success artifact. No implementation begins until these are explicit.
+**Decision gate — resolved (2026-08-04, customer-approved "option 2"):** Publication accumulates
+results across runs into exactly one cumulative CSV per publication directory, using the approved
+Documents-directory-or-user-selected-directory contract (`P.36.3`) as the destination — never
+`%LOCALAPPDATA%`. Duplicate identity is the complete, exact 12-field canonical output row (see
+`prisma_output.transform_row`/`OUTPUT_CSV_COLUMNS`) — not a narrower business key such as Auction ID
+(which is not one of the 12 output fields), and never fuzzy/substring/inferred matching or
+update-in-place semantics. A duplicate row (against either the existing published rows or another row
+within the same completed import) is silently dropped, never appended a second time. Existing unique
+rows keep their original order; new unique rows are appended in their current import order. Recovery is
+atomic stage-then-`os.replace()`, matching the existing `P.36.14`/`P.36.15` pattern: a failure at any
+point before the final replace never loses, corrupts, or partially exposes the previous valid cumulative
+file, and the completed `PrismaImportResult` (accepted/filtered/rejected evidence) is always preserved on
+a publication failure. An existing cumulative file that is empty, malformed, wrongly delimited,
+undecodable as UTF-8, or missing the exact 12-column header is a typed failure that leaves the existing
+file completely unchanged — publication does not attempt to repair or reinterpret it. The user-visible
+success artifact is the one cumulative file itself, growing across runs; no versioning, timestamped
+snapshots, or per-run copies are created. No literal cumulative filename was dictated by the customer
+decision itself (it approves the merge/dedup/atomic-publish *behavior*, not a specific name); the
+implementation uses a fixed `Prisma_Output_Published.csv` name per publication directory, documented here
+as an explicit assumption consistent with `prisma_output.build_output_filename`'s own precedent for an
+undecided naming detail.
 
 **Objective:** Publish a successfully transformed 12-column result atomically using the approved publication contract.
 
-**Included scope after approval:**
+**Included scope:**
 
-- atomic write/replace behavior appropriate to the approved destination;
-- deterministic naming and collision behavior;
-- truthful success/failure UI and recoverable retry;
-- reuse of compatible P.33/P.34 transaction, audit, deduplication, and recovery patterns only where the approved contract requires them.
+- atomic write/replace behavior (stage in the same directory, flush, `fsync` where supported, then
+  `os.replace()`) appropriate to the approved destination;
+- exact full-row deduplication and deterministic append ordering, both between the existing published
+  rows and the current completed import, and within the current completed import itself;
+- truthful typed success/failure outcomes and recoverable retry that never lose the completed
+  `PrismaImportResult`'s accepted/filtered/rejected evidence;
+- reuse of the existing `P.36.15` serializer/contract (`prisma_output.transform_row`,
+  `prisma_output.OUTPUT_CSV_COLUMNS`) instead of a competing output format.
 
 **Excluded scope:**
 
-- inventing a destination or accumulation policy;
+- inventing a narrower business key, fuzzy/substring/inferred matching, or update-in-place semantics;
 - publishing partial or failed transformations;
 - changing the 12-column contract;
-- unrelated export formats or cloud services.
+- unrelated export formats or cloud services;
+- UI wiring, browser/download behavior, or any change to `prisma_output.py`'s existing `write_prisma_output`
+  callers.
 
 **Acceptance criteria and focused tests:**
 
@@ -1074,6 +1102,124 @@ increment adds the UI trigger.
 - UI reports the real final state and artifact without leaking sensitive data;
 - focused tests, full regression tests, compilation, and whitespace validation pass;
 - documentation records the approved publication contract and exact executed validation results.
+
+**Implemented result.** New, Qt- and browser-independent module `prisma_publication.py`. It performs no
+parsing, filtering, normalization, or side-specific Market/Storage resolution of its own: it operates on
+an already-completed `processor.PrismaImportResult` (the same object `processor.import_prisma_export()`
+already produces and `prisma_output.write_prisma_output()` already threads through unchanged), reusing
+`prisma_output.transform_row()`/`OUTPUT_CSV_COLUMNS` for row formatting so there remains exactly one
+canonical serialization of the 12-column contract in the codebase. `prisma_output.py` itself is
+completely unchanged by this increment — `write_prisma_output()` remains available, unmodified, as an
+independent single-run writer for any existing caller, satisfying the backward-compatibility requirement
+with a zero-diff guarantee rather than a narrow integration change.
+
+`publish_cumulative_output(import_result, publication_directory)` is the single entry point. It validates
+the destination directory first (existing, readable, writable — reusing
+`download_directory.validate_download_directory` plus the same writability check
+`prisma_output.py` already applies, never touching the filesystem for an invalid destination), then reads
+the existing cumulative file at `<publication_directory>/Prisma_Output_Published.csv` if present: a
+missing file means "create from the current import"; a symbolic link at that path (never followed, read,
+or replaced), an unreadable, empty, undecodable, wrongly delimited, malformed-quoted, wrong-header, or
+wrong-field-count file, a file containing a blank data row, or one repeating the exact header among its
+data rows each returns a typed `INVALID_EXISTING_FILE` failure with the file left completely unchanged (no
+repair or reinterpretation is attempted). A field's own correctly quoted value may legitimately contain an
+embedded newline; parsing reads the decoded text through `io.StringIO(text, newline="")` with
+`csv.reader(..., strict=True)` (never `text.splitlines()`, which would incorrectly split such a field into
+two records) so the exact value round-trips and malformed quoting is rejected rather than silently
+tolerated. Each accepted row in `import_result.rows`
+is formatted via `transform_row()` into its exact 12-field tuple; a row already present among the existing
+rows, or already emitted earlier in the same import, is dropped (deduplication is exact full-row equality
+only — no Auction ID or other narrower key is consulted, since Auction ID is not one of the 12 output
+fields). Existing rows keep their original order; new unique rows are appended in their import order. If a
+valid existing file already covers every row in the current import (including the case where the import
+has zero accepted rows), the file is left byte-for-byte unchanged rather than rewritten. Otherwise the
+complete merged row set is staged into a temporary file in the same directory, flushed and `fsync`ed, and
+finalized with `os.replace()` — the same stage-then-replace pattern `prisma_output.py`'s own `_write_rows`
+already uses — so a failure at any point (staging, write, flush, fsync, or replace) never deletes or
+overwrites the previous valid cumulative file, only the failed attempt's own staging artifact is removed,
+and the caller always receives the complete already-computed `PrismaImportResult` regardless of outcome.
+
+`PrismaPublicationResult` (immutable, typed `PrismaPublicationOutcome`: `SUCCESS`,
+`INVALID_PUBLICATION_DIRECTORY`, `INVALID_EXISTING_FILE`, `WRITE_FAILED`) carries the published file path,
+the appended-row and total-row counts, and the full `PrismaImportResult` on every outcome;
+`describe_publication_failure()` provides stable, English, path-free messages matching the existing
+`describe_output_failure()`/`describe_validation_rejection()` pattern. No UI wiring was added: `app.py` and
+`PrismaFunction.spec` are unchanged, since no P.36.16 acceptance criterion in this increment requires a UI
+trigger and a later increment is expected to wire a caller's completed `PrismaImportResult` (from either
+`processor.import_prisma_export()` directly or `prisma_output.write_prisma_output(...).import_result`)
+into this new boundary.
+
+**Review fix (2026-08-04).** A review of the initial implementation found the existing-cumulative-file
+validation was weaker than the approved contract required: it parsed the decoded text via
+`text.splitlines()` (which would incorrectly split a correctly quoted field's own embedded newline into
+two separate records), used the default non-strict `csv.reader` (silently tolerating malformed quoting
+instead of rejecting it), silently skipped a blank data row rather than treating it as malformed, did not
+reject the exact 12-column header if it reappeared among the data rows, and never checked whether the
+target path was a symbolic link before reading through it (risking a read of, or an eventual `os.replace()`
+onto, an unintended external target). `_read_existing_rows()` now: rejects a symlink at the target path
+before any read is attempted; parses through `io.StringIO(text, newline="")` with `csv.reader(...,
+strict=True)`, translating `csv.Error` into the existing `INVALID_EXISTING_FILE` outcome; and explicitly
+rejects a blank data row and a data row equal to the exact header tuple, in addition to the existing
+wrong-field-count check. Every rejection path still leaves the existing file completely unread-from/
+unwritten-to; no write is ever attempted once `_read_existing_rows()` has raised.
+
+**Review fix (2026-08-04, second round).** A further review found `publish_cumulative_output()`'s
+`INVALID_PUBLICATION_DIRECTORY` return path (destination directory missing, not a directory, or not
+writable) dropped the already-supplied `PrismaImportResult` instead of returning it, unlike every other
+outcome (`INVALID_EXISTING_FILE`, `WRITE_FAILED`, `SUCCESS`), contradicting the documented contract that
+this evidence is retained on every outcome. The `except DownloadDirectoryError` branch now passes
+`import_result=import_result` unchanged, with no change to the outcome, message, directory-validation
+order, or filesystem behavior (directory validation still happens before any read/write is attempted).
+
+**Automated evidence (2026-08-04, `feature/p36-16-cumulative-output`, not yet merged).** New
+`tests/test_prisma_publication.py` (28 tests, 27 passed and 1 platform-conditional skip) covers: first
+publication creating the cumulative file from the current import; appending new unique rows to an existing
+valid file; a duplicate against existing rows not being appended; duplicates within one import being
+written once; a row differing in exactly one of the 12 fields remaining distinct; existing-row and
+new-row order both being preserved across repeated runs; exactly one header line surviving three repeated
+publish runs; an import with zero accepted rows (and one where every row already exists) leaving a
+byte-identical, unmodified existing file (verified by both content and mtime); an empty existing file, a
+wrong-delimiter existing file, a non-UTF-8 existing file, and a wrong-header existing file each failing
+with `INVALID_EXISTING_FILE` and the file provably byte-identical afterward; a correctly quoted field with
+an embedded newline round-tripping through publish/read without corruption, including proof that an exact
+repeat of that same multiline row is recognized as a duplicate (not falsely re-appended) and that a
+distinct-but-similar multiline value is still recognized as distinct; malformed quoting, a repeated header
+among data rows, and a blank data row in an existing file each failing with `INVALID_EXISTING_FILE` with
+the file provably byte-identical afterward; a target-path symlink pointing outside the publication
+directory being rejected with its external target left byte-identical and unreplaced (skipped only when
+the test platform/user genuinely cannot create a symlink — confirmed in this sandboxed Windows environment,
+which lacks the required privilege); a simulated staging-reservation failure (`tempfile.mkstemp`), a
+simulated `os.replace` failure, and a simulated mid-write failure each preserving the prior published
+file's exact content and leaving zero staging artifacts — the reservation-failure test now uses a
+mixed-outcome (one accepted, one filtered, one rejected) source and asserts `result.import_result` carries
+the exact `imported_count`/`filtered_count`/`rejected_count`, the accepted row's data, and the
+filtered/rejected issues' reason codes, not only the accepted-row count; a first-publication write failure
+leaving zero files in the destination directory (no partial cumulative file ever appears); a target
+directory listing after each publish containing only the one cumulative file (never a `.staging` leftover);
+a decoy file of the same name in a sibling directory remaining untouched, proving no read or write escapes
+the configured publication directory; a nonexistent, a file-shaped, and a non-writable destination
+directory each rejected without any filesystem write; a nonexistent destination directory with a
+mixed-outcome import proving `result.import_result` is the exact supplied object (identity, not just
+equality) with its full accepted/filtered/rejected evidence intact and that no filesystem write occurs; and
+stable non-empty messages for every `PrismaPublicationOutcome`. The complete pytest suite passed with
+**801 tests passed, 1 skipped** (up from 800 passed/1 skipped; +1 net: one existing test strengthened in
+place, one new test added). Project-wide `python -m compileall` (excluding `.venv`, `build`, `.git`,
+`__pycache__`, `dist`) exited `0`, with the same pre-existing, unrelated `.pytest_tmp` permission warning
+recorded in prior entries. `git diff --check` passed.
+
+**Not run.** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` and `python
+validate_package.py` were not rerun: `prisma_publication.py` is not imported by `app.py` or referenced by
+`PrismaFunction.spec`, so PyInstaller's static import discovery would not even bundle it and a rebuild
+would reproduce the identical distribution already validated after the P.36.15 merge — this increment
+does not affect packaging, matching the exact rationale `P.36.15` recorded for the same situation.
+`tests/test_packaging.py` (10 tests) is included in, and passed as part of, the 801-test full-suite run
+above. No real Windows or real-PRISMA manual validation was performed or is required by this increment's
+own acceptance criteria (it consumes only an already-computed `PrismaImportResult`; no browser, network,
+filesystem download, or PRISMA session is touched), but end-to-end manual validation of the eventual
+wired-in workflow remains appropriate once a later increment adds the UI trigger. The symlink-rejection
+test's platform-conditional skip is also outstanding for real coverage: it should be re-run on a Windows
+session with Developer Mode enabled (or elevated privileges) so the symlink path is actually exercised
+rather than skipped.
 
 ### Remaining support and finalization stages
 
@@ -1112,11 +1258,15 @@ increment adds the UI trigger.
   this specific fix (distinguishable dates, confirm both appear in the PRISMA controls, confirm the
   resulting request/download uses that range) remains outstanding, in addition to the still-outstanding
   full real-installed-Chrome production acceptance pass above.
-- P.36.15 is implemented, automated-tested, and reviewed on `feature/p36-15-output-writer` (see its dated
-  2026-08-04 entry above); final review found no remaining actionable code defects, but it is not yet merged.
-  It is not gated on the P.36.14 real-Windows validation item above, since it consumes only an
-  already-validated on-disk CSV and touches no browser/PRISMA session itself.
-- P.36.16 cannot start until “publication” is explicitly defined.
+- P.36.15 is implemented, automated-tested, reviewed, and merged to `main` via PR #62 (merge commit
+  `c84344f`; see its dated 2026-08-04 entry above); final review found no remaining actionable code
+  defects. It is not gated on the P.36.14 real-Windows validation item above, since it consumes only an
+  already-validated on-disk CSV and touches no browser/PRISMA session itself; manual real-Windows/real-PRISMA
+  validation of P.36.15 itself remains outstanding.
+- P.36.16's decision gate is resolved (2026-08-04, customer-approved "option 2": cumulative file, exact
+  full-12-field deduplication, atomic replace — see its dated entry above); it is implemented and
+  automated-tested on `feature/p36-16-cumulative-output`, not yet merged, and not yet manually validated on
+  real Windows/real PRISMA data.
 - `ROADMAP.md`, `workflow_p.md`, and `CLAUDE.md` must remain synchronized on the active 12-column contract and P.36 dependency order.
 - Completed P.36.4 remains useful as fallback, but treating it as the primary flow would contradict the current specification.
 - The superseded monitoring subsystem remains present until P.36.10; new work must not accidentally reconnect it as the product workflow.
@@ -1133,9 +1283,13 @@ increment adds the UI trigger.
    fallback (2026-08-03) means the real-Chrome download-event delivery gap no longer blocks progress on its
    own terms; the remaining step is a full real-installed-Chrome production-mode acceptance pass on a normal
    interactive Windows desktop (outside this sandboxed development environment).
-5. P.36.15 is implemented, automated-tested, and reviewed on `feature/p36-15-output-writer` (see its dated
-   2026-08-04 entry above), with final review finding no remaining actionable code defects; merge it before
-   starting P.36.16 (still blocked by its own decision gate) or wiring a UI trigger for it.
+5. P.36.15 is implemented, automated-tested, reviewed, and merged to `main` via PR #62 (merge commit
+   `c84344f`; see its dated 2026-08-04 entry above), with final review finding no remaining actionable code
+   defects; manual real-Windows/real-PRISMA validation remains outstanding.
+6. P.36.16's decision gate is resolved and it is implemented and automated-tested on
+   `feature/p36-16-cumulative-output` (see its dated 2026-08-04 entry above); merge it, then obtain manual
+   real-Windows/real-PRISMA validation before wiring a UI trigger for the complete P.36.14→P.36.15→P.36.16
+   pipeline.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 
