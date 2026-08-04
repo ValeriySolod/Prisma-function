@@ -3,11 +3,18 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from browser import PRISMA_AUCTIONS_URL as PRISMA_OFFICIAL_URL
 from browser import DefaultBrowserDetector, _ensure_subprocess_output_streams
+from date_range_selection import DateRange
+from prisma_download import (
+    PrismaDownloadOrchestrator,
+    describe_download_failure,
+)
 from runtime_logging import LOGGER_NAME, safe_log
 
 __all__ = [
@@ -32,21 +39,29 @@ class PrismaLifecycleEvent:
     success: bool
     error: str | None = None
     kind: str = "open"
+    csv_path: Path | None = None
 
 
 class PrismaLifecycleController:
-    """Owns exactly one manual, unautomated PRISMA browser session.
+    """Owns exactly one application-managed PRISMA browser session.
 
-    Opening navigates only to the approved official PRISMA URL. No login,
+    Opening always navigates to the approved official PRISMA URL first. No
+    login is ever automated. When a date range and download directory are
+    supplied (P.36.14, corrected 2026-08-02), opening additionally fills
+    PRISMA's own date filter, applies it, and activates PRISMA's own CSV
+    download control itself — the user never presses anything on the PRISMA
+    website; pressing the single in-application action is the entire user
+    interaction. Without those arguments, behavior is unchanged: no
     navigation, filtering, date selection, download, monitoring, or polling
-    is automated. Closing releases only browser resources owned by this
-    controller; it never targets unrelated browser windows, profiles,
-    sessions, or processes.
+    beyond the approved URL and closure detection is automated. Closing
+    releases only browser resources owned by this controller; it never
+    targets unrelated browser windows, profiles, sessions, or processes.
     """
 
-    def __init__(self, detector=None, logger=None) -> None:
+    def __init__(self, detector=None, logger=None, download_orchestrator=None) -> None:
         self._detector = detector or DefaultBrowserDetector()
         self._logger = logger or logging.getLogger(LOGGER_NAME)
+        self._download_orchestrator = download_orchestrator or PrismaDownloadOrchestrator()
         self._lock = threading.RLock()
         self._state = PrismaLifecycleState.IDLE
         self._generation = 0
@@ -71,7 +86,12 @@ class PrismaLifecycleController:
     def _is_current(self, generation: int) -> bool:
         return generation == self._generation
 
-    def open(self) -> int:
+    def open(
+        self,
+        *,
+        date_range: DateRange | None = None,
+        download_directory: Path | None = None,
+    ) -> int:
         """Open the approved PRISMA URL in an application-owned browser.
 
         Repeating this call while a session is already opening, open, still
@@ -79,6 +99,18 @@ class PrismaLifecycleController:
         a deterministic no-op: it returns the existing generation and never
         starts a second browser session. A session must reach IDLE (cleanup
         fully complete) before a new one can start.
+
+        When both ``date_range`` and ``download_directory`` are supplied
+        (P.36.14, corrected 2026-08-02), after the approved PRISMA URL loads
+        the session fills the date filter, applies it, and activates PRISMA's
+        own CSV download control itself, then waits (bounded, without
+        blocking manual-closure detection) for exactly one resulting CSV
+        download, reported as a separate ``kind="download"`` event.
+        Precondition validation (missing/invalid date range or directory) is
+        the caller's responsibility (`prisma_download.validate_download_configuration`)
+        so it can be reported before any browser is launched. Omitting either
+        argument preserves the pre-P.36.14 behavior: open the browser with no
+        managed download.
         """
         with self._lock:
             if self._state in (
@@ -100,7 +132,8 @@ class PrismaLifecycleController:
             self._state = PrismaLifecycleState.OPENING
         self._log(logging.INFO, "Open Prisma requested: generation=%s", generation)
         thread = threading.Thread(
-            target=self._run, args=(generation, cancel_event),
+            target=self._run,
+            args=(generation, cancel_event, date_range, download_directory),
             daemon=True, name="prisma-lifecycle",
         )
         self._thread = thread
@@ -168,7 +201,13 @@ class PrismaLifecycleController:
         thread.join(timeout=timeout)
         return not thread.is_alive()
 
-    def _run(self, generation: int, cancel_event: threading.Event) -> None:
+    def _run(
+        self,
+        generation: int,
+        cancel_event: threading.Event,
+        date_range: DateRange | None = None,
+        download_directory: Path | None = None,
+    ) -> None:
         playwright = None
         browser = None
         page = None
@@ -178,6 +217,10 @@ class PrismaLifecycleController:
         launch_error: str | None = None
         announced_success = False
         cleanup_reason = "user-requested shutdown"
+        download_waiter = None
+        download_deadline: float | None = None
+        download_finalized = False
+        managed_download = date_range is not None and download_directory is not None
 
         def mark_manual_closure(source: str) -> None:
             nonlocal cleanup_reason
@@ -208,6 +251,23 @@ class PrismaLifecycleController:
             if target_id is not None and target_id == owned_target_id:
                 mark_manual_closure("owned-target-destroyed-cdp")
 
+        def emit_download_result(result) -> None:
+            nonlocal download_finalized
+            download_finalized = True
+            if download_waiter is not None:
+                download_waiter.detach()
+            self._log(
+                logging.INFO if result.succeeded else logging.WARNING,
+                "Managed PRISMA download resolved: generation=%s outcome=%s detail=%s",
+                generation, result.outcome.value, result.error,
+            )
+            self._events.put(PrismaLifecycleEvent(
+                generation, result.succeeded,
+                None if result.succeeded else describe_download_failure(result.outcome),
+                kind="download",
+                csv_path=result.csv_path,
+            ))
+
         try:
             _ensure_subprocess_output_streams()
             from playwright.sync_api import sync_playwright
@@ -222,10 +282,25 @@ class PrismaLifecycleController:
             if cancel_event.is_set():
                 return
 
-            browser = playwright.chromium.launch(
-                executable_path=str(executable), headless=False,
-                args=["--start-maximized"],
-            )
+            launch_kwargs = {
+                "executable_path": str(executable), "headless": False,
+                "args": ["--start-maximized"],
+            }
+            if managed_download:
+                # Real-Windows defect (2026-08-03): without this, Chrome/CDP's
+                # download interception writes the raw artifact into a
+                # Playwright-managed temp location under a generated name,
+                # never into the folder Prisma Function configured — so the
+                # configured directory stayed empty even though Chrome itself
+                # showed the download as completed. Setting `downloads_path`
+                # forces both the primary Playwright "download" event's
+                # backing file and the raw browser-level artifact (observed by
+                # `PrismaDownloadFilesystemWaiter` when the event itself is not
+                # reliably delivered, see prisma_download.py) into the exact
+                # directory the user selected — never Chrome's own default
+                # Downloads folder, never an untracked temp directory.
+                launch_kwargs["downloads_path"] = str(download_directory)
+            browser = playwright.chromium.launch(**launch_kwargs)
             self._log(logging.INFO, "Prisma browser created: generation=%s", generation)
             try:
                 browser.on("disconnected", on_browser_disconnected)
@@ -300,6 +375,21 @@ class PrismaLifecycleController:
                 generation, PRISMA_OFFICIAL_URL,
             )
 
+            if managed_download:
+                if cancel_event.is_set():
+                    return
+                download_waiter = self._download_orchestrator.configure(
+                    page, date_range, download_directory,
+                )
+                download_deadline = (
+                    time.monotonic() + self._download_orchestrator.timeout_seconds
+                )
+                self._log(
+                    logging.INFO,
+                    "Open Prisma: managed download configured: generation=%s",
+                    generation,
+                )
+
             with self._lock:
                 if (
                     self._is_current(generation)
@@ -314,6 +404,13 @@ class PrismaLifecycleController:
                 return
 
             while not cancel_event.wait(0.1):
+                if managed_download and not download_finalized:
+                    result = self._download_orchestrator.await_and_finalize(
+                        download_waiter, date_range, download_directory,
+                        cancel_event, deadline=download_deadline,
+                    )
+                    if result is not None:
+                        emit_download_result(result)
                 try:
                     page_closed = page.is_closed()
                 except Exception:
@@ -335,6 +432,14 @@ class PrismaLifecycleController:
                 exc_info=True,
             )
         finally:
+            # Catch-all listener cleanup: emit_download_result() above already
+            # detaches on a resolved outcome (success/timeout/typed failure);
+            # this covers every other exit path (cancellation or browser
+            # close before the download ever resolved, and configure()/
+            # navigation errors). detach() is idempotent, so calling it here
+            # unconditionally is always safe.
+            if download_waiter is not None:
+                download_waiter.detach()
             cleanup_failed = False
             if browser is not None:
                 try:

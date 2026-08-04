@@ -43,7 +43,8 @@ from date_range_selection import (
 from download_directory import (
     DownloadDirectoryError,
     DownloadDirectorySelection,
-    default_download_directory,
+    default_managed_download_directory,
+    ensure_directory_exists,
 )
 from manual_csv_selection import ManualCsvSelection, describe_rejection
 from monitoring import MonitoringEngine, MonitoringResult
@@ -56,8 +57,13 @@ from prisma_page import (
     PrismaPageStructureError,
     PrismaPageUnavailableError,
 )
+from prisma_download import (
+    PrismaDownloadValidationOutcome,
+    describe_validation_rejection,
+    validate_download_configuration,
+)
 from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
-from prisma_lifecycle import PrismaLifecycleController, PrismaLifecycleState
+from prisma_lifecycle import PrismaLifecycleController, PrismaLifecycleEvent, PrismaLifecycleState
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
@@ -77,6 +83,11 @@ from version import APP_DISPLAY_NAME, __version__
 
 DEFAULT_MONITORING_INTERVAL_SECONDS = 30.0
 PRISMA_SHUTDOWN_GRACE_SECONDS = 5.0
+
+
+def _current_local_date() -> date:
+    """Return today's local calendar date, isolated so tests can inject a fixed value."""
+    return date.today()
 
 
 @dataclass(frozen=True)
@@ -217,7 +228,7 @@ class PrismaMonitorApp(QMainWindow):
         self._side_group(side, "PRISMA", self.open_prisma_button, self.close_prisma_button)
         self.choose_download_directory_button = self._button(
             "Choose Download Folder", self._select_download_directory,
-            tooltip="Choose the folder where the manually downloaded PRISMA CSV is expected",
+            tooltip="Choose the folder where the downloaded PRISMA CSV is saved",
         )
         self.download_directory_label = QLabel(str(self._download_directory.current))
         self.download_directory_label.setObjectName("filename")
@@ -237,17 +248,19 @@ class PrismaMonitorApp(QMainWindow):
         self._side_group(
             side, "PRISMA EXPORT CSV", self.choose_manual_csv_button, self.manual_csv_label
         )
+        today = _current_local_date()
+        initial_date_range_qdate = QDate(today.year, today.month, today.day)
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.start_date_edit.setSpecialValueText("Not set")
-        self.start_date_edit.setDate(self.start_date_edit.minimumDate())
+        self.start_date_edit.setDate(initial_date_range_qdate)
         self.start_date_edit.setAccessibleName("Start date")
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.end_date_edit.setSpecialValueText("Not set")
-        self.end_date_edit.setDate(self.end_date_edit.minimumDate())
+        self.end_date_edit.setDate(initial_date_range_qdate)
         self.end_date_edit.setAccessibleName("End date")
         self.validate_date_range_button = self._button(
             "Validate Date Range", self._validate_date_range,
@@ -629,10 +642,22 @@ class PrismaMonitorApp(QMainWindow):
             or self._prisma_close_error
         ):
             return
+        date_range = self._date_range_selection.current
+        download_directory = self._download_directory.current
+        validation_outcome = validate_download_configuration(date_range, download_directory)
+        if validation_outcome is not PrismaDownloadValidationOutcome.ACCEPTED:
+            safe_log(
+                self._logger, logging.WARNING,
+                "Open Prisma rejected: %s", validation_outcome.value,
+            )
+            self._show_error("Open Prisma", describe_validation_rejection(validation_outcome))
+            return
         try:
             self.status.setText("Opening PRISMA…")
             self._set_badge(self.prisma_badge, "Opening PRISMA…", "working")
-            self._active_prisma_generation = self.prisma_lifecycle.open()
+            self._active_prisma_generation = self.prisma_lifecycle.open(
+                date_range=date_range, download_directory=download_directory,
+            )
             self._prisma_timer.start()
             self._update_controls()
         except Exception as exc:
@@ -659,6 +684,8 @@ class PrismaMonitorApp(QMainWindow):
                 else:
                     self._prisma_open_failed(event.error or "Unknown error")
                     terminal_reached = True
+            elif event.kind == "download":
+                self._handle_download_event(event)
             elif event.kind == "close":
                 if event.success:
                     self._active_prisma_generation = None
@@ -684,6 +711,32 @@ class PrismaMonitorApp(QMainWindow):
                 terminal_reached = True
         if controls_dirty:
             self._update_controls()
+
+    def _handle_download_event(self, event: PrismaLifecycleEvent) -> None:
+        if not event.success:
+            safe_log(
+                self._logger, logging.WARNING,
+                "Managed PRISMA download failed: %s", event.error,
+            )
+            self.status.setText(event.error or "The PRISMA CSV download failed.")
+            self._show_error("PRISMA Download", event.error or "The PRISMA CSV download failed.")
+            self._add_activity("PRISMA CSV download failed")
+            return
+        result = self._manual_csv_selection.select(event.csv_path)
+        if not result.accepted:
+            safe_log(
+                self._logger, logging.WARNING,
+                "Downloaded PRISMA CSV rejected: %s", result.outcome.value,
+            )
+            self.status.setText(
+                "The downloaded PRISMA CSV did not match the expected export format."
+            )
+            self._show_error("PRISMA Download", describe_rejection(result.outcome))
+            self._add_activity("PRISMA CSV download validation failed")
+            return
+        self.manual_csv_label.setText(result.path.name)
+        self.status.setText(f"PRISMA CSV downloaded: {result.path.name}")
+        self._add_activity(f"PRISMA CSV downloaded: {result.path.name}")
 
     def _prisma_open_failed(self, exc: Exception | str) -> None:
         if self._is_closing:
@@ -1086,7 +1139,7 @@ def main() -> int:
                 "Check LOCALAPPDATA and folder permissions, then retry."
             )
         migrate_legacy_runtime_data(paths=paths, logger=logger)
-        download_directory = default_download_directory()
+        download_directory = ensure_directory_exists(default_managed_download_directory())
     except Exception as exc:
         initialization_error = str(exc)
         if any(getattr(handler, "baseFilename", None) for handler in logging.getLogger(LOGGER_NAME).handlers):

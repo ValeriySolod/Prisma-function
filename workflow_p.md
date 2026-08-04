@@ -2169,7 +2169,980 @@ No real PRISMA session, network activity, or manual interactive Windows validati
 of the running application) is claimed by this smoke check — it proves process-level startup,
 UI-object initialization, and clean shutdown only.
 
-Not yet done: `P.36.14` (application-managed download, blocked by its decision gate), `P.36.15`
-(transformation), `P.36.16` (publication, blocked by its decision gate), `P.36.8` (mapping display),
-`P.36.10` (obsolete-code removal), `P.36.11` (packaging/installer validation), and `P.36.12` (final
-regression/acceptance).
+Not yet done at the time P.36.13 merged: `P.36.14` (application-managed download, then blocked by its
+decision gate), `P.36.15` (transformation), `P.36.16` (publication, blocked by its decision gate),
+`P.36.8` (mapping display), `P.36.10` (obsolete-code removal), `P.36.11` (packaging/installer
+validation), and `P.36.12` (final regression/acceptance). See the section immediately below for
+`P.36.14`'s resolved decision gate and implementation.
+
+#### P.36.14. User-initiated, application-managed PRISMA CSV download — Implemented and automated-tested, pending fully-automated live validation (2026-08-02)
+
+**Decision gate resolution (2026-08-02, customer-approved).** P.36.14 was blocked on four explicit
+questions; the customer resolved all four before implementation began:
+
+1. **File naming:** keep PRISMA/the browser's own suggested filename, but insert the selected filter
+   date range (ISO `YYYY-MM-DD`) before the extension: `<original-stem>_<start>_<end>.csv`, e.g.
+   `Auction_overview_2026-08-01_2026-08-31.csv`.
+2. **Collision behavior:** never overwrite; on a name collision, append an incrementing numeric suffix
+   before the extension (`..._2.csv`, `..._3.csv`, ...), and the name reservation itself must be
+   race-safe (not a check-then-write).
+3. **Download directory:** an installer-or-first-run application-managed default at
+   `<User Downloads>\PrismaFunction`, auto-created by the application if the installer does not reliably
+   create it; the user may still override it with any other existing writable directory via the
+   unchanged P.36.3 folder picker; only this one managed default is ever auto-created.
+4. **Completion detection / browser mechanism** *(corrected 2026-08-02 — see below)*: reuse the one
+   Playwright browser/page P.36.2 already owns (no second browser or context); after the approved PRISMA
+   URL, fill PRISMA's own date filter, apply it, and detect completion purely from Playwright's
+   `"download"` event, with no filesystem polling loop. The original text of this item said the user
+   always presses PRISMA's own download control and PrismaFunction never clicks it; that was an incorrect
+   assumption about the authoritative workflow and was corrected by the customer — PrismaFunction now
+   activates the CSV control itself. See "Decision-gate correction" below for the full record.
+
+**Implementation.** This was built on `feature/p36-14-managed-prisma-download` as three layers:
+
+- `prisma_download.py` (new) is a Qt-independent, Playwright-session-independent module — the "dedicated
+  download orchestration component" the task required, kept separate from `prisma_lifecycle.py` so the
+  reusable business logic (precondition validation, naming/collision, and the two PRISMA-page automation
+  steps) is not entangled with UI code or with `PrismaLifecycleController`'s thread/generation
+  bookkeeping. It exposes: `validate_download_configuration(date_range, download_directory)` (typed
+  `PrismaDownloadValidationOutcome`: `ACCEPTED`, `MISSING_DATE_RANGE`, `MISSING_DOWNLOAD_DIRECTORY`,
+  `INVALID_DOWNLOAD_DIRECTORY`); `build_dated_filename()`/`reserve_unique_download_path()` (the approved
+  naming/collision rule, the latter using `os.O_CREAT | os.O_EXCL` exclusive creation so the reservation
+  cannot lose a race, returning a self-created placeholder the caller then overwrites via
+  `Download.save_as()`); and `PrismaDownloadOrchestrator`, whose `configure(page, date_range)` performs no
+  navigation (the already-open PRISMA Auctions page is the reporting page), opens the real Active Filter
+  panel, fills and verifies the real date-range controls, applies the filter, then registers the
+  `"download"` listener and activates the real CSV control — see the date-filter and decision-gate-correction
+  records below for the exact live-verified DOM contract and the reasoning for this ordering — while
+  `await_and_finalize(waiter, date_range, download_directory, cancel_event, deadline=...)` is a single
+  non-blocking poll step (`None` = not resolved yet) rather than a blocking wait, specifically so the
+  caller can interleave it with other polling instead of dedicating a thread to it. Typed
+  `PrismaDownloadOutcome`/`PrismaDownloadResult` cover only the post-`configure()` phase (`SUCCESS`,
+  `DOWNLOAD_TIMEOUT`, `DOWNLOAD_CANCELLED`, `DOWNLOAD_INTERRUPTED`, `NOT_CSV`, `SAVE_FAILED`), each with a
+  stable, path-free English message via `describe_download_failure()`; pre-configuration failures raise
+  specific exceptions instead (`PrismaAuthenticationRequiredError`, `PrismaInvalidSessionError`,
+  `PrismaDateFilterPanelError`, `PrismaDateFilterControlsNotFoundError`, `PrismaDateValueRejectedError`,
+  `PrismaDownloadListenerError`, `PrismaDownloadControlError`).
+- `prisma_lifecycle.py`'s `PrismaLifecycleController` (P.36.2) gained optional `open(*, date_range=None,
+  download_directory=None)` parameters; omitting both is byte-for-byte the pre-P.36.14 behavior (proven
+  by the unchanged `FakePage.__getattr__` guard in every pre-existing test). When both are supplied, the
+  worker thread calls `PrismaDownloadOrchestrator.configure()` right after the approved PRISMA URL loads
+  (a `configure()` failure is caught by the *same* `except Exception` that already handles a navigation
+  failure, so "Open Prisma must fail ... if download configuration fails" reuses the existing typed
+  open-failure event rather than inventing a new failure channel), then the existing `kind="open"` success
+  event is announced as before (browser now under user control), and `await_and_finalize()` is called once
+  per tick from *inside* the controller's existing `cancel_event.wait(0.1)` idle loop — the same loop that
+  already polls `page.is_closed()`/`browser.is_connected()` for manual closure. This was the key design
+  decision: a second blocking wait (e.g. Playwright's `page.wait_for_event("download", timeout=...)`)
+  would have starved Close-Prisma responsiveness and manual-closure detection for the whole download
+  timeout window; folding the poll into the existing loop keeps both working concurrently with no new
+  thread and no filesystem polling. Resolution publishes a new `kind="download"` `PrismaLifecycleEvent`
+  (added an optional `csv_path: Path | None` field, defaulting to `None` so every existing event
+  construction/comparison in `tests/test_prisma_lifecycle.py` is unaffected); the PRISMA session itself
+  stays open regardless of the download's outcome.
+- `app.py`: `_open_prisma_session()` now calls `validate_download_configuration()` before touching the
+  browser at all, showing a `QMessageBox` titled "Open Prisma" and returning without calling
+  `prisma_lifecycle.open()` if the date range or directory is missing/invalid (an intentional, in-scope
+  extension of Open Prisma's own precondition contract — four pre-existing P.36.2 tests were updated to
+  first accept a date range, since they exercise the "open succeeds" path and `prisma_lifecycle.open()`'s
+  call signature genuinely changed). `_poll_prisma_lifecycle()` routes `kind="download"` events to a new
+  `_handle_download_event()`, which on success reuses the existing P.36.4 `ManualCsvSelection` boundary
+  (`self._manual_csv_selection.select(csv_path)`) — the downloaded file passes through the exact same
+  official-export contract check as a manually selected CSV before the existing "PRISMA EXPORT CSV" label,
+  status, and activity log are updated; this reuse is also how "expose the downloaded CSV path to the next
+  processing stage" is satisfied, since `self._manual_csv_selection.current` is the boundary P.36.15 will
+  read from. A typed download failure or a downloaded file that fails the P.36.4 contract shows a stable
+  English error via the existing `_show_error()` helper and never touches the CSV selection. No new
+  permanent UI element was added; the "PRISMA", "DOWNLOAD FOLDER", "DATE RANGE", and "PRISMA EXPORT CSV"
+  sidebar groups are reused exactly as they exist today.
+- `download_directory.py` gained the approved application-managed default without touching the existing
+  P.36.3 Documents default: `default_downloads_directory()` mirrors `default_download_directory()`'s exact
+  tiered resolution (Shell Folders registry, then `%USERPROFILE%`, then `Path.home()`), substituting the
+  Downloads Known Folder GUID (`{374DE290-123F-4565-9164-39C4925E467B}`) for the Documents `"Personal"`
+  value; `default_managed_download_directory()` appends `PrismaFunction`; `ensure_directory_exists()`
+  idempotently creates only that one path and re-validates it. `app.py`'s `main()` now initializes
+  `DownloadDirectorySelection` from `ensure_directory_exists(default_managed_download_directory())`
+  instead of the former Documents default; the user can still change it through the unchanged "Choose
+  Download Folder" control. `default_download_directory()` itself, and every existing P.36.3 test, are
+  unmodified.
+
+**Regression coverage.** New `tests/test_prisma_download.py` (29 tests): configuration validation
+(accepted; each missing/invalid precondition, with missing-date-range taking precedence); the
+naming/collision rule (exact name when free, deterministic `_2`/`_3` increment, never overwriting);
+`configure()` (navigation, ISO date fill, listener registration, and each of its three failure modes);
+and `await_and_finalize()` (not-yet-resolved; timeout; cancellation before any download; a successful save
+with the dated name; a collision-safe save; non-CSV rejection without saving; cancelled/interrupted
+classification from `Download.failure()`; a `save_as()` failure; and a failure reported only after
+`save_as()` succeeds). `tests/test_prisma_lifecycle.py` gained 9 integration tests (46 total, up from 37):
+the unchanged no-managed-download path; reporting-page navigation and ISO date fill; a `configure()`
+failure reported through the existing open-failure event; a successful download event with the saved
+path; typed not-CSV/cancelled/interrupted failure events; a timeout event; and proof that the bounded
+download wait does not block manual-closure detection (a simulated `"disconnected"` event during the wait
+is still detected). `tests/test_download_directory.py` gained 9 tests (27 total) for the Downloads
+resolution tiers, the managed-default subdirectory, and `ensure_directory_exists()`. `tests/test_app.py`
+gained 6 tests (87 total): the Open-Prisma validation gate (missing date range; a download directory that
+became invalid after selection) and the `"download"` event UI wiring (success; typed failure; a
+downloaded file failing the P.36.4 contract; routing through `_poll_prisma_lifecycle()` without disturbing
+an already-open session).
+
+**Verified evidence (2026-08-02, `feature/p36-14-managed-prisma-download`, not yet merged).** The complete
+pytest suite passed with **645 tests (up from 592, the exact +53 expected from this increment)**.
+Project-wide `python -m compileall` (the file list in `BUILDING.md` plus `prisma_download.py`) exited `0`.
+`git diff --check` passed. Every test uses fakes/mocks for Playwright and `tmp_path` for filesystem
+checks; no real browser, real PRISMA session, or packaging validation was exercised by this increment's
+automated evidence.
+
+**Real-site validation attempt and correction (2026-08-02).** A first real-PRISMA validation was run: the
+packaged application was rebuilt, and the actual shipped `PrismaLifecycleController`/
+`PrismaDownloadOrchestrator` code (not a reimplementation) was driven against the live, public
+`https://app.prisma-capacity.eu` site using this machine's real default browser and real
+`Downloads\PrismaFunction` directory. `Open Prisma` reached the real PRISMA auctions page correctly — the
+same page P.23.1–P.23.3 already validated — proving the base lifecycle/browser reuse is unaffected. The
+P.36.14-added second navigation, however, used a guessed literal
+(`https://app.prisma-capacity.eu/reporting/reports/short-and-long-term-auctions`) that had never been
+approved or confirmed; live evidence (a body-text dump of the resulting page) showed it resolved to
+PRISMA's own generic navigation shell with no "From date"/"To date" fields, so `Locator.fill()` correctly
+timed out after 30 seconds and the whole `Open Prisma` attempt failed as a typed
+`DOWNLOAD_CONFIGURATION_FAILED` open failure — exactly the failure path this increment's validation
+requirements describe, and it behaved correctly end-to-end for that failure. This proved the guessed URL
+itself, not the failure-handling design, was the defect.
+
+The customer then provided the authoritative correction: **the approved reporting page for
+short-and-long-term auctions is the same page already opened by `PrismaLifecycleController` at the very
+start of every session** — `browser.PRISMA_AUCTIONS_URL`
+(`https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions`) — there was never a
+separate "reporting" page to navigate to. The fix: `prisma_download.py` no longer defines its own literal;
+it imports `PRISMA_AUCTIONS_URL` from `browser.py` and sets `DEFAULT_REPORTING_URL = PRISMA_AUCTIONS_URL`,
+so the codebase has exactly one canonical URL constant and both the initial lifecycle navigation and the
+managed-download reporting-page navigation always target it (verified by
+`test_default_reporting_url_is_the_same_object_as_the_canonical_browser_constant`, which asserts object
+identity, not just equality). A new regression test
+(`test_no_stale_reporting_url_literal_remains_in_production_code`) scans every repository-root production
+`.py` file for the stale literal so it cannot silently reappear. `tests/test_prisma_lifecycle.py`'s
+managed-download navigation test was strengthened to assert both `goto()` calls use the exact approved URL
+string, not only that two (previously independently-defined) constants equal each other. `prisma_page.py`'s
+unrelated `PUBLIC_PATH` session-validation constant was left untouched — it is a different, pre-existing,
+already-correct P.23 constant for a different purpose, not a duplicate introduced by this fix.
+
+Automated evidence for this correction: the complete pytest suite passed with **649 tests (up from 645,
++4 exactly)** — `test_default_reporting_url_is_the_approved_auctions_url`,
+`test_default_reporting_url_is_the_same_object_as_the_canonical_browser_constant`,
+`test_orchestrator_defaults_to_the_canonical_reporting_url`, and
+`test_no_stale_reporting_url_literal_remains_in_production_code`. `python -m compileall` exited `0`.
+`git diff --check` passed. The package was rebuilt with `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` and revalidated with `python validate_package.py` (see the packaging note recorded
+alongside this correction for the exact result).
+
+**URL fix re-verified live (2026-08-02, same session).** The package was rebuilt
+(`PyInstaller --clean --noconfirm` + `validate_package.py`, both passing) and the live attempt was rerun
+with only the fix applied. Confirmed: the managed-download navigation now lands exactly on
+`https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` with page title
+`"PRISMA"` — a real page, not a 404/error page. The specific reported defect ("the application opens a
+PRISMA 404 page") is fixed and verified against the live site.
+
+That rerun also confirmed a **separate, already-known issue was not fixed by the URL correction**: the
+date-filter fill step failed (`Locator.fill: Timeout 30000ms exceeded` on
+`get_by_label(/from\s*date/i)`), so `Open Prisma` still failed overall as a typed
+`DOWNLOAD_CONFIGURATION_FAILED` open failure. `page.inner_text("body")` on the real page showed PRISMA's
+left-navigation shell and a banner reading "Use the new PRISMA Platform design - clearer workflow, better
+experience" — the live site was promoting a redesigned UI. This issue was fixed next, as recorded below.
+
+**Date-filter contract fix (2026-08-02, live-verified).** Live DOM inspection (screenshots plus a
+JS-injected element inventory capturing only non-sensitive structural attributes — no credentials,
+cookies, tokens, or account data) found the real contract: a collapsed "Active Filter:" panel toggle
+(`role=button`, name matching `/^Active\s+Filter:/i` — the same collapsed-filter-panel pattern
+`PrismaAuctionFilter` in `browser.py` already uses for the unrelated Marketed Capacity field on this same
+page); two masked date-time inputs reached via `data-testid="startOfAuctionFrom"`/`"startOfAuctionTo"`
+(format `DD.MM.YYYY HH:mm`, widened to a full-day window — `00:00`/`23:59`); and a "Filter" apply button
+(`role=button`, exact name `Filter`). A live fill/read-back experiment found a masked-input quirk: filling
+the "from" field (pre-populated with PRISMA's own default) without first clearing it only updates the date
+segment, leaving the time segment stuck at its placeholder, which fails verification; clearing first
+(`Control+A` then `Delete`) before every fill fixed this for both fields regardless of starting state.
+`configure()` was rewritten around this real contract with no second navigation and specific typed
+exceptions per failure mode (`PrismaDateFilterPanelError`, `PrismaDateFilterControlsNotFoundError`,
+`PrismaDateValueRejectedError`) instead of a raw Playwright timeout. Live re-validation confirmed `Open
+Prisma` fills and verifies both dates and applies the filter successfully against the real site.
+
+**Decision-gate correction: PrismaFunction activates the download, not the user (2026-08-02, customer
+correction).** Two live-acceptance attempts under the original "user presses PRISMA's own download
+control" design reached a successful `Open Prisma` (dates filled, filter applied) but then timed out
+waiting for a download that never arrived: the first because the diagnostic harness had launched the
+browser under a sandboxed execution context that isolates GUI windows from the visible interactive
+desktop (rerunning with sandboxing explicitly disabled fixed window visibility), and on the second attempt
+it became clear the manual-press premise itself was wrong — pressing a control on the PRISMA website was
+never the intended workflow. The customer corrected the authoritative workflow: the user selects dates and
+a download directory in PrismaFunction, presses the single existing "Open Prisma" action, and
+PrismaFunction does everything else, including activating PRISMA's own CSV download control, with no
+further user interaction on the PRISMA website. The real control had already been captured as DOM evidence
+during the date-filter investigation: a plain `<button type="button">CSV</button>` (present both before and
+after the Active Filter panel opens, alongside an unrelated "PDF" button of the same shape) with no test id
+or ARIA attributes, so its accessible name — computed natively from its own visible text — is the most
+stable available locator (`get_by_role("button", name="CSV", exact=True)`; priority 2, since no test id
+exists for it). `configure()` now, after applying the date filter: waits (bounded, best-effort, non-fatal)
+for PRISMA's own asynchronous filtered-results refresh via `wait_for_load_state("networkidle")`; locates
+the CSV control; registers the `"download"` listener; and only then activates the control — the listener
+is always registered strictly before the click. A new typed `PrismaDownloadControlError` ("could not be
+found" / "could not be activated") replaces what would otherwise be a generic timeout. The stale
+`DOWNLOAD_TIMEOUT` message ("Press the PRISMA download button, then try again.") was rewritten, since the
+user no longer presses anything on the PRISMA website. `PrismaLifecycleController` required no functional
+change — the activation is fully encapsulated inside `configure()` — only its docstrings were updated.
+`app.py`'s existing "Open Prisma" action is reused unchanged as the single CSV-download action (no new
+permanent UI); only the "Choose Download Folder" tooltip was corrected from "the manually downloaded
+PRISMA CSV" to "the downloaded PRISMA CSV is saved".
+
+`tests/test_prisma_download.py` gained 6 tests (exact-accessible-name activation; registration-before-activation
+ordering; control-not-found and control-activation-failure typed errors; tolerance of a slow/unsupported
+`networkidle` wait; the `DOWNLOAD_TIMEOUT` message no longer asking the user to press anything).
+`tests/test_prisma_lifecycle.py` gained 2 integration tests for the same control-not-found/activation-failure
+paths reported as typed open failures, and its existing managed-download test now also asserts the CSV
+control was clicked exactly once. The complete pytest suite passed with **668 tests**. Project-wide
+`python -m compileall` and `git diff --check` both passed. The package was rebuilt
+(`PyInstaller --clean --noconfirm`) and `python validate_package.py` passed against the fresh distribution.
+
+**Not yet done / outstanding before ✅ Completed (superseded by the 2026-08-02 diagnostic and fix round
+below):** a full live pass of the corrected, fully-automated flow — including PrismaFunction itself
+activating the CSV control and an actual CSV file being downloaded, named, and propagated to
+`ManualCsvSelection` — has not yet been recorded. Automated tests and package validation pass, but per the
+customer's explicit instruction this increment stays 🟡 until that live download succeeds with zero manual
+browser interaction. Also not yet done: review, merge to `main`, feature-branch deletion, and `P.36.15`
+(transformation), which must not begin before this increment's validation and merge.
+
+### P.36.14 — real-site diagnostic round and two narrowly scoped fixes (2026-08-02)
+
+**Diagnostic runs supplied by the customer, no code changed during diagnosis.** Two independent live
+attempts against the shipped executable were reported before this fix round started:
+
+- **Run A:** the CSV control click succeeded, but no page-scoped `"download"` event was ever received;
+  visual observation indicated the export actually opens in a new browser tab.
+- **Run B:** the browser opened, the correct PRISMA page loaded, date filters were populated and applied,
+  and the CSV control was visible/enabled/stable — but the click failed because PRISMA's fixed
+  cookie-consent banner intercepted pointer events at the control's location. This was correctly surfaced
+  as a typed `PrismaDownloadControlError`, proving the existing failure-handling design itself was sound;
+  only the missing banner handling and the page-scoped listener were defects.
+
+**Authorized scope for this fix round.** Exactly two fixes, both inside `PrismaDownloadOrchestrator`: (1)
+deterministic cookie-banner handling before the CSV control is activated; (2) download observation across
+the existing `BrowserContext` rather than only the originating `Page`, so a download reported by a newly
+opened tab is not missed. The canonical URL, date-selection behavior, the filename/collision contract, the
+directory contract, the UI workflow, and unrelated lifecycle logic were explicitly out of scope and were
+not touched.
+
+**Cookie-banner contract (live-verified, 2026-08-02).** A headless fetch of the real public PRISMA page
+found the banner P.23.1 already named "research-consent banner" (it discloses gathering usage data "via
+browser cookies") has no test id or ARIA landmark: a fixed-bottom panel headed "Take part in PRISMA
+usability research" with two plain, unattributed controls — an `<a>` "More Information" and two
+`<button>`s, "Decline" and "Accept & Close". `PrismaDownloadOrchestrator._dismiss_cookie_consent_banner()`
+tries "Decline" first (an automated tool should not opt a human user into usability-research data
+collection on their behalf) and falls back to "Accept & Close" for a hypothetical banner variant offering
+only a single accept-style control, each located by its own bounded, visible accessible-name locator
+(`_COOKIE_BANNER_DETECT_TIMEOUT_MS = 3000`). Absence of the banner within that bounded wait is the normal
+case, not an error. No DOM element is ever removed via JavaScript: a supported user control is always
+available for this banner, so that fallback the requirements allow for is never exercised. If the control
+is found but the click fails, or the banner does not report `state="hidden"` afterward, a new
+`PrismaCookieConsentBannerError` is raised — never a silent continue and never `force=True`.
+
+**Obstruction verification and the scroll-into-view correction.** After locating the CSV control and
+handling the banner, `_ensure_control_not_obstructed()` calls `document.elementFromPoint()` at the
+control's own bounding-box center and raises `PrismaCookieConsentBannerError` if the returned element is
+not the control itself (or does not contain it), instead of ever passing `force=True` through to the
+click. A first live run of this check against the real site produced a **false positive**: the CSV
+control's live bounding box put its center below `window.innerHeight` (the PRISMA results page is ~2300px
+tall; the button sits at the very bottom), so `elementFromPoint` correctly returned `null` for an
+off-screen point, which the check misread as "obstructed". The fix — `control.scroll_into_view_if_needed()`
+before computing the bounding box, mirroring what Playwright's own `click()` actionability protocol already
+does internally — was verified live: a follow-up run reported "Obstruction check: OK (CSV control not
+obstructed)" for the same control.
+
+**Context-level download observation.** `configure()` now registers the `"download"` listener on
+`page.context` (via `PrismaDownloadWaiter.attach()`/`context.on("download", waiter.on_download)`) instead
+of `page.on(...)`, so a download reported by any page sharing that context — including one opened by a new
+tab — is observed. No second browser or context is ever created; the existing owned context is reused.
+`PrismaDownloadWaiter.on_download()` now rejects a second download explicitly: the first is captured as
+before, but every later event is best-effort cancelled immediately and recorded via `waiter.multiple`,
+which `_finalize()` checks both before and after `save_as()` (covering the race where the second event
+lands mid-save) and reports as a new typed `PrismaDownloadOutcome.MULTIPLE_DOWNLOADS` outcome — the first
+download is also cancelled/discarded in that case rather than silently reported as success.
+`PrismaDownloadWaiter.detach()` idempotently removes the registered listener from the context; it is called
+both immediately when a download result resolves (success, timeout, or any typed failure, inside
+`PrismaLifecycleController._run()`'s `emit_download_result()`) and unconditionally in `_run()`'s `finally`
+block, so cancellation-before-resolution, browser close, and configure()-time errors are covered too — no
+listener is ever left attached past the end of the attempt that registered it, and Close Prisma's
+responsiveness (the existing `cancel_event.wait(0.1)` idle loop) is unchanged.
+
+**Automated evidence (2026-08-02, same branch, still unmerged).** `tests/test_prisma_download.py` gained
+focused tests for: banner absent; banner dismissed via "Decline"; banner dismissed via "Accept & Close"
+when "Decline" is not offered; the banner control failing to click; the banner not closing after being
+clicked; the CSV control remaining obstructed after banner handling; never using `force=True` on either
+control; the scroll-into-view step itself (and its tolerance of failure, mirrored on the existing
+`networkidle`-wait tolerance pattern); the obstruction check's own tolerance of `evaluate()` failing;
+context-level (not page-level) listener registration; a second download event being rejected and cancelled
+(both before and during `save_as()`); a download accepted from the originating page; a download reported
+via a different originating page (the new-tab scenario); and `PrismaDownloadWaiter.detach()` (removes the
+listener, is idempotent, is a safe no-op if never attached, and tolerates `remove_listener()` raising).
+`tests/test_prisma_lifecycle.py` gained integration tests for: the cookie banner being dismissed during a
+full managed-download `open()` before the CSV control is clicked; a banner that cannot be dismissed
+reported as a typed open failure; a download reported by a second `FakePage` sharing the first page's
+`context` (the new-tab scenario) still resolving as a normal success; a second download event being
+rejected end-to-end; and the context listener being removed after success, after a timeout, and after
+cancellation before the download ever resolved. The complete pytest suite passed with **695 tests**
+(`tests/test_prisma_download.py`: 68; `tests/test_prisma_lifecycle.py`: 57). Project-wide
+`python -m compileall` and `git diff --check` both passed. `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` was rerun and succeeded; `python validate_package.py` passed against the fresh
+distribution; an isolated-`LOCALAPPDATA` smoke launch of `PrismaFunction.exe` reached a live main window
+(`PRISMA Monitor v1.0.0`) and shut down cleanly via `CloseMainWindow()` (exit code `0`, no forced kill, no
+`chrome.exe`/`msedge.exe`/`node.exe` spawned by the smoke run itself).
+
+**Live verification of the two fixes themselves (2026-08-02, headless Chromium against the real public
+site, driving the actual `PrismaDownloadOrchestrator` code — not a reimplementation).** Calling
+`_dismiss_cookie_consent_banner()` against a fresh session confirmed the real banner text ("Take part in
+PRISMA usability research") was present, that "Decline" was clicked, and that the banner's own text was
+gone from `document.body.innerText` immediately afterward — the same run also captured PRISMA's own
+"Successfully saved cookie preference!" confirmation toast, independent live proof the real control was
+actually activated, not just located. `_ensure_control_not_obstructed()` (after the scroll-into-view fix)
+then reported the CSV control genuinely reachable. Registering the listener on `page.context` and
+`waiter.detach()` were both exercised directly against the real page/context objects and behaved as
+implemented.
+
+**Newly confirmed, out-of-scope blocker: the existing date-filter automation no longer matches the live
+site (2026-08-02).** While attempting a full live single-click-download proof, the existing, *unmodified*
+`_open_filter_panel()`/`_locate_date_fields()` step (the "Active Filter:" toggle plus
+`startOfAuctionFrom`/`startOfAuctionTo` test-id inputs, live-verified and unchanged since the entry earlier
+in this section) failed reproducibly: `data-testid="startOfAuctionFrom"`/`"startOfAuctionTo"` are no longer
+present anywhere in the live DOM, before or after the toggle click. Live screenshots showed clicking the
+toggle instead removes PRISMA's own pre-populated default "Start of Auction" filter chip entirely and
+surfaces PRISMA's own validation toast, "Please specify auction interval start date" — a different
+interaction than the one this code was built against. This reproduced identically with and without the
+cookie banner handled first, ruling out the banner as the cause. This is a genuine drift in PRISMA's own
+live UI since the date-filter contract was originally verified, not a defect in either of the two fixes
+delivered in this round, and per this fix round's explicit scope ("do not change date-selection behavior")
+it was left untouched and unfixed. As a direct consequence, this round could not produce a full
+single-click, zero-manual-interaction live download recording end-to-end; the increment stays 🟡.
+
+**Side discovery, also out of scope: a large-result-set download confirmation modal.** Because the
+date-filter step above could not be used to narrow the result set, a diagnostic click on the CSV control
+against PRISMA's full ~10,000-row unfiltered result set surfaced a PRISMA-native modal — "Warning: Your
+download contains only 5000 of 10068 items." — with its own second "CSV" button that must be clicked to
+actually start the download; the outer button alone only opens this modal in that condition, which explains
+the zero download events and zero network requests observed in that diagnostic run. This was not observed,
+and is not expected to be encountered, with a real narrow date range (matching that the customer's own Run
+A/Run B reports never mentioned it), and is flagged here rather than silently patched since handling a
+second confirmation click is outside this round's two-item authorized scope. Whether it needs handling is
+a decision for whoever next fixes the date-filter drift above, once real narrow-range result sizes can be
+observed against the live site again.
+
+### P.36.14 — date-filter contract re-verification and large-result-modal handling (2026-08-02, later same-day round)
+
+**Authorized scope for this round.** Two items, both explicitly requested: (1) re-investigate the live
+PRISMA Auctions page and restore/fix the date-filter contract, since the previous round reported it no
+longer matching; (2) detect and confirm PRISMA's own large-result confirmation modal so a sufficiently wide
+date range no longer silently blocks the automated CSV export.
+
+**Part 1 investigation and finding.** Live DOM inspection was performed directly against the real public
+`https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` page — first with a
+headless Chromium instance (Playwright's own bundled build, launched via an explicit `executable_path`
+override since the environment's default headless-shell binary was missing), then cross-checked against the
+real installed Chrome executable — rather than guessed. The finding: `data-testid="startOfAuctionFrom"`/
+`"startOfAuctionTo"` **are** present under the "Active Filter:" panel today, with the exact same masked
+`DD.MM.YYYY      HH:mm` contract, pre-populated "from" value, and clear-before-fill quirk originally
+documented. The existing `_open_filter_panel()`/`_locate_date_fields()`/`_fill_field()` logic in
+`prisma_download.py` required no locator change and worked unmodified against the live site in every
+successful run. The page also exposes a visible toggle labelled "Deactivate New Design" (aria-label), which
+is direct evidence PRISMA can serve more than one UI variant to a session; a later re-verification attempt
+in this same round did reproduce a `PrismaDateFilterControlsNotFoundError` once, live, exactly as the typed
+failure is designed to report — which supports "intermittent PRISMA-side A/B variance" as the most likely
+explanation for the earlier round's "controls no longer present" finding, rather than a permanent redesign
+this fix needed to chase. No selector in this round was guessed or restored from memory; every one was
+confirmed present in the live DOM before being used.
+
+Since the underlying locators turned out to already be correct, the actual gap against this round's
+requirements was the missing **post-application** verification ("verify after applying the filter that ...
+the filtered state is active before export begins" — not previously implemented; the prior fill-time
+verification only proved the *input* accepted the typed text, not that PRISMA's own results were actually
+re-filtered). Live DOM inspection found the applied range is echoed back into a dedicated filter-chip
+element, `data-testid="filter-startOfAuctionFrom"` (observed text: `"Start of Auction\n01.08.2026, 00:00 -
+02.08.2026, 23:59"`), once "Filter" is clicked — the same collapsed-chip "Tag" component pattern PRISMA uses
+elsewhere on this page. `PrismaDownloadOrchestrator._verify_filter_applied()` is a new step, called
+immediately after `_apply_filter()` and before the download control is ever located:
+
+1. Waits for the chip to become visible at all — `PrismaDateFilterPanelError` ("could not be confirmed as
+   applied") if it never does, matching the "filter application failure" typed-failure category.
+2. Confirms the chip's content contains both formatted dates (`DD.MM.YYYY` for the accepted start and end) —
+   `PrismaDateValueRejectedError` ("does not match the selected range") if it never does, matching the
+   "rejected date" category.
+3. Checks for any visible `role="alert"` element on the page as a stable, semantic "no validation error"
+   signal (`page.get_by_role("alert")`, an accessible-role locator — priority 2 in the requested selector
+   preference order, since no dedicated test id exists for a generic validation alert) —
+   `PrismaDateValueRejectedError` with the alert's own text if one is found and visible.
+
+**Timing bug found and fixed during live validation.** A first version of step 2 read the chip's
+`inner_text()` exactly once, immediately after `chip.wait_for(state="visible")`. Driving the *actual*
+production code path end-to-end (`PrismaLifecycleController`, the real installed Chrome executable via
+`DefaultBrowserDetector`, not a reimplementation) surfaced a genuine defect: PRISMA's own chip re-render can
+lag slightly behind the "Filter" click, and the existing best-effort `_apply_filter()` `networkidle` wait
+only waits for network activity to settle, not for PRISMA's own React re-render to complete — so the single
+immediate read intermittently observed the *pre-filter* chip content (PRISMA's own default value) and was
+misreported as a rejected date, exactly the `PrismaDateValueRejectedError` failure a genuinely wrong date
+should produce. The fix replaces the single read with Playwright's own polling `wait_for`:
+`chip.filter(has_text=<compiled pattern requiring both formatted dates via lookahead>)`, bounded at a new
+`_FILTER_CHIP_VERIFY_TIMEOUT_MS = 5_000` and re-evaluated live against the DOM on each poll rather than
+decided from one snapshot. A follow-up live run through the exact same production path (real Chrome,
+`PrismaLifecycleController.open(date_range=..., download_directory=...)`) confirmed the fix: the reported
+`kind="open"` event now has `success=True` reliably, with the filter-chip verification step included.
+
+**Part 2 investigation and finding: the large-result confirmation modal is real and now handled.** A live
+run with a genuinely narrow one-day range (`2026-08-01` to `2026-08-02`) still returned over 11,000 line
+items for that particular date, reproducing the modal side-discovery flagged (but explicitly left unfixed)
+by the prior round. Live DOM inspection of the dialog found: `role="dialog"` (`data-sentry-component`
+happens to read `"LimitWarningModal"`, though that Sentry-instrumentation attribute is not relied on as a
+selector), a heading reading "Warning", body text `"Your download contains only 5000 of 11667 items."`, a
+visually hidden "Dismiss popup" button, an `aria-label="Close modal"` icon button, and — critically — its
+own plain `<button type="button">CSV</button>` confirm control with no test id or distinguishing ARIA
+attribute, i.e. the exact same accessible name as the main page's CSV control. `_confirm_large_result_modal_if_present()`
+is a new step, called immediately after `_activate_download_control()`:
+
+- Waits up to a new `_LARGE_RESULT_MODAL_DETECT_TIMEOUT_MS = 3_000` (matching the existing cookie-banner
+  detection bound) for `page.get_by_role("dialog").filter(has_text=<pattern matching "contains only N of M
+  items", case-insensitive>)` to become visible. Absence within that bound is treated as normal — a
+  sufficiently narrow date range never shows this dialog, and no fatal error is raised for its absence.
+- When present, locates the confirm button **scoped to the dialog locator itself**
+  (`dialog.get_by_role("button", name="CSV", exact=True)`), so it is never confused with the main page's own
+  "CSV" button sharing the same accessible name, and clicks it — proceeding with the truncated export. A new
+  `PrismaLargeResultConfirmationError` is raised if this control cannot be found or activated. The modal's
+  own close/dismiss controls are never used, since that would cancel the download instead of confirming it,
+  and the selected date range is never altered merely to dodge the modal.
+- Because the download listener was already registered on `page.context` strictly before the very first CSV
+  click (unchanged from the existing decision-gate-correction design), no second listener registration is
+  needed for the confirmation click to be observed.
+
+A live run confirmed the complete sequence end-to-end (headless Chromium against the real site, driving
+`PrismaDownloadOrchestrator.configure()` directly): filter applied and chip-verified, modal detected,
+dialog-scoped confirm button clicked, and the resulting Playwright `"download"` event captured with
+`suggested_filename="Auction_overview.csv"` — which the existing, unmodified naming/collision logic
+(`build_dated_filename()`/`reserve_unique_download_path()`) then processed exactly as before.
+
+**New, orthogonal blocker found while proving the above through the full production pipeline: real-Chrome
+download-event delivery.** Driving `PrismaLifecycleController.open(date_range=..., download_directory=...)`
+directly — the exact production code path, real installed Chrome executable via `DefaultBrowserDetector`,
+not a reimplementation — reached `kind="open"` `success=True` reliably (dates filled, filter-chip verified,
+CSV control activated, and, when present, the large-result modal confirmed), but no `kind="download"` event
+was ever observed within a 240-second wait, and no file appeared in the configured download directory. A
+screenshot taken immediately after `configure()` returned showed the real Chrome window's own native
+"Download complete." toast, proving a download genuinely did complete from the browser's own point of view.
+
+This was isolated with a minimal, targeted repro rather than accepted at face value: `context.on("download",
+...)` was tested directly (bypassing the full orchestrator) against the real PRISMA CSV-export click across
+four variants — (a) Playwright-bundled Chromium, `headless=True`: reliably captured the event on every
+attempt, including the full detect-modal-confirm-capture sequence above; (b) Playwright-bundled Chromium,
+`headless=False`: did not capture it; (c) the real installed Chrome executable, `headless=False` (matching
+exactly how `PrismaLifecycleController` always launches it): did not capture it, even with an explicit
+`accept_downloads=True`; (d) the real installed Chrome executable, `headless=True`: also did not reliably
+capture it in this round's attempts. Playwright's own managed temp/artifact directories
+(`%TEMP%\playwright-artifacts-*`) were inspected directly and found empty of any downloaded file, indicating
+the real Chrome build's download manager completes the download through a path that bypasses Playwright's
+CDP-based download interception in this environment, rather than the event merely being slow to arrive.
+
+This gap is orthogonal to both fixes in this round: neither `_verify_filter_applied()` nor
+`_confirm_large_result_modal_if_present()` touches download-event wiring, which is unchanged from the
+already-live-verified `PrismaDownloadWaiter`/context-registration design (see the prior round's entry
+above). It was not caught by any prior round because no earlier live verification had completed a full
+download capture through the real installed browser executable end-to-end — the prior round's own "Live
+verification of the two fixes" was explicitly performed with "headless Chromium against the real public
+site," not the real installed browser. Root cause is not yet fully diagnosed (candidate explanations include
+a Chrome-version/CDP-protocol mismatch specific to this real, frequently auto-updated Chrome build, or a
+change in Chrome's own native download-UI/"download bubble" handling in recent versions) and diagnosing it
+further was out of this round's authorized two-item scope in any case. A direct interactive-user validation
+pass on a normal Windows desktop, outside this automated coding session, is recommended as the next concrete
+step: a prior P.36.14 round found that a sandboxed execution context could hide the browser window entirely
+and that disabling that constraint fixed visibility, so a genuinely normal interactive session remains the
+most direct way to rule in or out an environment-specific cause here too — though this round's own attempt
+to disable equivalent sandboxing from within the same automated session did not, by itself, resolve the
+download-capture gap.
+
+**Automated evidence.** `tests/test_prisma_download.py` gained tests covering: the applied-filter chip being
+checked (in the correct order, after both date test-ids and before the download control) before the download
+control is located; the chip never appearing; the chip's content not matching the selected range; a visible
+validation alert after applying the filter (download control never clicked); a present-but-not-visible alert
+being correctly ignored; the large-result modal's absence being treated as normal; the modal being confirmed
+automatically via its own dialog-scoped "CSV" button (asserting the main control and the modal's control are
+each clicked exactly once, and are never confused); the modal's confirm control failing to be found or
+activated (`PrismaLargeResultConfirmationError`); the date range never being altered to avoid the modal; and
+a download still being captured end-to-end (through `await_and_finalize()`) after a modal confirmation.
+`FakeConfigurePage` gained `applied_filter_chip` (defaulting to a fake that dynamically reflects whatever was
+actually filled into the two date fields, so every pre-existing `configure()` test automatically exercises
+the "verification succeeds" path without needing to know the specific date range in use), `alerts` (empty by
+default), and `large_result_dialog` (absent by default) — plus a `FakeFilteredChipLocator` that mirrors
+Playwright's own `Locator.filter(has_text=...)` polling semantics (re-evaluating the base locator's *current*
+text at `wait_for` time, not once at `filter()` time), so the timing-bug regression itself is exercisable at
+the unit level. `tests/test_prisma_lifecycle.py`'s `FakeManagedPage` gained the same three fakes (via a
+locally duplicated, lifecycle-focused `FakeAppliedFilterChip`/`FakeAlertLocator`/`FakeLargeResultDialog`/
+`FakeDialogQuery`/`FakeFilteredChipLocator` set, keeping the existing "unit-level DOM contract lives in
+test_prisma_download.py, lifecycle-level tests stay focused on controller wiring" split) and gained five new
+integration tests: a filter-verification failure reported as a typed open failure with the download control
+never clicked; the large-result modal being confirmed automatically during a full managed `open()`; the
+modal's confirm control failing reported as a typed open failure; the modal's absence being normal; and the
+downloaded CSV still being captured, named, and saved correctly when it followed a modal confirmation. The
+complete pytest suite passed with **711 tests** (up from 695): `tests/test_prisma_download.py` 79 (up from
+68, +11), `tests/test_prisma_lifecycle.py` 62 (up from 57, +5). Project-wide `python -m compileall` (same
+file list as prior entries) exited `0`, with only the same pre-existing, unrelated `.pytest_tmp` permission
+warning noted in earlier entries. `git diff --check` passed (one informational CRLF-normalization notice on
+`tests/test_prisma_lifecycle.py`, not a whitespace error). `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` was rerun and succeeded; `python validate_package.py` passed against the fresh
+distribution; an isolated-`LOCALAPPDATA` smoke launch of the rebuilt `PrismaFunction.exe` reached a live main
+window (`MainWindowHandle` non-zero, title `PRISMA Monitor v1.0.0`, `Qt6Core`/`Qt6Gui`/`Qt6Widgets` loaded)
+and shut down cleanly via `CloseMainWindow()` (exit code `0`, no forced kill); no `PrismaFunction.exe`
+process remained afterward.
+
+**Live evidence summary.** Both of this round's fixes were live-verified end-to-end, independently, against
+the real public PRISMA site: (1) the date-filter contract, including the new post-application chip
+verification and its timing fix, confirmed via a full run through the actual `PrismaLifecycleController`
+production code path reporting `success=True`; (2) the large-result confirmation modal, confirmed via a
+narrow-range run that reproduced the modal, auto-confirmed it, and captured the resulting download with the
+correct suggested filename. All live verification in this round used a real network connection to
+`https://app.prisma-capacity.eu`; no credentials, login automation, or PRISMA authentication bypass was
+used; the cookie-consent banner was dismissed via its own "Decline" control exactly as the existing,
+unmodified `_dismiss_cookie_consent_banner()` already does. No PDF acquisition, transformation, mapping, or
+publication behavior was added or exercised.
+
+**Outstanding before this increment can be marked ✅ Completed.** The real-Chrome download-event delivery
+gap described above blocks the one remaining acceptance item: a full production-mode (`headless=False`, the
+real installed browser exactly as shipped) pass with an actual CSV file downloaded, named, and propagated to
+`ManualCsvSelection`, with zero manual browser interaction. Per the customer's explicit instruction, P.36.14
+stays 🟡 until that full pass succeeds; this round's two authorized fixes are each independently complete,
+tested, and live-verified on their own terms.
+
+### P.36.14 — approved bounded-filesystem-observation production fallback (2026-08-03, customer decision)
+
+**Decision.** The real-Chrome download-event delivery gap above is not required to be root-caused before
+P.36.14 can proceed: the customer approved proceeding without relying exclusively on the Playwright
+`BrowserContext` `"download"` event. The Playwright event stays the primary mechanism; if the real installed
+Chrome/Edge executable completes a download but no Playwright event is delivered, a bounded filesystem
+observation of the configured download directory is now an approved production fallback, with these explicit
+constraints: snapshot the directory before activating the PRISMA CSV control; consider only files created
+after that snapshot; ignore partial files such as `.crdownload`; accept only one new `.csv` file; wait until
+its size is stable across multiple checks; verify the file can be opened for reading; reject zero files,
+multiple files, timeout, and interrupted downloads; remain cancellable so Close Prisma stays responsive; use
+a fixed timeout and bounded polling interval; and never scan outside the configured download directory. After
+completion, the existing dated filename and collision rules apply exactly as they do for a Playwright-observed
+download, and the final path is propagated the same way.
+
+**Implementation.** `prisma_download.py` adds `PrismaDownloadFilesystemWaiter`: `snapshot(directory)` records
+the directory's current top-level contents (non-recursive `iterdir()`, never a scan outside that one
+directory); `poll()` is a non-blocking, per-call check of the directory's current state, returning one of
+`not_ready`, `ready` (with the resolved path), `multiple`, or `interrupted`. A new file is only ever
+recognized if its name was absent from the snapshot; a `.crdownload`-suffixed new file is tracked only to
+distinguish a genuinely interrupted download (the partial file disappears without ever producing a completed
+`.csv`, debounced across `_FILESYSTEM_INTERRUPTED_GRACE_POLLS = 3` consecutive polls to tolerate the brief
+instant a browser's own partial-to-final rename can appear as neither file existing) from one still in
+progress; it is never itself a candidate result. A single new `.csv` candidate must report the same file size
+across `_FILESYSTEM_STABILITY_CHECKS = 3` consecutive polls and then be openable for reading (`open(path,
+"rb")`) before it is accepted; more than one new `.csv` candidate at any poll is rejected as `multiple`
+without deleting either file. `PrismaDownloadOrchestrator.configure()` gained an optional third
+`download_directory` parameter: when supplied, it takes the snapshot immediately after the Playwright
+`"download"` listener is registered on the context and strictly before the CSV control is activated (omitting
+it, the pre-existing two-argument call, leaves the fallback disabled — unchanged behavior for every caller
+that does not pass it). `PrismaDownloadOrchestrator.await_and_finalize()` still checks the Playwright event
+first (unchanged, primary path); only when that has not fired does it poll `waiter.filesystem_fallback` (when
+present) and translate `ready`/`multiple`/`interrupted` into the same typed `PrismaDownloadResult` outcomes the
+primary path already reports (`SUCCESS`/`MULTIPLE_DOWNLOADS`/`DOWNLOAD_INTERRUPTED`); a `ready` result still
+yields to a Playwright event that arrived in the same instant, since the primary path carries the real
+`Download` object. A `ready` fallback result is finalized by the new `_finalize_from_filesystem()`: it applies
+the exact same `build_dated_filename()`/`reserve_unique_download_path()` naming/collision rule as the primary
+path, then moves the already-downloaded file into the reserved placeholder path via `os.replace()` (atomic,
+same-directory rename; there is no `Download` object to call `save_as()` on). Zero files at the deadline still
+report `DOWNLOAD_TIMEOUT` exactly as before. `PrismaLifecycleController._run()`'s existing call now passes
+`download_directory` through to `configure()`; no new wait loop, thread, or filesystem-polling mechanism was
+added — the fallback's `poll()` is consulted from inside the exact same non-blocking `await_and_finalize()`
+call already interleaved with the existing `cancel_event.wait(0.1)` idle loop, so Close Prisma's responsiveness
+and manual-closure detection are unaffected.
+
+**Automated evidence (2026-08-03).** `tests/test_prisma_download.py` gained 12 tests: `configure()` snapshotting
+before activation and excluding a pre-existing file from the fallback; `configure()` without a directory
+leaving the fallback disabled (unchanged pre-fallback behavior); a `.crdownload` partial being ignored; size
+stabilization requiring the configured number of consecutive matching reads before acceptance; multiple new
+`.csv` files being rejected; the fallback never scanning outside its configured directory; a full fallback
+success through `await_and_finalize()` with the dated name applied and the source file moved (not copied)
+into place; a late Playwright event still winning over an already-ready fallback result; the fallback never
+overwriting an existing dated-name file; multiple files found via the fallback being rejected through
+`await_and_finalize()`; the fallback timing out like the primary path when nothing ever appears; and
+cancellation returning `None` with the fallback pending, exactly like the primary path. `tests/test_prisma_lifecycle.py`
+gained 2 integration tests: a full managed `open()` succeeding via the filesystem fallback alone (no
+Playwright `"download"` event fired) with the CSV named, dated, and reported through the existing
+`kind="download"` event; and proof that an actively polling filesystem fallback does not delay manual-closure
+detection (a browser `"disconnected"` event during the wait is still detected and reported promptly). The
+complete pytest suite passed with **725 tests** (up from 711; `tests/test_prisma_download.py`: 91, up from 79;
+`tests/test_prisma_lifecycle.py`: 64, up from 62). Project-wide `python -m compileall` and `git diff --check`
+both passed (the same informational CRLF-normalization notice on `tests/test_prisma_lifecycle.py` as noted in
+prior entries, not a whitespace error).
+
+**Scope.** This change is strictly additive and confined to the fallback path: the canonical URL, date-filter
+contract, filter-chip verification, cookie-consent handling, large-result-modal handling, the naming/collision
+rule, and the download-directory contract are all unchanged and untouched. The real-Chrome download-event
+delivery gap itself remains undiagnosed at the root-cause level; this fallback is the customer-approved way to
+proceed without that diagnosis blocking the increment.
+
+### P.36.14 — real-Windows defect fix: selected dates not actually applied to PRISMA (2026-08-03)
+
+**Reported defect (real Windows, confirmed).** The start and end dates selected in Prisma Function were not
+actually applied to the official PRISMA reporting page, even though the managed-download automation reported
+no error.
+
+**Investigation method.** Per this project's standing rule against guessed selectors/contracts, the
+investigation used live DOM and network inspection against the real public
+`https://app.prisma-capacity.eu/reporting/auctions/short-and-long-term-auctions` site (headless Chromium,
+driving the actual `PrismaDownloadOrchestrator` code directly, not a reimplementation) rather than reasoning
+from the code alone. This surfaced two concrete, evidence-backed gaps in the *verification* logic — not a
+fill-format, locator, or navigation defect:
+
+1. Filling the same text with a single space (the production code's own `_format_filter_datetime` format) and
+   with the field's own placeholder spacing (six spaces, `"DD.MM.YYYY      HH:mm"`) produced an identical
+   result — ruling out a format/spacing theory.
+2. `field.evaluate()` DOM inspection found the field exposes an additional attribute,
+   `data-test-iso-value`, holding an ISO-8601 UTC instant. Capturing the real outbound network requests
+   (`GET .../rest/auctions/report?...` and `GET .../rest/auctions/report/csv?...`) confirmed this attribute's
+   value is the *exact* value later used as the `startOfAuctionFrom`/`startOfAuctionTo` query parameters — it
+   is the framework's real committed state, not merely display text.
+3. `_verify_field_value` (existing code) only ever checked that the formatted *date* substring appeared in
+   `input_value()` (the visible masked text) — never the time-of-day segment, and never `data-test-iso-value`.
+   Since `_fill_field`'s own docstring already documents a failure mode where the time segment can silently
+   stay unset while the date segment updates, a value that visually looked accepted could still carry the
+   wrong time (and, in principle, an uncommitted framework state) without the existing check ever noticing.
+
+**Fix.** Three changes, all confined to `PrismaDownloadOrchestrator` in `prisma_download.py`:
+
+1. `_fill_field()` now calls `field.evaluate("(el) => el.blur()")` immediately after `fill()`, before
+   verification — the same interaction a real user performs by tabbing or clicking away from a field, ensuring
+   any commit-on-blur logic in the page's own component has run before the value is treated as accepted,
+   rather than relying on an incidental later blur from focusing the next control or button.
+2. `_verify_field_value()` now independently requires both the date and the `time_of_day` substring to appear
+   in the masked text (two separate `in` checks, not one combined formatted string, since the real control's
+   display text is padded with extra internal whitespace a single formatted substring would not match), then
+   calls the new `_verify_committed_field_state()`.
+3. `_verify_committed_field_state()` reads `data-test-iso-value` via `field.evaluate(...)` and compares the
+   committed instant to the requested date/time.
+
+**A first version of item 3 was itself found to be wrong by further live testing, and corrected before being
+used** — directly relevant since the customer's own instruction was to identify the actual root cause instead
+of a timing-only (or otherwise superficial) workaround. The first version converted the committed ISO instant
+back to wall-clock text using the *browser's own* local-timezone `Date` getters (`getDate()`/`getHours()`/
+etc.) and compared that to the expected `DD.MM.YYYY HH:mm` text. Running this against the real page produced a
+concrete, reproducible failure: filling `"01.08.2026 00:00"` produced `data-test-iso-value =
+"2026-07-31T22:00:00.000Z"`, but the browser-local-timezone conversion computed `"01.08.2026 01:00"` — a
+one-hour mismatch — because this sandboxed test environment's own system timezone offset did not match the
+offset PRISMA itself used when it originally converted the typed text to that ISO instant. A follow-up,
+targeted experiment isolated the cause deliberately rather than guessing: the identical fill was run against
+the real page four times, once under each of four different Playwright browser-context timezones
+(`Europe/Berlin`, `America/New_York`, `Asia/Tokyo`, `UTC`); all four produced the *exact same*
+`data-test-iso-value`. This proves PRISMA always interprets the typed local text as fixed Europe/Berlin time,
+regardless of the machine's own configured timezone (a reasonable design for a EU energy-market platform) — so
+the first version's approach of converting back via the *browser's* local timezone would have produced false
+rejections (a new, machine-dependent defect) on any real Windows machine not already configured to
+Europe/Berlin, which is likely most machines outside continental Europe. This would have been a strictly worse
+outcome than the reported defect: a `PrismaDateValueRejectedError` on every managed download attempt for anyone
+outside CET/CEST, rather than a silently wrong range.
+
+The corrected `_verify_committed_field_state()` never uses the browser's own local timezone. It computes,
+entirely inside the browser via one `field.evaluate(...)` call using `Intl.DateTimeFormat` with an explicit
+`timeZone: 'Europe/Berlin'` option, the UTC instant that corresponds to the requested wall-clock date/time in
+that fixed zone — correctly handling the CET/CEST daylight-saving boundary via the standard "format a UTC
+guess in the target zone, then correct by the resulting offset" technique, live-verified against both an
+August (CEST, UTC+2) and a January (CET, UTC+1) date — and compares that computed instant directly to
+`data-test-iso-value`, tolerant of small (<60s) rounding. This is compared, never parsed in Python, so the
+verification is not exposed to whatever timezone the machine running PrismaFunction happens to be configured
+to. A future PRISMA build without the `data-test-iso-value` attribute is tolerated (the method returns without
+raising): the text-based date+time check in `_verify_field_value` already ran and is the fallback signal in
+that case.
+
+`_verify_filter_applied()`'s applied-filter-chip check (the independent, stronger signal checked after
+"Filter" is clicked) gained the equivalent fix at its own layer: it previously required only the two formatted
+dates to appear in the chip text; it now also independently requires both the `00:00` and `23:59` time-of-day
+substrings, closing the same class of gap one layer later, using the same "separate substring checks, not one
+combined formatted string" approach for the same reason (the chip's own separator between date and time is not
+part of the contract being verified).
+
+Any of the above failing raises the existing `PrismaDateValueRejectedError` — the same typed managed-download
+failure path Open Prisma already surfaces as a normal failed attempt — never continuing with a potentially
+wrong date range. No unbounded sleep was introduced anywhere in this fix; every new wait reuses the existing
+bounded `_CONTROL_TIMEOUT_MS` via Playwright's own `timeout` parameter on `evaluate()`.
+
+**Scope discipline.** Nothing outside `_fill_field`/`_verify_field_value`/`_verify_committed_field_state`/
+`_verify_filter_applied` in `prisma_download.py` was touched. The canonical reporting URL, the "Active Filter"
+panel toggle, the date-field locators themselves, the cookie-consent banner handling, the large-result-modal
+handling, `build_dated_filename()`/`reserve_unique_download_path()`, the download-directory contract, the
+filesystem-observation fallback (`PrismaDownloadFilesystemWaiter`), the 12-column output contract, the manual
+CSV fallback (P.36.4), and unrelated UI are all unchanged.
+
+**Test fakes updated to model the real contract.** `tests/test_prisma_download.py`'s `FakeFieldLocator` and
+`tests/test_prisma_lifecycle.py`'s `FakeDateFieldLocator` both gained an `evaluate(script, arg=None,
+timeout=None)` method: for a blur script it records the call and returns `None`; for the committed-value read
+it returns a boolean by default (`True`, matching "committed correctly" — mirroring the existing `echo_fill`
+default so every pre-existing test continues to exercise the successful path without needing to know the
+specific date/time in use), overridable to `False` (simulate a mismatch) or `None` (simulate an absent
+attribute, exercising the tolerate-absence path) via a new `iso_committed_override` constructor parameter;
+separate `blur_error`/`committed_read_error` parameters (download-level fake only) let a test simulate either
+`evaluate()` call failing independently, since both go through the same method at different points in the
+sequence. The one pre-existing test that asserted the exact `action_order` sequence
+(`test_configure_clears_each_field_before_filling_it`) was updated to include the new `"evaluate:blur"` step at
+the end of the expected sequence — an intentional update reflecting the new, correct behavior, not unrelated
+churn.
+
+**Automated evidence (2026-08-03).** `tests/test_prisma_download.py` gained 9 tests: both fields filled with
+the exact requested date and time; the exact click→clear→fill→blur event sequence, asserted per field; blur
+failure surfaced as the existing typed field-rejection error; a field that echoes the right date but a wrong
+(unrequested) time now caught by the new time-of-day check; a committed value that does not match the visible
+text now caught by the new committed-state check (the direct regression test for the reported defect); a field
+lacking the committed-value attribute tolerated (falls back to the text-based check, no false failure); the
+committed-value read itself failing surfaced as a typed failure (with blur confirmed to have still succeeded
+first); the applied-filter chip requiring both dates and times (one test with a wrong time on the chip, which
+would have incorrectly passed before this fix, now correctly rejected; one test with a fully matching chip
+confirmed to still pass). `tests/test_prisma_lifecycle.py` gained 1 full-trace integration test
+(`test_managed_download_reports_as_an_open_failure_when_a_date_is_not_actually_committed`): a date that fails
+the new committed-state check is reported through the existing typed `kind="open"` failure event with
+`success=False` and an error message containing "start date value was not committed", and the CSV download
+control is confirmed never activated (`page.download_button.click_calls == 0`) — proving the full trace from a
+selected date through `PrismaLifecycleController.open()` into the page automation fails safely rather than
+silently proceeding. The complete pytest suite passed with **735 tests** (up from 725, the exact +10 expected:
++9 in `test_prisma_download.py` — 100 total, up from 91 — and +1 in `test_prisma_lifecycle.py` — 65 total, up
+from 64). Project-wide `python -m compileall` (same file list as prior entries) exited `0`. `git diff --check`
+passed (the same informational CRLF-normalization notice on `tests/test_prisma_lifecycle.py` noted in prior
+entries, not a whitespace error). `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` was rerun and
+succeeded; `python validate_package.py` passed against the fresh distribution.
+
+**Live evidence (2026-08-03, headless Chromium, real public site, driving the actual fixed
+`PrismaDownloadOrchestrator.configure()` code end-to-end, not a reimplementation).** `configure()` completed
+without raising for a two-day range (2026-08-01 to 2026-08-02), and the real outbound CSV export request
+(`GET https://platform.prisma-capacity.eu/rest/auctions/report/csv?...`) was captured carrying exactly
+`startOfAuctionFrom=2026-07-31T22:00:00.000Z&startOfAuctionTo=2026-08-02T21:59:00.000Z` — the correct UTC
+instants for the requested local Europe/Berlin range — confirming the fix closes the reported gap all the way
+through to the real request PRISMA's backend receives, not merely at the field level. The identical check was
+then rerun with the Playwright browser context's `timezone_id` forced to `America/New_York`, `Asia/Tokyo`, and
+`Pacific/Auckland` in turn, specifically to confirm the corrected Europe/Berlin-fixed comparison does not
+reintroduce the false-rejection regression the first (browser-local-time) version of the check would have
+caused; all three completed without a false rejection.
+
+**Outstanding.** This sandboxed development environment has no installed `chrome.exe`/`msedge.exe` (confirmed
+via both `where chrome.exe`/`where msedge.exe` and direct filesystem checks), so all live evidence above used
+Playwright's own bundled Chromium build, not the real installed browser `PrismaLifecycleController` always
+launches in production. Manual validation is still explicitly required on a real Windows desktop against the
+official PRISMA page before this fix can be considered fully accepted: choose a clearly distinguishable start
+and end date in Prisma Function, start the managed download, confirm both exact dates appear in the PRISMA
+Active Filter controls, and confirm the resulting request/download uses that exact range. This is in addition
+to, not a replacement for, the still-outstanding real-installed-Chrome production-mode acceptance pass recorded
+in this section's immediately preceding entry (the real-Chrome download-event-delivery gap and its approved
+filesystem-observation fallback).
+
+### P.36.14 — real-Windows defect fix: DATE RANGE controls initializing to Qt's minimum date (2026-08-03)
+
+**Reported defect (real Windows, screenshot-confirmed).** On real Windows, both `start_date_edit` and
+`end_date_edit` in the "DATE RANGE" sidebar group initialized to values near Qt's minimum supported
+`QDate` — `1752-09-25` and `1752-09-29` respectively — instead of a usable application date. This
+contradicted the P.36.13 implemented-result record, which intended construction-time `minimumDate()` to
+render as the configured `specialValueText("Not set")`, not as a literal near-1752 date.
+
+**Root cause.** `PrismaMonitorApp.__init__` explicitly initialized each control with
+`self.start_date_edit.setDate(self.start_date_edit.minimumDate())` (and the matching call for
+`end_date_edit`). `QDateEdit.minimumDate()` is an implementation-defined value (Qt/PySide6, per platform)
+never intended to be shown to a user; the assumption that assigning it as the initial value would always
+render as `specialValueText` instead of literal digits did not hold on the real Windows target. This was a
+display-defaulting defect, not a validation or data-flow defect: `date_range_selection.py`'s validation
+boundary, `DateRangeSelection`'s session-scoped `current` (`None` until an explicit "Validate Date Range"
+click), and P.36.14's `validate_download_configuration()` precondition gate were all unaffected and
+required no change.
+
+**Fix, `app.py`.** Added a single-purpose, module-level `_current_local_date() -> date` (returns
+`date.today()`) as the one isolated seam through which `PrismaMonitorApp` reads today's date — mirroring
+`date_range_selection.py`'s own stated design of never reading the system clock inside Qt-independent
+validation code, by keeping the one real clock read confined to this one construction-time call. Both
+`start_date_edit` and `end_date_edit` are now initialized to `QDate(today.year, today.month, today.day)`
+computed from it, never to `minimumDate()`. No other default is specified by the authoritative
+P.36.13/P.36.14 requirements, so both controls default to the same current date, i.e. a valid same-day
+range, satisfying "Start Date must be less than or equal to End Date" trivially at construction time.
+`setSpecialValueText("Not set")` and the existing `_read_optional_date()` sentinel comparison
+(`widget.date() == widget.minimumDate()` reads as a missing date) are both preserved unchanged — a user
+who deliberately scrolls a control's calendar back to its minimum still reads as missing; only the
+construction-time default changed.
+
+**Scope discipline.** Confined to the `start_date_edit`/`end_date_edit` construction block in
+`PrismaMonitorApp.__init__` and the new `_current_local_date()` helper, plus the `tests/test_app.py`
+regression coverage below. PRISMA automation, the managed-download orchestration
+(`PrismaDownloadOrchestrator`, `PrismaLifecycleController`), the download-directory contract, the
+12-column output contract, mappings, and all other UI are unchanged and untouched.
+
+**Test changes, `tests/test_app.py`.** The shared `window` fixture's construction logic was factored into
+`_build_app(monkeypatch, tmp_path)`/`_close_app(widget)` helpers (the fixture itself now just calls them)
+so a new test can construct a `PrismaMonitorApp` with a monkeypatched fixed "today" without duplicating
+the fixture body. Two new regression tests were added:
+`test_date_range_controls_do_not_initialize_to_qts_minimum_date` (proves neither control's initial value
+equals its own `minimumDate()`, and that both controls' initial year is greater than `1752` — the direct
+regression test for the reported defect) and `test_date_range_controls_initialize_to_a_fixed_current_date`
+(constructs the window with `app._current_local_date` monkeypatched to a fixed `date(2026, 3, 15)` and
+asserts both controls show exactly `QDate(2026, 3, 15)`, proving the initialization is deterministic and
+testable without depending on the real wall-clock date). `test_date_range_initial_state_is_deterministic_and_unset`
+was updated to assert both controls equal `QDate.currentDate()` (previously `minimumDate()`); the accepted
+range itself (`_date_range_selection.current is None` until validated) is unchanged. The two existing
+missing-date tests (`test_validating_with_missing_start_date_shows_error_and_preserves_state`,
+`test_validating_with_missing_end_date_shows_error_and_preserves_state`) now explicitly set the untouched
+control to its own `minimumDate()` sentinel before validating, since a genuinely missing date is no longer
+the construction-time default; both still correctly reject with the unchanged
+`MISSING_START_DATE`/`MISSING_END_DATE` messages, proving the sentinel mechanism itself is preserved.
+`test_date_range_controls_remain_enabled_and_retryable_after_error` now sets an explicit reversed range
+before validating, so it still exercises an actual rejection (it previously relied, likely unintentionally,
+on the old missing-start-date default to produce an error).
+
+**Automated evidence (2026-08-03).** The complete pytest suite passed with **737 tests** (up from 735;
+`tests/test_app.py`: 89, up from 87 — the exact +2 expected from the two new regression tests). Project-wide
+`python -m compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`) exited `0`, with the same
+pre-existing, unrelated `.pytest_tmp` permission warning recorded in P.36.13's and this file's prior
+entries. `git diff --check` passed (the same informational CRLF-normalization notice on
+`tests/test_prisma_lifecycle.py` noted in prior entries, not a whitespace error, and predating this fix).
+`python -m PyInstaller --clean --noconfirm PrismaFunction.spec` was rerun to produce a fresh distribution
+from this fix, and `python validate_package.py` passed against it.
+
+**Outstanding.** Full manual Windows validation — visually confirming, on first launch of the real
+`PrismaFunction.exe`, that both DATE RANGE controls show today's date (not `1752-09-25`/`1752-09-29`),
+that the calendar popup and manual keyboard entry still work, and that a subsequent "Validate Date Range"
+and managed-download attempt still carries the user-selected range through unchanged — has not yet been
+performed and remains required before this fix can be considered validated end-to-end. This is in addition
+to, not a replacement for, P.36.14's already-recorded outstanding real-installed-Chrome production
+acceptance pass.
+
+### P.36.14 — real-Windows defect fix: managed download completed in Chrome but never reached the configured directory (2026-08-03)
+
+**Reported defect (real Windows, confirmed).** `chrome://downloads` showed the PRISMA export completed
+under a temporary, browser-generated (UUID-like) name. The configured Prisma Function download directory
+existed and was writable, but stayed empty: the managed download never finalized into a non-empty `.csv`
+file inside it, even though the approved bounded filesystem-observation fallback added earlier the same
+day (see this file's "approved bounded-filesystem-observation production fallback" entry above) was already
+in place and running.
+
+**Investigation.** Tracing the real Chrome download from CSV-control activation through to the filesystem,
+per this project's standing rule against guessed contracts:
+
+1. `PrismaLifecycleController._run()` (`prisma_lifecycle.py`) launches the browser via
+   `playwright.chromium.launch(executable_path=..., headless=False, args=["--start-maximized"])`. No
+   `downloads_path` was ever passed.
+2. Per Playwright's own documented contract, when `downloads_path` is not specified, accepted downloads are
+   written into a Playwright-managed temporary directory it creates and owns itself — not the browser's own
+   native default Downloads folder, and not any directory the calling application chose. Real Chrome/Edge's
+   CDP-driven download interception (the "allowAndName" behavior Playwright configures on the browser via
+   `Browser.setDownloadBehavior`) additionally always assigns the raw artifact a framework-generated,
+   UUID-like name inside that directory — this holds regardless of whether `downloads_path` is set; the
+   parameter only controls *which* directory the UUID-named artifact is written into, never its name.
+3. `PrismaDownloadFilesystemWaiter` (added by the same-day approved fallback) correctly snapshots and polls
+   the *configured* download directory — the one the user picked via the existing P.36.3 folder-selection
+   workflow — for a new file. But since nothing ever told the browser to write there, the raw artifact
+   never appeared in that directory: the fallback was watching the right place, while Chrome was writing to
+   a different, untracked place entirely. This explains the exact reported symptom precisely: a completed
+   download visible in Chrome's own UI under a temporary name, and a persistently empty configured
+   directory.
+4. This is a distinct, deeper layer of the same underlying real-Chrome download-observability gap already
+   recorded earlier the same day (see this file's dated entries above): the earlier fallback correctly
+   assumed Chrome's own download manager could complete a download PrismaFunction never directly observes,
+   but implicitly assumed that download would land in a directory PrismaFunction controls without ever
+   actually configuring the browser to do so.
+
+**Fix.**
+
+1. `prisma_lifecycle.py`: `_run()` now builds its `launch()` keyword arguments explicitly and adds
+   `downloads_path=str(download_directory)` whenever `managed_download` is true (both `date_range` and
+   `download_directory` were supplied to `open()`). Omitting either argument — the pre-P.36.14 / manual-CSV
+   fallback path — never sets `downloads_path`, so that behavior is exactly unchanged (proven by a new
+   regression test, see below). This forces the raw download artifact — captured via the primary Playwright
+   `"download"` event, or only ever observed through the fallback — to be written directly inside the exact
+   directory the user selected. No hidden staging directory was introduced anywhere: `downloads_path` is
+   set to the same, single, user-visible configured directory the fallback already watches and the final
+   file is already written to. This does not restore P.35.2–P.35.5's cancelled staging/fingerprinting
+   design; it is a single launch-parameter correction confined to `prisma_lifecycle.py`.
+2. `prisma_download.py`'s `PrismaDownloadFilesystemWaiter.poll()`: since the raw artifact is now correctly
+   written into the configured directory but is still named by the browser/CDP itself (typically UUID-like,
+   never necessarily `.csv`), the previous requirement that a candidate have a literal `.csv` suffix would
+   have made this exact artifact permanently invisible to the fallback even after fix (1). A candidate is
+   now any newly appeared, non-partial file (`.crdownload`-suffixed files are still excluded exactly as
+   before, so the native-Chrome-with-a-recognizable-suggested-filename flow is completely unaffected).
+   Completion is still decided the same way as before: size stability across
+   `_FILESYSTEM_STABILITY_CHECKS` (3) consecutive polls, plus a successful open-for-read — never by name.
+   The internal activity-tracking flag that eventually classifies a vanished, never-completed download as
+   `INTERRUPTED` was broadened from "a recognized `.crdownload` partial was seen" to "any candidate was
+   seen," so a cancelled UUID-named artifact is still correctly classified as interrupted rather than
+   silently running out the clock to a generic timeout.
+3. `PrismaDownloadOrchestrator._finalize_from_filesystem()` now forces a `.csv` extension explicitly
+   (`build_dated_filename(f"{path.stem}.csv", date_range)`) instead of deferring to
+   `build_dated_filename`'s own suffix-preserving default, since the raw artifact's own name is a
+   browser/CDP-generated identifier, never a trustworthy source of the final extension. This is a pure
+   no-op for the pre-existing `.csv`-suffixed case (`Path("Auction_overview.csv").stem` is
+   `"Auction_overview"`, producing byte-identical output to before).
+4. **Newly found while implementing this fix, and closed in the same change:** neither finalize path
+   guarded against a *stable but empty* artifact. `PrismaDownloadFilesystemWaiter._poll_candidate()` now
+   classifies a zero-byte file that has otherwise stabilized and is readable as `INTERRUPTED` rather than
+   `READY`. `PrismaDownloadOrchestrator._finalize()` (the primary/event path) now checks the size of the
+   file `download.save_as()` just wrote; a zero-byte result is reported as `DOWNLOAD_INTERRUPTED` and the
+   empty artifact is deleted rather than left behind as a phantom "successful" output.
+5. **Also verified while implementing this fix:** `suggested_filename` (from the primary/event path) is
+   untrusted, PRISMA/browser-supplied input. `build_dated_filename` already only ever uses
+   `Path(original_filename).stem`/`.suffix` — both of which operate on the final path component only and
+   therefore already strip any `../` traversal segments before a flat filename is assembled — so a
+   traversal-shaped `suggested_filename` was already incapable of escaping the configured directory. This
+   was previously true only incidentally; it is now covered by an explicit regression test rather than
+   relying on it remaining true by accident of implementation.
+
+**Scope discipline.** Confined to `prisma_lifecycle.py`'s browser-launch call and three methods in
+`prisma_download.py` (`PrismaDownloadFilesystemWaiter.poll()`/`_poll_candidate()`,
+`PrismaDownloadOrchestrator._finalize()`, `PrismaDownloadOrchestrator._finalize_from_filesystem()`), plus
+their direct test coverage. Date handling (P.36.13 and this file's date-range-related entries above), the
+12-column output contract, transformations, mappings, the manual CSV fallback (P.36.4), the naming/collision
+rule itself (`build_dated_filename`/`reserve_unique_download_path`, unchanged), the download-directory
+contract (P.36.3), and unrelated UI are all untouched. The download-listener registration order (registered
+on the owned `BrowserContext`, strictly before the CSV control is activated) was inspected against this
+defect and confirmed already correct — no change was needed there.
+
+**Automated evidence (2026-08-03).** `tests/test_prisma_download.py` gained 7 tests:
+`test_filesystem_fallback_accepts_a_uuid_named_artifact_without_a_csv_suffix` (a UUID-named, suffixless
+artifact is recognized as a candidate and reaches `ready` after three stable polls, exactly like the
+existing `.csv`-suffixed case);
+`test_filesystem_fallback_rejects_multiple_new_files_regardless_of_extension` (two new files, one
+UUID-named and one `.csv`, still correctly rejected as ambiguous);
+`test_filesystem_fallback_rejects_a_stable_empty_file` (a zero-byte file that stabilizes is classified
+`interrupted`, never `ready`);
+`test_await_and_finalize_produces_exactly_one_dated_output_when_the_event_wins_the_race` (a raw artifact
+appears via the fallback path, then the Playwright event also fires for the same download; only the
+primary path's output exists under the dated filename — no duplicate);
+`test_await_and_finalize_from_filesystem_forces_a_csv_extension_for_a_suffixless_artifact` (a UUID-named
+artifact is finalized into a `<uuid>_<start>_<end>.csv` file with the exact downloaded bytes preserved);
+`test_finalize_rejects_a_zero_byte_saved_download` (the primary/event path: a `save_as()` that writes zero
+bytes is reported as `DOWNLOAD_INTERRUPTED`, and no empty file is left in the directory); and
+`test_finalize_sanitizes_a_path_traversal_suggested_filename_to_stay_inside_the_directory` (a
+`"../../evil.csv"` `suggested_filename` still resolves to `evil_<start>_<end>.csv` directly inside the
+configured directory, and nothing is ever written two levels above it).
+
+`tests/test_prisma_lifecycle.py` gained 4 integration tests:
+`test_managed_download_launches_the_browser_with_downloads_path_set_to_the_configured_directory` (captures
+the real `launch()` call's keyword arguments end-to-end through `PrismaLifecycleController.open()` and
+confirms `downloads_path == str(download_directory)` exactly — the direct regression test for the reported
+defect's root cause);
+`test_open_without_download_arguments_never_sets_a_downloads_path` (the pre-P.36.14/manual-fallback `open()`
+call, with neither `date_range` nor `download_directory` supplied, never passes `downloads_path` — proving
+backward compatibility);
+`test_managed_download_succeeds_via_filesystem_fallback_with_a_uuid_named_artifact` (a UUID-named file
+appearing in the configured directory, with no Playwright event ever fired, is still finalized end-to-end
+into a correctly dated `.csv` and reported as a successful `kind="download"` event); and
+`test_managed_download_reports_exactly_one_success_when_the_event_and_fallback_observe_the_same_download`
+(both a raw filesystem artifact and a Playwright `"download"` event are observed for the same underlying
+download; exactly one `kind="download"` success event and exactly one dated output file result — no
+duplicate).
+
+The complete pytest suite passed with **748 tests** (up from 737; `tests/test_prisma_download.py`: 107, up
+from 100 — the exact +7 expected; `tests/test_prisma_lifecycle.py`: 69, up from 65 — the exact +4 expected).
+Project-wide `python -m compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`) exited `0`, with the
+same pre-existing, unrelated `.pytest_tmp` permission warning recorded in every prior entry in this file.
+`git diff --check` passed (the same informational CRLF-normalization notice on
+`tests/test_prisma_lifecycle.py` noted in prior entries, not a whitespace error, and predating this fix).
+`python -m PyInstaller --clean --noconfirm PrismaFunction.spec` was rerun to produce a fresh distribution
+from this fix, and `python validate_package.py` passed against it.
+
+**Outstanding.** Full manual Windows validation has not yet been performed and remains required: select
+`Downloads\PrismaFunction` as the download folder, choose and validate a clearly distinguishable date
+range, start the managed PRISMA download against the real, live PRISMA site in real Chrome, and confirm the
+selected directory receives exactly one final, non-empty `.csv` file with a normal (dated, `.csv`-suffixed)
+final filename — and specifically confirm no UUID-named or partial file is ever left behind or mistaken for
+the final result. This is in addition to, not a replacement for, P.36.14's already-recorded outstanding
+real-installed-Chrome production acceptance pass and the DATE RANGE control fix's own outstanding manual
+validation recorded in this file's immediately preceding entry.
