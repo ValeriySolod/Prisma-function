@@ -3695,3 +3695,144 @@ as outstanding: there is no user-accessible refresh action in the current UI (th
 refreshes as a side effect of a new CSV selection/download succeeding), so this scenario is not
 deterministically reproducible through the UI and was skipped rather than treated as a pending validation
 item.
+
+#### P.36.10. Remove superseded monitoring and obsolete dependencies — Implemented, automated-tested, packaging-validated, not yet merged (2026-08-04)
+
+**Objective.** P.36.2 explicitly deferred "the physical removal of the superseded monitoring/dashboard/
+scheduler code" to this increment, and the "Remaining support and finalization stages" table in
+`ROADMAP.md` names it "Remove superseded monitoring and obsolete dependencies." This increment performs
+that removal: deleting the live-monitoring product flow (dashboard, scheduler, "Load Monitoring CSV",
+"Open Browser"/"Stop Browser", "Start Monitoring"/"Stop Monitoring") and every module/class/test proven
+unreachable once the P.36 date-range → managed-download → transform → publish workflow was complete,
+while preserving every required P.36 boundary and the still-active, pre-P.36 "Import PRISMA Export"
+(P.1–P.9) feature untouched. No behavior, contract, threshold, date rule, download mechanism, filename
+rule, collision behavior, publication semantics, or directory contract was changed; this is removal and
+documentation only.
+
+**Reachability inventory.** Before deleting anything, every candidate module was grep-traced from the two
+real P.36 entry points (`app.py`'s `PrismaMonitorApp`, and `prisma_lifecycle.py`/`prisma_download.py`) to
+confirm it had no remaining runtime, test, or packaging use outside the legacy monitoring flow:
+
+- `monitoring.py`, `monitoring_storage.py`, `scheduler.py`, `notifications.py`, and `auction_csv.py` were
+  reachable only from `app.py`'s legacy "Load Monitoring CSV"/"Start Monitoring" handlers, from each
+  other, and from their own dedicated test modules — never from `prisma_lifecycle.py`,
+  `prisma_download.py`, `prisma_import_workflow.py`, `processor.py`, `prisma_output.py`, or
+  `prisma_publication.py`. Deleted, along with `tests/test_monitoring.py`,
+  `tests/test_monitoring_storage.py`, `tests/test_scheduler.py`, `tests/test_notifications.py`, and
+  `tests/test_auction_csv.py`.
+- In `browser.py`, `BrowserController`, `PrismaAuctionFilter`, `BrowserState`, `LaunchResult`,
+  `_PageRequest`, and `_LaunchCancelled` were reachable only from the legacy "Open Browser"/"Stop Browser"
+  flow and `MonitoringEngine`. The P.36 booked-capacity threshold is enforced during CSV import
+  (`processor.py`), not by a live browser-page filter — confirmed by `prisma_download.py`'s own comment
+  distinguishing its independent date-filter control from `PrismaAuctionFilter`'s unrelated "Marketed
+  Capacity" field on the same page. Removed. `PRISMA_AUCTIONS_URL`, `DefaultBrowserDetector`, and
+  `_ensure_subprocess_output_streams` are kept unchanged — `prisma_lifecycle.py` imports all three
+  directly for the still-active Open Prisma/Close Prisma lifecycle.
+- In `prisma_page.py`, `PrismaPageReader`, `LivePrismaStatusAdapter`, `PrismaAuctionRow`,
+  `REQUIRED_TABLE_HEADERS`, `_STATUS_BY_KEY`, `normalize_page_text`, `normalize_prisma_status`,
+  `resolve_required_columns`, `parse_auction_rows`, `match_auction_row`, and the exception types
+  `PrismaPageStructureError`, `PrismaStatusParseError`, `PrismaAuctionMatchError`,
+  `PrismaLookupTimeoutError`, `PrismaAuctionNotFoundError`, and `PrismaAuctionAmbiguousError` were
+  reachable only from `BrowserController`/`MonitoringEngine` and their tests. Removed.
+  `prisma_download.py` (P.36.14) imports only `PrismaAuthenticationRequiredError`,
+  `PrismaInvalidSessionError`, and `PrismaSessionValidator` from this module; those three, plus the base
+  `PrismaPageAdapterError` and `PrismaSessionState`, are unchanged — this reusable session-validation
+  boundary is not removed merely because it originated in an older increment.
+- In `ui_components.py`, `AuctionRow`, `AuctionTableModel`, `AuctionFilterModel`, `StatusDelegate`,
+  `SummaryCard`, and `ArrowComboBox` backed only the legacy auction dashboard (search/filter, the auction
+  table, and the summary cards); none is used by `MappingTableModel` (P.36.8) or any surviving widget.
+  Removed, along with the CSS selectors tied one-to-one to their removed object names
+  (`dashboardSubtitle`, `metric`, `metricLabel`, `monitorBadge`). `browserBadge` styling is kept because
+  `prisma_badge` reuses that object name. `MappingTableModel` and `APP_STYLE` are otherwise unchanged.
+- `csv_contracts.py` (`MONITORING_CSV_COLUMNS`, `CsvFormat.MONITORING`, `detect_csv_format`,
+  `require_csv_format`) is completely unmodified: `manual_csv_selection.py`, `prisma_import_workflow.py`,
+  and the managed-download path all still call it to classify a selected/downloaded CSV, and a
+  Monitoring-shaped CSV mistakenly selected where a PRISMA Export CSV is required must still be named
+  specifically in the rejection message rather than falling back to a generic "unsupported format" —
+  this is active, reusable CSV-classification infrastructure the removed product flow only happened to
+  also use, not part of it.
+
+**`app.py` changes.** Removed the `BrowserController` instance and the entire legacy sidebar group ("Open
+Browser"/"Stop Browser"/"Load Monitoring CSV"/"Start Monitoring"/"Stop Monitoring", previously hidden —
+not deleted — by P.36.2); the "Monitoring dashboard" content panel (title, subtitle, summary cards, the
+auction table with search/filter, `browser_badge`, `monitor_badge`); `select_csv`,
+`_display_csv_records`, `_update_summary`, `open_prisma`, `_poll_browser_launch`,
+`_browser_start_failed`, `create_monitoring_engine`, `create_monitoring_scheduler`, `start_monitoring`,
+`stop_monitoring`, `_monitoring_worker`, `_monitoring_results`, `_monitoring_failure_message`,
+`_monitoring_finished`, `_set_monitoring_idle`, and `stop_work`; the `monitoring_results`/
+`monitoring_finished` Qt signals; and the `_monitoring_thread`/`_monitoring_stop_event`/`_browser_ready`/
+`_active_browser_launch`/`_auction_records` state, including their handling in `_update_controls()` and
+`closeEvent()` (the monitoring-active shutdown confirmation dialog and the `browser.stop()` call are both
+gone; the owned-Prisma-session and processing-thread shutdown sequencing is unchanged). The sidebar
+subtitle ("PRISMA auction monitoring") and the content-area header ("Monitoring dashboard" / "Track
+PRISMA auction states from your validated CSV data.") both described the panel just removed and were
+updated to describe the surviving scope ("PRISMA Export processing" / "Select a date range, obtain a
+PRISMA Export CSV, and publish the transformed output.") as a direct, necessary consequence of the
+removal — no panel was added and no surviving control was moved, renamed, or restyled, so this is not a
+UI redesign. Preserved unchanged: the "PRISMA" (Open/Close Prisma), "DOWNLOAD FOLDER", "PRISMA EXPORT
+CSV", and "DATE RANGE" sidebar groups; the "Import PRISMA Export"/"Open Result" controls and their
+`start_processing`/`_process_worker`/`_processing_finished`/`_finish_processing`/
+`_processing_succeeded`/`_processing_failed` handlers (the separate, still-active P.1–P.9 import feature,
+not part of the removed monitoring flow); the Mapping panel and `_refresh_mapping_display`; the Activity
+panel; the Prisma lifecycle open/close/download-event handling (`_open_prisma_session`,
+`_poll_prisma_lifecycle`, `_handle_download_event`, `_prisma_open_failed`, `_prisma_close_failed`,
+`_close_prisma_session`); and manual browser-closure detection (owned entirely by
+`PrismaLifecycleController`, untouched by this increment).
+
+**`prisma_import_workflow.py` change.** The `CsvFormat.MONITORING` rejection message referenced the
+now-deleted "Load Monitoring CSV" button ("Use Load Monitoring CSV for live monitoring."). The sentence
+was removed so the message no longer promises a UI path that no longer exists; the CSV-contract rejection
+itself ("Monitoring CSV cannot be imported as detailed PRISMA results.") is unchanged, and
+`tests/test_prisma_import_workflow.py`'s exact-message assertion was updated to match.
+
+**Documentation.** `CLAUDE.md`'s "Project identity" paragraph now states the monitoring product-flow code
+(`BrowserController`, `monitoring.py`, `monitoring_storage.py`, `scheduler.py`, `notifications.py`,
+`auction_csv.py`, and the matching UI) is removed, not merely superseded-but-present, and names P.36.10 as
+implemented on its feature branch. Its "Separate CSV contracts" section now states the Monitoring CSV
+contract survives only for `csv_contracts.py` format detection/rejection, not for loading.
+`BUILDING.md`'s `compileall` reproduction command was updated to drop the five deleted module names so it
+no longer fails with a missing-file error. `INSTALLER.md`'s manual-validation step 6 was reworded from
+"exercise browser opening, CSV import, monitoring start and stop" to the actual current controls (Open
+Prisma/Close Prisma, CSV selection or download, PRISMA Export import). The v1.0.0-specific
+`RELEASE_CHECKLIST.md` (already frozen and referencing the pre-P.36 "PRISMA Monitor v1.0.0" title) and
+every earlier dated entry in this file were left unmodified, preserving completed-increment history
+rather than rewriting it.
+
+**Automated evidence (2026-08-04).** `tests/test_auction_csv.py`, `tests/test_monitoring.py`,
+`tests/test_monitoring_storage.py`, `tests/test_notifications.py`, and `tests/test_scheduler.py` were
+deleted with their production modules. `tests/test_browser.py` was reduced to its two
+`DefaultBrowserDetector` tests (dropping `BrowserController`/`PrismaAuctionFilter` coverage).
+`tests/test_prisma_page.py` was reduced to its `PrismaSessionValidator` coverage (public/authenticated
+session classification, safe-location redaction), dropping the page-reading/parsing/
+`LivePrismaStatusAdapter` tests. In `tests/test_app.py`, roughly thirty legacy monitoring/browser-dashboard
+tests were removed (including `test_p36_2_legacy_monitoring_controls_are_hidden_not_deleted`, whose premise
+— that the legacy controls remain callable but hidden — is exactly what this increment supersedes), and the
+remaining shared fixtures/tests that referenced the now-removed `BrowserController` mock or
+`_monitoring_thread` state were updated in place: the `_build_app`/`window` fixture no longer patches
+`BrowserController`; the mapping-refresh "does not touch output writing/publication/browser" test, the
+date-range "triggers no browser/lifecycle/file/processing operation" test, the
+`test_shutdown_closes_only_the_owned_prisma_session` test, and the close-defers-while-workers-are-alive
+test now assert only against `prisma_lifecycle` and the processing-thread state that still exists. This
+regression coverage proves the supported P.36 application composition still exposes its required controls
+and behavior after the removal. The complete pytest suite passed with **637 tests passed, 1 skipped**
+(down from 821 passed/1 skipped after the P.36.8 merge — consistent with deleting five modules' worth of
+dedicated tests plus roughly 150 legacy `test_app.py` tests while keeping all P.36 coverage).
+Project-wide `python -m compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`, `dist`, with the
+same pre-existing, unrelated `.pytest_tmp` permission warning recorded in every prior entry in this file)
+exited `0`. `git diff --check` passed against the actual working-tree changes; a set of pre-existing
+untracked `*-final-review.diff` scratch files from earlier increments were left untouched and out of
+scope.
+
+**Packaging validation (2026-08-04).** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec`
+completed successfully. No `requirements.txt` or `PrismaFunction.spec` change was needed: this increment
+removed no dependency — `pandas`, `openpyxl`, `playwright`, and `PySide6` are all still used by the
+surviving P.1–P.9/P.36 code paths — so the packaging inputs were unchanged; the rebuild instead confirms
+PyInstaller's dependency graph still resolves cleanly after the module deletions. `python
+validate_package.py` passed against the freshly built `dist\PrismaFunction\` directory.
+
+**Outstanding before this increment can be marked ✅ Completed:** merge to `main` (the user creates and
+merges pull requests; none was performed here). No new real-Windows manual validation is required by this
+increment specifically, since it only removes already-unreachable code and adjusts documentation without
+changing any preserved P.36 behavior, contract, or boundary; the outstanding real-Windows validation items
+already recorded for P.36.8, P.36.14, P.36.15, and P.36.16 elsewhere in this document are unaffected and
+remain separately tracked.

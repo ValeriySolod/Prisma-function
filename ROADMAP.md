@@ -98,9 +98,11 @@ Detailed historical records and test counts remain in `workflow_p.md` and Git hi
 | P.36.7 | 14-column output CSV writer | 🚫 Suspended / superseded | Replaced by P.36.15. |
 | P.36.9 | Accumulation/deduplication/atomic publication under the withdrawn design | 🚫 Suspended / superseded | Publication is redefined by P.36.16 after its decision gate. |
 
-P.36.8 is implemented and automated-tested on `feature/p36-8-mapping-display` (see its dated entry
-below); not yet merged. P.36.10, P.36.11, and P.36.12 remain planned support/finalization stages. They
-must be scheduled only when their dependencies below are satisfied and must use the 12-column contract.
+P.36.8 is implemented, automated-tested, and merged to `main` via PR #64 (merge commit `5e3f309`; see
+its dated entry below). P.36.10 is implemented, automated-tested, and packaging-validated on
+`feature/p36-10-remove-superseded-monitoring` (see its dated entry below); not yet merged. P.36.11 and
+P.36.12 remain planned support/finalization stages. They must be scheduled only when their dependencies
+below are satisfied and must use the 12-column contract.
 
 ### P.36.13 — Date-range selection inside Prisma Function
 
@@ -1225,8 +1227,9 @@ rather than skipped.
 ### P.36.8 — Mapping display in the UI
 
 **Status:** 🟡 Implemented, automated-tested, and manually validated on real Windows (2026-08-04) via manual
-CSV selection; branched from `main` at merge commit `daf4760` (the P.36.16 merge via PR #63). Not yet
-merged. Real-Windows validation of the managed-download (P.36.14) trigger path has not been performed.
+CSV selection; branched from `main` at merge commit `daf4760` (the P.36.16 merge via PR #63) and merged to
+`main` via PR #64 (merge commit `5e3f309`). Real-Windows validation of the managed-download (P.36.14)
+trigger path has not been performed.
 **Dependency required before implementation:** P.36.15 completed.
 
 **Decision made (2026-08-04, this increment):** nothing in `ROADMAP.md` or `workflow_p.md` wires a
@@ -1420,9 +1423,9 @@ exercised only the manual-selection (P.36.4) trigger path; the managed-download 
 outstanding. Validating the packaged executable itself (rather than a from-source run) also remains
 outstanding, blocked by the Windows Application Control restriction noted above.
 
-**Outstanding before this increment can be marked ✅ Completed:** merge to `main`; real-Windows manual
-validation of the managed-download (P.36.14) trigger path populating/refreshing/clearing the Mapping panel
-identically to the now-validated manual-selection path; and validating the packaged `PrismaFunction.exe`
+**Outstanding before this increment can be marked ✅ Completed:** real-Windows manual validation of the
+managed-download (P.36.14) trigger path populating/refreshing/clearing the Mapping panel identically to
+the now-validated manual-selection path; and validating the packaged `PrismaFunction.exe`
 itself once the Windows Application Control restriction noted above is resolved or an approved machine is
 available. Moving/deleting the selected file before a refresh was explicitly not tested and is not tracked
 as outstanding: there is no user-accessible refresh action in the current UI (the Mapping display only
@@ -1430,12 +1433,148 @@ refreshes as a side effect of a new CSV selection/download succeeding), so this 
 deterministically reproducible through the UI and was skipped rather than treated as a pending validation
 item.
 
+#### P.36.10. Remove superseded monitoring and obsolete dependencies — Implemented (2026-08-04)
+
+**Objective:** Physically remove the superseded live-monitoring product flow (dashboard, scheduler,
+"Load Monitoring CSV", "Open Browser"/"Stop Browser", "Start Monitoring"/"Stop Monitoring") and the
+code/dependencies that became unreachable once the P.36 date-range → managed-download → transform →
+publish workflow was completed, per the removal explicitly reserved for this increment by P.36.2 and
+listed as `⬜ Planned` in the table below. This is code removal and documentation only; it does not
+touch the 12-column output contract, transformations, mappings, threshold, date rules, download
+mechanism, filename rules, collision behavior, publication semantics, or directory contract, and it
+does not redesign the surviving P.36 UI beyond removing the now-dead panel/controls that described the
+removed feature.
+
+**Evidence-based reachability inventory (performed before any deletion).** Every candidate module was
+grep-traced from `app.py` and from `prisma_lifecycle.py`/`prisma_download.py` (the P.36 runtime entry
+points) to confirm whether it was still reachable:
+
+- `monitoring.py` (`MonitoringEngine`, `MonitoringResult`), `monitoring_storage.py` (`MonitoringStorage`,
+  `MonitoringStorageError`), `scheduler.py` (`MonitoringScheduler`), `notifications.py`
+  (`StatusChangeNotification`), and `auction_csv.py` (`AuctionCsvRecord`, `load_auction_csv`,
+  `CsvValidationError`, the Monitoring CSV loader) were reachable only from the legacy "Load Monitoring
+  CSV" / "Start Monitoring" flow in `app.py` and from each other's tests — never from
+  `prisma_lifecycle.py`, `prisma_download.py`, `prisma_import_workflow.py`, `processor.py`,
+  `prisma_output.py`, or `prisma_publication.py`. Deleted outright, with their dedicated test modules
+  (`tests/test_monitoring.py`, `tests/test_monitoring_storage.py`, `tests/test_scheduler.py`,
+  `tests/test_notifications.py`, `tests/test_auction_csv.py`).
+- `browser.py`'s `BrowserController`, `PrismaAuctionFilter` (the live-page "Marketed Capacity >= 1000"
+  browser filter), `BrowserState`, `LaunchResult`, `_PageRequest`, and `_LaunchCancelled` were reachable
+  only from the legacy "Open Browser"/"Stop Browser" flow and `MonitoringEngine`; the P.36 booked-capacity
+  threshold is enforced in CSV processing (`processor.py`), not via a live browser-page filter, confirmed
+  by `prisma_download.py`'s own comment distinguishing its independent date-filter control from
+  `PrismaAuctionFilter`. Removed. `PRISMA_AUCTIONS_URL`, `DefaultBrowserDetector`, and
+  `_ensure_subprocess_output_streams` remain — `prisma_lifecycle.py` imports all three directly and they
+  have no monitoring-specific behavior.
+- `prisma_page.py`'s `PrismaPageReader`, `LivePrismaStatusAdapter`, `PrismaAuctionRow`,
+  `REQUIRED_TABLE_HEADERS`, `_STATUS_BY_KEY`, `normalize_page_text`, `normalize_prisma_status`,
+  `resolve_required_columns`, `parse_auction_rows`, `match_auction_row`, and the exception types
+  `PrismaPageStructureError`, `PrismaStatusParseError`, `PrismaAuctionMatchError`,
+  `PrismaLookupTimeoutError`, `PrismaAuctionNotFoundError`, and `PrismaAuctionAmbiguousError` were
+  reachable only from `BrowserController`/`MonitoringEngine`/their tests. Removed. `prisma_download.py`
+  (P.36.14) imports only `PrismaAuthenticationRequiredError`, `PrismaInvalidSessionError`, and
+  `PrismaSessionValidator` from this module — all three, plus the base `PrismaPageAdapterError` and
+  `PrismaSessionState`, are kept unchanged; this reusable session-validation boundary was not touched
+  merely because it originated in an older increment.
+- `ui_components.py`'s `AuctionRow`, `AuctionTableModel`, `AuctionFilterModel`, `StatusDelegate`,
+  `SummaryCard`, and `ArrowComboBox` backed only the legacy auction dashboard (search/filter, the
+  auction table, and the summary cards) and the "Filter by status" combo box; none are used by
+  `MappingTableModel` (P.36.8) or any other surviving widget. Removed, along with the CSS selectors
+  tied one-to-one to their removed object names (`dashboardSubtitle`, `metric`, `metricLabel`,
+  `monitorBadge`). `browserBadge` styling is kept because `prisma_badge` reuses that object name.
+  `MappingTableModel` and `APP_STYLE` are otherwise unchanged.
+- `csv_contracts.py` was left completely unmodified: `MONITORING_CSV_COLUMNS` and `CsvFormat.MONITORING`
+  remain, because `manual_csv_selection.py`, `prisma_import_workflow.py`, and the managed-download path
+  all still call `detect_csv_format`/`require_csv_format`, and a Monitoring-shaped CSV selected where a
+  PRISMA Export CSV is expected must still be identified and named in the rejection message rather than
+  reported as a generic "unsupported format" — this is active, reusable CSV-classification
+  infrastructure, not part of the removed product flow.
+
+**`app.py` changes.** Removed: the `BrowserController` instance and the entire legacy "Open
+Browser"/"Stop Browser"/"Load Monitoring CSV"/"Start Monitoring"/"Stop Monitoring" sidebar controls
+(previously hidden by P.36.2, now deleted, not just hidden); the "Monitoring dashboard" content panel
+(title, subtitle, summary cards, auction table with search/filter, `browser_badge`, `monitor_badge`);
+`select_csv`, `_display_csv_records`, `_update_summary`, `open_prisma`, `_poll_browser_launch`,
+`_browser_start_failed`, `create_monitoring_engine`, `create_monitoring_scheduler`, `start_monitoring`,
+`stop_monitoring`, `_monitoring_worker`, `_monitoring_results`, `_monitoring_failure_message`,
+`_monitoring_finished`, `_set_monitoring_idle`, and `stop_work`; the `monitoring_results`/
+`monitoring_finished` Qt signals; and the corresponding `_monitoring_thread`/`_monitoring_stop_event`/
+`_browser_ready`/`_active_browser_launch`/`_auction_records` state and their handling in
+`_update_controls()` and `closeEvent()`. The stale sidebar subtitle ("PRISMA auction monitoring") and
+content-area header ("Monitoring dashboard" / "Track PRISMA auction states from your validated CSV
+data.") — both describing the panel just removed — were updated to describe the surviving P.36 scope
+("PRISMA Export processing" / "Select a date range, obtain a PRISMA Export CSV, and publish the
+transformed output.") as a direct, necessary consequence of the removal; no panel was added, and no
+surviving control was moved, renamed, or restyled. Preserved unchanged: the "PRISMA" (Open/Close Prisma),
+"DOWNLOAD FOLDER", "PRISMA EXPORT CSV", and "DATE RANGE" sidebar groups; the "Import PRISMA Export"/"Open
+Result" controls and `start_processing`/`_process_worker`/`_processing_finished`/`_finish_processing`/
+`_processing_succeeded`/`_processing_failed` (a separate, still-active P.1–P.9 feature, not part of the
+removed monitoring flow); the Mapping panel and its refresh boundary; the Activity panel; the Prisma
+lifecycle open/close/download-event handling; and the shutdown sequencing for the owned PRISMA browser
+session and any in-flight processing thread.
+
+**`prisma_import_workflow.py` change.** The `CsvFormat.MONITORING` rejection message referenced the
+now-deleted "Load Monitoring CSV" button ("Use Load Monitoring CSV for live monitoring."); the sentence
+was removed so the message no longer promises a UI path that no longer exists, while the CSV-contract
+rejection itself (`"Monitoring CSV cannot be imported as detailed PRISMA results."`) is unchanged.
+
+**Documentation.** `CLAUDE.md`'s "Project identity" paragraph and "Separate CSV contracts" section were
+updated to state the monitoring product-flow code is removed (not merely superseded-but-present) and
+that the Monitoring CSV contract now exists only for format detection/rejection, not loading.
+`BUILDING.md`'s `compileall` reproduction command was updated to drop the five deleted module names, so
+it no longer fails with a missing-file error. `INSTALLER.md`'s manual-validation step 6 was reworded from
+"exercise browser opening, CSV import, monitoring start and stop" to the actual current controls (Open
+Prisma/Close Prisma, CSV selection or download, PRISMA Export import). `RELEASE_CHECKLIST.md` (a frozen
+v1.0.0 release-specific checklist already referencing the pre-P.36 "PRISMA Monitor v1.0.0" title) and
+`workflow_p.md`'s historical dated entries were left unchanged, preserving completed-increment history
+per the task's explicit instruction not to rewrite it.
+
+**Automated evidence (2026-08-04).** `tests/test_auction_csv.py`, `tests/test_monitoring.py`,
+`tests/test_monitoring_storage.py`, `tests/test_notifications.py`, and `tests/test_scheduler.py` were
+deleted with their production modules. `tests/test_browser.py` was reduced from covering
+`BrowserController`/`PrismaAuctionFilter` to its two still-relevant `DefaultBrowserDetector` tests.
+`tests/test_prisma_page.py` was reduced to its `PrismaSessionValidator` coverage (session/authentication
+classification, safe-location redaction), dropping the page-reading/parsing/`LivePrismaStatusAdapter`
+tests. `tests/test_prisma_import_workflow.py` was updated for the trimmed rejection message.
+`tests/test_app.py` had roughly thirty legacy monitoring/browser-dashboard tests removed
+(`test_p36_2_legacy_monitoring_controls_are_hidden_not_deleted`, CSV-load/summary/status-filter tests,
+`open_prisma`/`_poll_browser_launch`/browser-result tests, and the full `start_monitoring`/
+`_monitoring_worker`/`_monitoring_results`/`_monitoring_finished` group) and the remaining shared
+fixtures/tests that referenced the removed `BrowserController` mock or `_monitoring_thread` state were
+updated in place (`_build_app`/`window` fixture no longer patches `BrowserController`; the mapping-refresh
+"no browser touched" test, the date-range "no browser/lifecycle/file operation" test, the Prisma-lifecycle
+shutdown test, and the close-defers-while-workers-are-alive test now assert only against
+`prisma_lifecycle` and the processing-thread state that still exists) — this is the P.36 application
+composition still exposing its required controls and behavior, proving the removal didn't regress the
+supported product flow. The complete pytest suite passed with **637 tests passed, 1 skipped** (down from
+821 passed/1 skipped after the P.36.8 merge, consistent with removing five modules' worth of dedicated
+tests plus ~150 legacy `test_app.py` tests while keeping all P.36 coverage). Project-wide
+`python -m compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`, `dist`, with the same
+pre-existing, unrelated `.pytest_tmp` permission warning recorded in every prior entry in this file)
+exited `0`. `git diff --check` passed on the actual working-tree changes (a set of pre-existing untracked
+`*-final-review.diff` scratch files from earlier increments were left untouched, not part of this
+increment's scope).
+
+**Packaging validation.** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` completed
+successfully (no `requirements.txt` or `PrismaFunction.spec` changes were needed: no dependency was
+removed by this increment — `pandas`, `openpyxl`, `playwright`, and `PySide6` are all still used by the
+surviving P.1–P.9/P.36 code paths — so the packaging inputs were unchanged; the rebuild instead confirms
+PyInstaller's dependency graph still resolves cleanly after the module deletions). `python
+validate_package.py` passed against the freshly built `dist\PrismaFunction\` directory.
+
+**Outstanding before this increment can be marked ✅ Completed:** merge to `main` (the user creates and
+merges pull requests; none was performed by this increment). No real-Windows manual validation is
+required specifically for this increment, since it removes unreachable code and adjusts documentation
+without changing any preserved P.36 behavior, contract, or boundary; the existing outstanding real-Windows
+validation items for P.36.8/P.36.14/P.36.15/P.36.16 recorded elsewhere in this document are unaffected and
+remain separately tracked.
+
 ### Remaining support and finalization stages
 
 | ID | Stage | Status | Dependencies and scope |
 |---|---|---|---|
-| P.36.8 | Mapping display in the UI | 🟡 Implemented, automated-tested, manually validated on real Windows (manual-selection path only); not yet merged | Requires P.36.15 (met). See its own dated section above for the full implemented result and evidence. |
-| P.36.10 | Remove superseded monitoring and obsolete dependencies | ⬜ Planned | Begin only after the final P.36 runtime flow is integrated and covered. Remove only code proven unreachable/obsolete; preserve required browser, mapping, import, audit, and packaging boundaries. |
+| P.36.8 | Mapping display in the UI | 🟡 Implemented, automated-tested, merged to `main` (PR #64); manually validated on real Windows (manual-selection path only) | Requires P.36.15 (met). See its own dated section above for the full implemented result and evidence. |
+| P.36.10 | Remove superseded monitoring and obsolete dependencies | 🟡 Implemented, automated-tested, packaging-validated; not yet merged | See its own dated section above for the full implemented result and evidence. |
 | P.36.11 | Windows packaging and installer validation | ⬜ Planned | Requires the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16. Update and validate PyInstaller and Inno Setup artifacts. |
 | P.36.12 | Regression and clean-Windows acceptance | ⬜ Planned | Final gate after all required P.36 implementation and packaging stages. Run the full suite and the approved real-Windows end-to-end checklist. |
 
@@ -1478,11 +1617,12 @@ item.
   not yet manually validated on real Windows/real PRISMA data.
 - P.36.8 (mapping display) is implemented, automated-tested, and manually validated on real Windows via the
   manual-selection (P.36.4) trigger path (2026-08-04, see its dated entry above); branched from `main` at
-  merge commit `daf4760`; not yet merged. Real-Windows validation of the managed-download (P.36.14) trigger
-  path remains outstanding.
+  merge commit `daf4760` and merged to `main` via PR #64 (merge commit `5e3f309`). Real-Windows validation
+  of the managed-download (P.36.14) trigger path remains outstanding.
 - `ROADMAP.md`, `workflow_p.md`, and `CLAUDE.md` must remain synchronized on the active 12-column contract and P.36 dependency order.
 - Completed P.36.4 remains useful as fallback, but treating it as the primary flow would contradict the current specification.
-- The superseded monitoring subsystem remains present until P.36.10; new work must not accidentally reconnect it as the product workflow.
+- P.36.10 (superseded monitoring/scheduler removal) is implemented, automated-tested, and
+  packaging-validated on its feature branch (2026-08-04, see its dated entry above); not yet merged.
 
 ## Next recommended increment
 
@@ -1503,9 +1643,13 @@ item.
    PR #63 (merge commit `daf4760`; see its dated 2026-08-04 entry above); obtain manual
    real-Windows/real-PRISMA validation before wiring a UI trigger for the complete P.36.14→P.36.15→P.36.16
    pipeline.
-7. P.36.8 is implemented, automated-tested, and manually validated on real Windows via the manual-selection
-   (P.36.4) trigger path (see its dated 2026-08-04 entries above); merge it, then obtain real-Windows
-   validation of the managed-download (P.36.14) trigger path.
+7. P.36.8 is implemented, automated-tested, merged to `main` via PR #64 (merge commit `5e3f309`), and
+   manually validated on real Windows via the manual-selection (P.36.4) trigger path (see its dated
+   2026-08-04 entries above); obtain real-Windows validation of the managed-download (P.36.14) trigger
+   path.
+8. P.36.10 is implemented, automated-tested, and packaging-validated (see its dated 2026-08-04 entry
+   above); merge it, then proceed to P.36.11 (Windows packaging and installer validation), which requires
+   the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 

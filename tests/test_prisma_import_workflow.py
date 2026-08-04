@@ -110,8 +110,7 @@ def test_monitoring_and_unsupported_inputs_are_rejected(tmp_path):
     with pytest.raises(PrismaWorkflowError) as caught:
         run(monitoring, tmp_path, date(2025, 1, 1))
     assert str(caught.value) == (
-        "Monitoring CSV cannot be imported as detailed PRISMA results. "
-        "Use Load Monitoring CSV for live monitoring."
+        "Monitoring CSV cannot be imported as detailed PRISMA results."
     )
     unknown = tmp_path / "unknown.csv"
     unknown.write_text("name,value\n", encoding="utf-8")

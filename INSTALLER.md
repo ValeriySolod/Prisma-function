@@ -89,8 +89,8 @@ Perform these checks on a standard non-administrator Windows account:
 3. Confirm the installer version and publisher identity.
 4. Install to the default per-user directory without elevation.
 5. Confirm the Start Menu shortcut and optional desktop shortcut behavior.
-6. Launch the application and exercise browser opening, CSV import, monitoring start
-   and stop, generated output, shutdown, and relaunch.
+6. Launch the application and exercise Open Prisma/Close Prisma, CSV selection or
+   download, PRISMA Export import, generated output, shutdown, and relaunch.
 7. Confirm writable data appears only below `%LOCALAPPDATA%\PrismaFunction`.
 8. Install the same or a newer build over the existing installation and confirm user
    data remains intact.

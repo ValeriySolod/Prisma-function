@@ -88,8 +88,7 @@ def run_prisma_import_workflow(source_path: str | Path, *, source_date: date, ev
     detection = detect_csv_format(source_path)
     if detection.format is CsvFormat.MONITORING:
         raise PrismaWorkflowError(
-            "Monitoring CSV cannot be imported as detailed PRISMA results. "
-            "Use Load Monitoring CSV for live monitoring."
+            "Monitoring CSV cannot be imported as detailed PRISMA results."
         )
     if detection.format is CsvFormat.AMBIGUOUS:
         raise PrismaWorkflowError("The CSV contract is ambiguous and cannot be imported safely.")
