@@ -1,5 +1,7 @@
 import sys
 import threading
+import time
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -7,6 +9,11 @@ from unittest.mock import Mock
 import pytest
 
 from browser import DefaultBrowserDetector, PRISMA_AUCTIONS_URL
+from date_range_selection import DateRange
+from prisma_download import (
+    PrismaAuthenticationRequiredError,
+    PrismaDownloadOrchestrator,
+)
 from prisma_lifecycle import (
     PRISMA_OFFICIAL_URL,
     PrismaLifecycleController,
@@ -26,9 +33,16 @@ def default_browser(monkeypatch):
 class EventEmitter:
     def __init__(self):
         self.listeners = {}
+        self.removed_listeners: list[tuple[str, object]] = []
 
     def on(self, event, callback):
         self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback):
+        self.removed_listeners.append((event, callback))
+        listeners = self.listeners.get(event)
+        if listeners and callback in listeners:
+            listeners.remove(callback)
 
     def emit(self, event):
         for callback in self.listeners.get(event, [])[:]:
@@ -1148,6 +1162,1185 @@ def test_normal_close_is_not_misreported_when_cdp_target_destroyed_fires_during_
         PrismaLifecycleEvent(generation, True, kind="close")
     ]
     assert controller.state is PrismaLifecycleState.IDLE
+
+
+# --- P.36.14: managed PRISMA CSV download ---------------------------------
+#
+# These fakes model the real, live-verified DOM contract (Active Filter
+# panel toggle, startOfAuctionFrom/To masked inputs, Filter apply button —
+# see ROADMAP.md's P.36.14 real-validation record). Session validation
+# (authentication/session-usability) is exercised at the unit level in
+# tests/test_prisma_download.py; here a StubSessionValidator is injected via
+# a custom PrismaDownloadOrchestrator so these tests stay focused on
+# PrismaLifecycleController's own wiring (event emission, cancellation,
+# backward compatibility) rather than re-verifying DOM-contract details.
+
+
+class StubSessionValidator:
+    def __init__(self, *, error=None):
+        self.error = error
+
+    def validate(self, page):
+        if self.error:
+            raise self.error
+
+
+class FakeDateFieldLocator:
+    """Real-Windows defect (2026-08-03): the real field also exposes a
+    `data-test-iso-value` attribute mirroring the framework's own committed
+    value, verified via `field.evaluate(...)` — which computes and returns a
+    boolean match, never the browser's own local-timezone conversion (see
+    `prisma_download._verify_committed_field_state`'s docstring) — and
+    `_fill_field` now blurs the field before verification. `evaluate()`
+    returns ``True`` by default (matches "committed correctly"), so existing
+    lifecycle-level tests exercise that path without change;
+    `iso_committed_override=False` simulates a mismatch and ``None``
+    simulates an absent attribute.
+    """
+
+    def __init__(
+        self, *, visible=True, fill_error=None, echo_fill=True, aria_invalid=None,
+        iso_committed_override=True,
+    ):
+        self.visible = visible
+        self.fill_error = fill_error
+        self.echo_fill = echo_fill
+        self.aria_invalid = aria_invalid
+        self.iso_committed_override = iso_committed_override
+        self.fill_calls: list[str] = []
+        self.blur_calls = 0
+        self._value = "DD.MM.YYYY      HH:mm"
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, state="visible", timeout=None):
+        if not self.visible:
+            raise TimeoutError(f"Locator.wait_for: Timeout {timeout}ms exceeded.")
+
+    def click(self, timeout=None):
+        pass
+
+    def press(self, key, timeout=None):
+        pass
+
+    def fill(self, value, timeout=None):
+        if self.fill_error:
+            raise self.fill_error
+        self.fill_calls.append(value)
+        if self.echo_fill:
+            self._value = value
+
+    def input_value(self, timeout=None):
+        return self._value
+
+    def get_attribute(self, name):
+        return self.aria_invalid if name == "aria-invalid" else None
+
+    def evaluate(self, script, arg=None, timeout=None):
+        if "blur" in script:
+            self.blur_calls += 1
+            return None
+        return self.iso_committed_override
+
+
+class FakeFilterButtonLocator:
+    def __init__(
+        self, *, visible=True, click_error=None,
+        hidden_after_click=True, wait_hidden_error=None,
+        obstructed=False,
+    ):
+        self.visible = visible
+        self.click_error = click_error
+        self.click_calls = 0
+        self.click_force_values: list[bool | None] = []
+        self.hidden_after_click = hidden_after_click
+        self.wait_hidden_error = wait_hidden_error
+        self.obstructed = obstructed
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, state="visible", timeout=None):
+        if state == "hidden":
+            if self.wait_hidden_error:
+                raise self.wait_hidden_error
+            if not self.hidden_after_click:
+                raise TimeoutError(f"Locator.wait_for: Timeout {timeout}ms exceeded.")
+            return
+        if not self.visible:
+            raise TimeoutError(f"Locator.wait_for: Timeout {timeout}ms exceeded.")
+
+    def click(self, timeout=None, force=None):
+        self.click_calls += 1
+        self.click_force_values.append(force)
+        if self.click_error:
+            raise self.click_error
+
+    def bounding_box(self):
+        return {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}
+
+    def evaluate(self, script, arg=None):
+        return self.obstructed
+
+    def scroll_into_view_if_needed(self, timeout=None):
+        pass
+
+
+class FakeAppliedFilterChip:
+    """Models the `data-testid="filter-startOfAuctionFrom"` chip PRISMA
+    echoes the applied range back into once "Filter" is clicked. Defaults to
+    reflecting whatever was actually filled into the two date fields (see
+    tests/test_prisma_download.py for the unit-level coverage of its own
+    failure modes).
+    """
+
+    def __init__(self, page, *, visible=True):
+        self._page = page
+        self.visible = visible
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, state="visible", timeout=None):
+        if not self.visible:
+            raise TimeoutError(f"Locator.wait_for: Timeout {timeout}ms exceeded.")
+
+    def inner_text(self, timeout=None):
+        return (
+            f"Start of Auction\n{self._page.from_field.input_value()} - "
+            f"{self._page.to_field.input_value()}"
+        )
+
+    def filter(self, has_text=None):
+        return FakeFilteredChipLocator(self, has_text)
+
+
+class FakeFilteredChipLocator:
+    """Models `chip.filter(has_text=...)` (see tests/test_prisma_download.py
+    for the unit-level coverage of its lag-tolerant polling behavior)."""
+
+    def __init__(self, base, has_text):
+        self._base = base
+        self._has_text = has_text
+
+    def wait_for(self, state="visible", timeout=None):
+        self._base.wait_for(state=state, timeout=timeout)
+        text = self._base.inner_text()
+        pattern = self._has_text
+        matches = (
+            bool(pattern.search(text)) if hasattr(pattern, "search")
+            else (str(pattern) in text)
+        )
+        if not matches:
+            raise TimeoutError(f"Locator.wait_for: Timeout {timeout}ms exceeded.")
+
+
+class FakeAlertLocator:
+    """Models `page.get_by_role("alert")`: empty by default."""
+
+    def count(self):
+        return 0
+
+    def nth(self, index):
+        raise AssertionError("no alerts registered")
+
+
+class FakeLargeResultDialog:
+    """Models PRISMA's own large-export confirmation dialog."""
+
+    def __init__(self, *, visible=True, confirm_button=None):
+        self.visible = visible
+        self.confirm_button = confirm_button if confirm_button is not None else FakeFilterButtonLocator()
+
+    def wait_for(self, state="visible", timeout=None):
+        if not self.visible:
+            raise TimeoutError(f"Locator.wait_for: Timeout {timeout}ms exceeded.")
+
+    def get_by_role(self, role, name=None, exact=None):
+        if role == "button" and name == "CSV":
+            return self.confirm_button
+        raise AssertionError(f"unexpected dialog.get_by_role call: {role!r} {name!r}")
+
+
+class FakeDialogQuery:
+    """Models `page.get_by_role("dialog").filter(has_text=...)`. Absent by
+    default, matching "absence of the large-result modal is normal".
+    """
+
+    def __init__(self, dialog=None):
+        self._dialog = dialog
+
+    def filter(self, has_text=None):
+        return self
+
+    @property
+    def first(self):
+        return self._dialog if self._dialog is not None else FakeLargeResultDialog(visible=False)
+
+
+class FakeManagedPage(FakePage):
+    """Extends FakePage with the real Active-Filter-panel automation P.36.14
+    performs only when a managed download is requested. Kept separate from
+    the base FakePage (whose `__getattr__` proves no extra automation occurs
+    for the plain Open Prisma path) so that proof stays intact.
+    """
+
+    def __init__(
+        self, *args,
+        filter_toggle=None, filter_button=None,
+        from_field=None, to_field=None, download_button=None,
+        cookie_decline_button=None, cookie_accept_button=None,
+        large_result_dialog=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.filter_toggle = filter_toggle if filter_toggle is not None else FakeFilterButtonLocator()
+        self.filter_button = filter_button if filter_button is not None else FakeFilterButtonLocator()
+        self.from_field = from_field if from_field is not None else FakeDateFieldLocator()
+        self.to_field = to_field if to_field is not None else FakeDateFieldLocator()
+        self.download_button = download_button if download_button is not None else FakeFilterButtonLocator()
+        # Absent by default, matching "banner absence is normal"; the DOM
+        # contract itself is unit-tested in tests/test_prisma_download.py, so
+        # here it is only exercised where a lifecycle-level test needs it.
+        self.cookie_decline_button = (
+            cookie_decline_button if cookie_decline_button is not None
+            else FakeFilterButtonLocator(visible=False)
+        )
+        self.cookie_accept_button = (
+            cookie_accept_button if cookie_accept_button is not None
+            else FakeFilterButtonLocator(visible=False)
+        )
+        self.applied_filter_chip = FakeAppliedFilterChip(self)
+        self.large_result_dialog = large_result_dialog
+
+    def get_by_role(self, role, name=None, exact=None):
+        if role == "dialog":
+            return FakeDialogQuery(self.large_result_dialog)
+        if role == "alert":
+            return FakeAlertLocator()
+        pattern = getattr(name, "pattern", str(name))
+        if role == "button" and "active" in pattern.lower():
+            return self.filter_toggle
+        if role == "button" and pattern == r"^Filter$":
+            return self.filter_button
+        if role == "button" and pattern == "CSV":
+            return self.download_button
+        if role == "button" and pattern == "Decline":
+            return self.cookie_decline_button
+        if role == "button" and pattern == "Accept & Close":
+            return self.cookie_accept_button
+        raise AssertionError(f"unexpected get_by_role call: {role!r} {pattern!r}")
+
+    def get_by_test_id(self, test_id):
+        if test_id == "filter-startOfAuctionFrom":
+            return self.applied_filter_chip
+        if test_id == "startOfAuctionFrom":
+            return self.from_field
+        if test_id == "startOfAuctionTo":
+            return self.to_field
+        raise AssertionError(f"unexpected get_by_test_id call: {test_id!r}")
+
+    def wait_for_load_state(self, state=None, timeout=None):
+        pass
+
+
+def _managed_download_controller(**orchestrator_kwargs):
+    orchestrator_kwargs.setdefault("session_validator", StubSessionValidator())
+    orchestrator = PrismaDownloadOrchestrator(**orchestrator_kwargs)
+    return PrismaLifecycleController(download_orchestrator=orchestrator)
+
+
+class FakeDownload:
+    def __init__(self, suggested_filename, *, failure=None):
+        self.suggested_filename = suggested_filename
+        self._failure = failure
+        self.save_as_calls = []
+
+    def failure(self):
+        return self._failure
+
+    def save_as(self, path):
+        self.save_as_calls.append(path)
+        Path(path).write_bytes(b"a,b,c\n1,2,3\n")
+
+    def cancel(self):
+        pass
+
+
+DATE_RANGE = DateRange(date(2026, 8, 1), date(2026, 8, 31))
+
+
+def _fire_download(page: FakeManagedPage, download: FakeDownload) -> None:
+    """Fires the download callback registered on the page's context (not the
+    page itself): the real CSV export was found to open in a new tab, so
+    P.36.14's listener is context-scoped (see prisma_download.py).
+    """
+    listeners = page.context.listeners.get("download", [])
+    assert len(listeners) == 1
+    listeners[0](download)
+
+
+def test_open_without_download_arguments_performs_no_managed_download_automation(
+    monkeypatch,
+):
+    """Backward compatibility: omitting date_range/download_directory keeps
+    the pre-P.36.14 behavior exactly, proven by FakePage's __getattr__ guard.
+    """
+    browser = FakeBrowser()
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    assert browser.page.goto_calls == [
+        (PRISMA_OFFICIAL_URL, {"wait_until": "domcontentloaded"})
+    ]
+    controller.close()
+    join_worker(controller)
+
+
+def test_open_without_download_arguments_never_sets_a_downloads_path(monkeypatch):
+    """Backward compatibility: the pre-P.36.14 no-managed-download path must
+    not start passing `downloads_path` to `launch()` either.
+    """
+    browser = FakeBrowser()
+    launch_calls = []
+
+    def capturing_launch(**kwargs):
+        launch_calls.append(kwargs)
+        return browser
+
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, capturing_launch)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    assert len(launch_calls) == 1
+    assert "downloads_path" not in launch_calls[0]
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_launches_the_browser_with_downloads_path_set_to_the_configured_directory(
+    monkeypatch, tmp_path,
+):
+    """Real-Windows defect fix (2026-08-03): without `downloads_path` set,
+    Chrome/CDP's download interception writes the raw artifact into a
+    Playwright-managed temp location that has no relationship to the folder
+    Prisma Function configured, so it is never found there — matching the
+    confirmed defect where Chrome showed a completed download under a
+    temporary name while the configured directory stayed empty.
+    """
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    launch_calls = []
+
+    def capturing_launch(**kwargs):
+        launch_calls.append(kwargs)
+        return browser
+
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, capturing_launch)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+
+    assert len(launch_calls) == 1
+    assert launch_calls[0]["downloads_path"] == str(tmp_path)
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_opens_the_real_filter_panel_and_fills_both_dates(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+
+    assert controller.get_events() == [PrismaLifecycleEvent(1, True, kind="open")]
+    # Exactly one navigation (the approved URL P.36.2 already opens); no
+    # second "reporting page" navigation is performed (see ROADMAP.md's
+    # P.36.14 real-validation correction — the reporting page is the same
+    # page, so a second goto() would only be a redundant reload).
+    assert page.goto_calls == [
+        (PRISMA_OFFICIAL_URL, {"wait_until": "domcontentloaded"})
+    ]
+    assert page.filter_toggle.click_calls == 1
+    assert page.from_field.fill_calls == ["01.08.2026 00:00"]
+    assert page.to_field.fill_calls == ["31.08.2026 23:59"]
+    assert page.filter_button.click_calls == 1
+    # Registered on the context, not the page (see _fire_download docstring).
+    assert len(page.context.listeners.get("download", [])) == 1
+    # P.36.14 contract correction: PrismaFunction itself activates PRISMA's
+    # CSV download control; the user never presses anything on the website.
+    assert page.download_button.click_calls == 1
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_reports_as_an_open_failure_when_a_date_is_not_actually_committed(
+    monkeypatch, tmp_path,
+):
+    """Full-trace regression for the reported real-Windows defect: the UI's
+    selected start/end dates travel through `PrismaLifecycleController.open()`
+    into `PrismaDownloadOrchestrator.configure()`'s page automation, which
+    fills the field and the field's own framework-tracked committed value
+    (the one the real reporting/export request actually uses) never catches
+    up. This must fail the whole Open Prisma attempt through the existing
+    typed open-failure path rather than silently proceeding with PRISMA still
+    using a different date than the one selected in Prisma Function.
+    """
+    page = FakeManagedPage(
+        from_field=FakeDateFieldLocator(iso_committed_override=False),
+    )
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "open"
+    assert events[0].success is False
+    assert "start date value was not committed" in events[0].error
+    # The download control must never be activated with an unverified range.
+    assert page.download_button.click_calls == 0
+    join_worker(controller)
+
+
+def test_managed_download_configuration_failure_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage(from_field=FakeDateFieldLocator(fill_error=RuntimeError("locator not found")))
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert events[0].kind == "open"
+    assert "start date field rejected" in events[0].error
+    assert browser.closed.is_set()
+    assert controller.state is PrismaLifecycleState.IDLE
+
+
+def test_managed_download_authentication_required_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller(
+        session_validator=StubSessionValidator(
+            error=PrismaAuthenticationRequiredError(
+                "PRISMA authentication is required; the public session cannot continue."
+            )
+        ),
+    )
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert events[0].kind == "open"
+    assert "authentication is required" in events[0].error
+    # Authentication failure is detected before any filter-panel automation.
+    assert page.filter_toggle.click_calls == 0
+    assert controller.state is PrismaLifecycleState.IDLE
+
+
+def test_managed_download_missing_filter_controls_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage(from_field=FakeDateFieldLocator(visible=False))
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert "date-range controls could not be located" in events[0].error
+
+
+def test_managed_download_control_not_found_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage(download_button=FakeFilterButtonLocator(visible=False))
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert events[0].kind == "open"
+    assert "download control could not be found" in events[0].error
+    # The filter itself must have been applied before the (failed) attempt
+    # to locate the download control.
+    assert page.filter_button.click_calls == 1
+    # No listener is left registered when the control was never found.
+    assert page.context.listeners.get("download", []) == []
+
+
+def test_managed_download_control_activation_failure_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage(
+        download_button=FakeFilterButtonLocator(click_error=RuntimeError("element intercepted"))
+    )
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert "download control could not be activated" in events[0].error
+    # The listener must already be registered before the failed click.
+    assert len(page.context.listeners.get("download", [])) == 1
+
+
+def test_managed_download_filter_verification_failure_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    """Regression: if PRISMA's applied-filter chip does not confirm the
+    requested range (see prisma_download.py's `_verify_filter_applied`),
+    Open Prisma must fail like any other configure() failure, never proceed
+    to click the download control with an unconfirmed filter state.
+    """
+    page = FakeManagedPage()
+    page.applied_filter_chip = FakeAppliedFilterChip(page, visible=False)
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert events[0].kind == "open"
+    assert "could not be confirmed as applied" in events[0].error
+    assert page.download_button.click_calls == 0
+
+
+def test_managed_download_confirms_the_large_result_modal_when_present(
+    monkeypatch, tmp_path,
+):
+    """Regression: PRISMA's own large-export confirmation dialog (see
+    prisma_download.py's `_confirm_large_result_modal_if_present`) must be
+    confirmed automatically so the managed download still completes with no
+    manual browser interaction.
+    """
+    confirm = FakeFilterButtonLocator()
+    dialog = FakeLargeResultDialog(confirm_button=confirm)
+    page = FakeManagedPage(large_result_dialog=dialog)
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+
+    assert controller.get_events() == [PrismaLifecycleEvent(1, True, kind="open")]
+    assert page.download_button.click_calls == 1
+    assert confirm.click_calls == 1
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_large_result_modal_that_cannot_be_confirmed_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    dialog = FakeLargeResultDialog(
+        confirm_button=FakeFilterButtonLocator(click_error=RuntimeError("element intercepted"))
+    )
+    page = FakeManagedPage(large_result_dialog=dialog)
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert events[0].kind == "open"
+    assert "large-result confirmation could not be confirmed" in events[0].error
+
+
+def test_managed_download_absent_large_result_modal_is_treated_as_normal(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()  # large_result_dialog is None (absent) by default
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+
+    assert controller.get_events() == [PrismaLifecycleEvent(1, True, kind="open")]
+    assert page.download_button.click_calls == 1
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_captures_the_csv_after_large_result_modal_confirmation(
+    monkeypatch, tmp_path,
+):
+    """The download is still captured end-to-end (name, collision-safe save)
+    when it followed a large-result modal confirmation.
+    """
+    dialog = FakeLargeResultDialog()
+    page = FakeManagedPage(large_result_dialog=dialog)
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    _fire_download(page, FakeDownload("Auction_overview.csv"))
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is True
+    assert events[0].csv_path == tmp_path / "Auction_overview_2026-08-01_2026-08-31.csv"
+    assert events[0].csv_path.exists()
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_success_emits_a_download_event_with_the_saved_csv_path(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    download = FakeDownload("Auction_overview.csv")
+    _fire_download(page, download)
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind == "download"
+    assert event.success is True
+    assert event.csv_path == tmp_path / "Auction_overview_2026-08-01_2026-08-31.csv"
+    assert event.csv_path.exists()
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_dismisses_the_cookie_banner_before_activating_the_csv_control(
+    monkeypatch, tmp_path,
+):
+    """Live acceptance found the fixed cookie-consent banner sometimes
+    intercepts the CSV control's pointer events (see ROADMAP.md P.36.14 live
+    corrections). With the banner present, Open Prisma must still dismiss it
+    and complete the managed download.
+    """
+    decline = FakeFilterButtonLocator()
+    page = FakeManagedPage(cookie_decline_button=decline)
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+
+    assert controller.get_events() == [PrismaLifecycleEvent(1, True, kind="open")]
+    assert decline.click_calls == 1
+    assert page.download_button.click_calls == 1
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_cookie_banner_that_cannot_be_dismissed_reports_as_an_open_failure(
+    monkeypatch, tmp_path,
+):
+    decline = FakeFilterButtonLocator(click_error=RuntimeError("element intercepted"))
+    page = FakeManagedPage(cookie_decline_button=decline)
+    browser = FakeBrowser(page)
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+    controller = _managed_download_controller()
+
+    generation = controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    join_worker(controller)
+
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].generation == generation
+    assert events[0].success is False
+    assert events[0].kind == "open"
+    assert "cookie-consent banner could not be dismissed" in events[0].error
+    # The CSV control must never be clicked if the banner blocked it.
+    assert page.download_button.click_calls == 0
+
+
+def test_managed_download_captures_a_download_triggered_by_a_newly_opened_page(
+    monkeypatch, tmp_path,
+):
+    """The real PRISMA CSV export was found to open in a new tab rather than
+    the originating page (see ROADMAP.md). Since the listener is registered
+    on the shared BrowserContext, a download reported by any page sharing
+    that context — not just the originating `page` — must still be accepted.
+    """
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    new_tab = FakePage(context=page.context)  # shares the same BrowserContext
+    download = FakeDownload("Auction_overview.csv")
+    _fire_download(new_tab, download)
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is True
+    assert events[0].csv_path == tmp_path / "Auction_overview_2026-08-01_2026-08-31.csv"
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_rejects_a_second_download_event(monkeypatch, tmp_path):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    listeners = page.context.listeners.get("download", [])
+    assert len(listeners) == 1
+    listeners[0](FakeDownload("Auction_overview.csv"))
+    listeners[0](FakeDownload("Auction_overview.csv"))
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is False
+    assert events[0].csv_path is None
+    assert list(tmp_path.iterdir()) == []
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_success_removes_the_context_listener(monkeypatch, tmp_path):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    _fire_download(page, FakeDownload("Auction_overview.csv"))
+    assert controller._events.ready.wait(2)
+
+    assert page.context.listeners.get("download", []) == []
+    assert len(page.context.removed_listeners) == 1
+    assert page.context.removed_listeners[0][0] == "download"
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_timeout_removes_the_context_listener(monkeypatch, tmp_path):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller(timeout_seconds=0.05)
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+
+    assert page.context.listeners.get("download", []) == []
+    assert len(page.context.removed_listeners) == 1
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_cancellation_before_resolution_removes_the_context_listener(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+
+    # Close Prisma while the download is still unresolved (no _fire_download).
+    controller.close()
+    join_worker(controller)
+
+    assert page.context.listeners.get("download", []) == []
+    assert len(page.context.removed_listeners) == 1
+
+
+def test_managed_download_not_csv_emits_a_typed_failure_event(monkeypatch, tmp_path):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    _fire_download(page, FakeDownload("Auction_overview.xlsx"))
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is False
+    assert events[0].csv_path is None
+    assert list(tmp_path.iterdir()) == []
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_cancelled_emits_a_typed_failure_event(monkeypatch, tmp_path):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    _fire_download(page, FakeDownload("Auction_overview.csv", failure="canceled"))
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert events[0].kind == "download"
+    assert events[0].success is False
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_interrupted_emits_a_typed_failure_event(monkeypatch, tmp_path):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    _fire_download(
+        page, FakeDownload("Auction_overview.csv", failure="net::ERR_CONNECTION_RESET")
+    )
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert events[0].kind == "download"
+    assert events[0].success is False
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_times_out_when_no_download_is_ever_triggered(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller(timeout_seconds=0.05)
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is False
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_wait_does_not_block_manual_closure_detection(
+    monkeypatch, tmp_path,
+):
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    browser.emit("disconnected")
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert events == [
+        PrismaLifecycleEvent(
+            1, False, "The PRISMA browser was closed manually.", kind="closed",
+        )
+    ]
+    join_worker(controller)
+
+
+def test_managed_download_succeeds_via_filesystem_fallback_when_no_playwright_event_arrives(
+    monkeypatch, tmp_path,
+):
+    """Approved production fallback (see prisma_download.py's
+    `PrismaDownloadFilesystemWaiter`): if the real installed Chrome completes
+    the download but no Playwright "download" event is ever observed, a
+    completed CSV file simply appearing in the configured directory must
+    still be recognized, named, and reported as a successful download.
+    """
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller(timeout_seconds=5.0)
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    # No Playwright "download" event is ever fired here: the file simply
+    # appears, exactly as it would if the real Chrome executable's own
+    # download manager bypassed Playwright's CDP-based interception.
+    (tmp_path / "Auction_overview.csv").write_bytes(b"a,b,c\n1,2,3\n")
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is True
+    assert events[0].csv_path == tmp_path / "Auction_overview_2026-08-01_2026-08-31.csv"
+    assert events[0].csv_path.exists()
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_succeeds_via_filesystem_fallback_with_a_uuid_named_artifact(
+    monkeypatch, tmp_path,
+):
+    """Real-Windows defect fix (2026-08-03): the raw artifact Chrome/CDP
+    writes into the now-correctly-configured `downloads_path` is named by
+    the browser/CDP itself (typically UUID-like), never necessarily
+    ``.csv``. The fallback must still recognize, finalize (forcing a
+    ``.csv`` extension), and report it as a successful download.
+    """
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller(timeout_seconds=5.0)
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    (tmp_path / "3fa85f64-5717-4562-b3fc-2c963f66afa6").write_bytes(b"a,b,c\n1,2,3\n")
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert len(events) == 1
+    assert events[0].kind == "download"
+    assert events[0].success is True
+    assert events[0].csv_path.suffix == ".csv"
+    assert events[0].csv_path.name.endswith("_2026-08-01_2026-08-31.csv")
+    assert events[0].csv_path.parent == tmp_path
+    assert events[0].csv_path.exists()
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_reports_exactly_one_success_when_the_event_and_fallback_observe_the_same_download(
+    monkeypatch, tmp_path,
+):
+    """No duplicate final file (and no duplicate "download" event) is
+    produced when the Playwright event and the filesystem fallback both
+    observe the same underlying download: only one `kind="download"` event
+    is ever emitted, and exactly one dated CSV exists afterward.
+    """
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller(timeout_seconds=5.0)
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    # The raw artifact appears on disk (as it now genuinely would, since
+    # `downloads_path` points at the configured directory) before the
+    # Playwright "download" event is delivered.
+    (tmp_path / "3fa85f64-5717-4562-b3fc-2c963f66afa6").write_bytes(b"a,b,c\n1,2,3\n")
+    download = FakeDownload("Auction_overview.csv")
+    _fire_download(page, download)
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    download_events = [event for event in events if event.kind == "download"]
+    assert len(download_events) == 1
+    assert download_events[0].success is True
+    dated_outputs = list(tmp_path.glob("*_2026-08-01_2026-08-31.csv"))
+    assert dated_outputs == [download_events[0].csv_path]
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_download_wait_with_active_filesystem_fallback_does_not_block_manual_closure_detection(
+    monkeypatch, tmp_path,
+):
+    """Approved production fallback (see prisma_download.py's
+    `PrismaDownloadFilesystemWaiter`): `configure()` now always receives
+    `download_directory`, so the real orchestrator's bounded filesystem
+    polling runs on every iteration of the same idle loop that also detects
+    manual closure. This must not make that loop any less responsive: a
+    browser "disconnected" event must still be detected promptly even while
+    the filesystem fallback is actively polling an empty directory for a
+    download that never arrives.
+    """
+    page = FakeManagedPage()
+    browser = FakeBrowser(page)
+    controller = _managed_download_controller()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open(date_range=DATE_RANGE, download_directory=tmp_path)
+    assert controller._events.ready.wait(2)
+    controller.get_events()
+    controller._events = SignallingQueue()
+
+    browser.emit("disconnected")
+
+    assert controller._events.ready.wait(2)
+    events = controller.get_events()
+    assert events == [
+        PrismaLifecycleEvent(
+            1, False, "The PRISMA browser was closed manually.", kind="closed",
+        )
+    ]
+    join_worker(controller)
 
 
 def test_windowed_runtime_supplies_output_handles_before_playwright_start(monkeypatch):

@@ -8,6 +8,9 @@ from download_directory import (
     DownloadDirectoryError,
     DownloadDirectorySelection,
     default_download_directory,
+    default_downloads_directory,
+    default_managed_download_directory,
+    ensure_directory_exists,
     validate_download_directory,
 )
 from runtime_paths import runtime_paths
@@ -199,3 +202,97 @@ def test_selection_rejects_file_candidate_without_changing_current(tmp_path):
         selection.select(file_path)
 
     assert selection.current == initial
+
+
+# --- P.36.14: application-managed default download directory -------------
+
+
+def test_downloads_default_resolves_via_shell_folders_registry_entry(tmp_path):
+    downloads = tmp_path / "Redirected" / "Downloads"
+    registry = _fake_registry(str(downloads))
+
+    result = default_downloads_directory(platform="nt", registry=registry)
+
+    assert result == downloads
+
+
+def test_downloads_default_expands_environment_variables_from_registry_value(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    registry = _fake_registry("%USERPROFILE%\\Downloads")
+
+    result = default_downloads_directory(platform="nt", registry=registry)
+
+    assert result == tmp_path / "Downloads"
+
+
+def test_downloads_default_falls_back_to_userprofile_when_registry_unavailable(tmp_path):
+    registry = _fake_registry(None, raises=True)
+
+    result = default_downloads_directory(
+        platform="nt", registry=registry, environ={"USERPROFILE": str(tmp_path)}
+    )
+
+    assert result == tmp_path / "Downloads"
+
+
+def test_downloads_default_skips_registry_off_windows(tmp_path):
+    registry = _fake_registry(str(tmp_path / "should-not-be-used"))
+
+    result = default_downloads_directory(
+        platform="posix", registry=registry, environ={"USERPROFILE": str(tmp_path)}
+    )
+
+    assert result == tmp_path / "Downloads"
+
+
+def test_managed_default_is_the_prismafunction_subdirectory_of_downloads(tmp_path):
+    registry = _fake_registry(None, raises=True)
+
+    result = default_managed_download_directory(
+        platform="nt", registry=registry, environ={"USERPROFILE": str(tmp_path)}
+    )
+
+    assert result == tmp_path / "Downloads" / "PrismaFunction"
+
+
+def test_ensure_directory_exists_creates_missing_directory_and_parents(tmp_path):
+    target = tmp_path / "Downloads" / "PrismaFunction"
+
+    result = ensure_directory_exists(target)
+
+    assert result == target.resolve()
+    assert target.is_dir()
+
+
+def test_ensure_directory_exists_is_idempotent_for_an_existing_directory(tmp_path):
+    target = tmp_path / "Downloads" / "PrismaFunction"
+    target.mkdir(parents=True)
+    marker = target / "already-here.csv"
+    marker.write_text("data", encoding="utf-8")
+
+    result = ensure_directory_exists(target)
+
+    assert result == target.resolve()
+    assert marker.exists()
+
+
+def test_ensure_directory_exists_rejects_a_file_at_the_target_path(tmp_path):
+    target = tmp_path / "PrismaFunction"
+    target.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(DownloadDirectoryError):
+        ensure_directory_exists(target)
+
+
+def test_ensure_directory_exists_wraps_creation_failure(tmp_path, monkeypatch):
+    target = tmp_path / "Downloads" / "PrismaFunction"
+
+    def fail_mkdir(self, *args, **kwargs):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(download_directory_module.Path, "mkdir", fail_mkdir)
+
+    with pytest.raises(DownloadDirectoryError):
+        ensure_directory_exists(target)

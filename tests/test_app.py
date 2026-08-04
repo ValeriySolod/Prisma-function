@@ -19,6 +19,7 @@ from csv_contracts import PRISMA_EXPORT_COLUMNS
 from date_range_selection import DateRange
 from download_directory import DownloadDirectoryError
 from manual_csv_selection import ManualCsvOutcome
+from manual_csv_selection import describe_rejection as describe_manual_csv_rejection
 from monitoring import MonitoringResult
 from monitoring_storage import MonitoringStorage, MonitoringStorageError
 from prisma_page import (
@@ -28,6 +29,7 @@ from prisma_page import (
     PrismaPageStructureError,
     PrismaPageUnavailableError,
 )
+from prisma_download import PrismaDownloadOutcome, describe_download_failure
 from prisma_import_workflow import PrismaWorkflowResult
 from prisma_lifecycle import PrismaLifecycleEvent, PrismaLifecycleState
 from prisma_source_updates import SourceUpdateStatus
@@ -40,8 +42,7 @@ def qt_app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture
-def window(qt_app, monkeypatch, tmp_path):
+def _build_app(monkeypatch, tmp_path):
     browser = Mock()
     monkeypatch.setattr(app, "BrowserController", Mock(return_value=browser))
     monkeypatch.setattr(app, "PrismaLifecycleController", Mock(return_value=Mock()))
@@ -54,13 +55,23 @@ def window(qt_app, monkeypatch, tmp_path):
     download_directory = tmp_path / "Documents"
     download_directory.mkdir()
     widget = app.PrismaMonitorApp(paths, download_directory)
-    yield widget, browser
+    return widget, browser
+
+
+def _close_app(widget) -> None:
     widget._is_closing = True
     widget._monitoring_thread = None
     for worker in widget._processing_threads:
         worker.join(timeout=2)
     widget._processing_threads.clear()
     widget.close()
+
+
+@pytest.fixture
+def window(qt_app, monkeypatch, tmp_path):
+    widget, browser = _build_app(monkeypatch, tmp_path)
+    yield widget, browser
+    _close_app(widget)
 
 
 def record(
@@ -95,6 +106,15 @@ def result(
         result_name,
         "failure" if result_name == "Error" else "",
     )
+
+
+def accept_date_range(
+    widget: app.PrismaMonitorApp, start: date = date(2026, 3, 1), end: date = date(2026, 3, 5)
+) -> DateRange:
+    widget.start_date_edit.setDate(QDate(start.year, start.month, start.day))
+    widget.end_date_edit.setDate(QDate(end.year, end.month, end.day))
+    widget._validate_date_range()
+    return widget._date_range_selection.current
 
 
 def make_ready(widget: app.PrismaMonitorApp) -> None:
@@ -396,13 +416,39 @@ def test_date_range_controls_and_validate_action_are_visible(window):
     assert widget.validate_date_range_button.text() == "Validate Date Range"
 
 
+def test_date_range_controls_do_not_initialize_to_qts_minimum_date(window):
+    # Regression test: on real Windows, both controls were observed retaining
+    # values near Qt's minimum supported QDate (1752-09-25 / 1752-09-29)
+    # instead of a usable application date. Neither control may ever equal
+    # QDateEdit's own minimumDate() at construction time.
+    widget, _ = window
+
+    assert widget.start_date_edit.date() != widget.start_date_edit.minimumDate()
+    assert widget.end_date_edit.date() != widget.end_date_edit.minimumDate()
+    assert widget.start_date_edit.date().year() > 1752
+    assert widget.end_date_edit.date().year() > 1752
+
+
 def test_date_range_initial_state_is_deterministic_and_unset(window):
     widget, _ = window
 
-    assert widget.start_date_edit.date() == widget.start_date_edit.minimumDate()
-    assert widget.end_date_edit.date() == widget.end_date_edit.minimumDate()
+    today = QDate.currentDate()
+    assert widget.start_date_edit.date() == today
+    assert widget.end_date_edit.date() == today
     assert widget._date_range_selection.current is None
     assert widget.date_range_label.text() == "No date range selected"
+
+
+def test_date_range_controls_initialize_to_a_fixed_current_date(monkeypatch, tmp_path):
+    fixed_today = date(2026, 3, 15)
+    monkeypatch.setattr(app, "_current_local_date", lambda: fixed_today)
+    widget, _ = _build_app(monkeypatch, tmp_path)
+    try:
+        assert widget.start_date_edit.date() == QDate(2026, 3, 15)
+        assert widget.end_date_edit.date() == QDate(2026, 3, 15)
+        assert widget._date_range_selection.current is None
+    finally:
+        _close_app(widget)
 
 
 def test_validating_same_day_range_accepts_and_updates_label(window):
@@ -432,6 +478,10 @@ def test_validating_multi_day_range_accepts_and_updates_label(window):
 
 def test_validating_with_missing_start_date_shows_error_and_preserves_state(window, monkeypatch):
     widget, _ = window
+    # The "Not set" sentinel is represented by the control's own minimumDate();
+    # explicitly select it here to simulate a genuinely missing start date,
+    # since the control no longer defaults to that sentinel on construction.
+    widget.start_date_edit.setDate(widget.start_date_edit.minimumDate())
     widget.end_date_edit.setDate(QDate(2026, 3, 10))
     critical = Mock()
     monkeypatch.setattr(QMessageBox, "critical", critical)
@@ -449,6 +499,9 @@ def test_validating_with_missing_start_date_shows_error_and_preserves_state(wind
 def test_validating_with_missing_end_date_shows_error_and_preserves_state(window, monkeypatch):
     widget, _ = window
     widget.start_date_edit.setDate(QDate(2026, 3, 1))
+    # See the missing-start-date test above for why the sentinel must now be
+    # selected explicitly rather than relying on construction-time defaults.
+    widget.end_date_edit.setDate(widget.end_date_edit.minimumDate())
     critical = Mock()
     monkeypatch.setattr(QMessageBox, "critical", critical)
 
@@ -489,10 +542,13 @@ def test_validating_reversed_range_shows_error_and_preserves_previous_accepted_r
 
 def test_date_range_controls_remain_enabled_and_retryable_after_error(window, monkeypatch):
     widget, _ = window
+    widget.start_date_edit.setDate(QDate(2026, 3, 9))
+    widget.end_date_edit.setDate(QDate(2026, 3, 1))
     monkeypatch.setattr(QMessageBox, "critical", Mock())
 
     widget._validate_date_range()
 
+    assert widget._date_range_selection.current is None
     assert widget.start_date_edit.isEnabled()
     assert widget.end_date_edit.isEnabled()
     assert widget.validate_date_range_button.isEnabled()
@@ -689,6 +745,7 @@ def test_browser_launch_failure_recovers_retry_controls(window, monkeypatch):
 
 def test_open_prisma_session_success_updates_badge_and_status(window, monkeypatch):
     widget, _ = window
+    date_range = accept_date_range(widget)
     widget.prisma_lifecycle.open.return_value = 11
     widget.prisma_lifecycle.get_events.return_value = [
         PrismaLifecycleEvent(11, True, kind="open")
@@ -699,12 +756,126 @@ def test_open_prisma_session_success_updates_badge_and_status(window, monkeypatc
     widget._open_prisma_session()
     widget._poll_prisma_lifecycle()
 
-    widget.prisma_lifecycle.open.assert_called_once_with()
+    widget.prisma_lifecycle.open.assert_called_once_with(
+        date_range=date_range, download_directory=widget._download_directory.current,
+    )
     assert widget._prisma_open
     assert widget.prisma_badge.text() == "Prisma open"
     assert "PRISMA opened" in widget.status.text()
     assert not widget.open_prisma_button.isEnabled()
     assert widget.close_prisma_button.isEnabled()
+
+
+def test_open_prisma_rejects_without_an_accepted_date_range(window, monkeypatch):
+    widget, _ = window
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._open_prisma_session()
+
+    widget.prisma_lifecycle.open.assert_not_called()
+    assert widget._active_prisma_generation is None
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Open Prisma"
+    assert message == "Select and validate a date range before opening PRISMA."
+
+
+def test_open_prisma_rejects_when_the_download_directory_is_no_longer_valid(
+    window, monkeypatch
+):
+    widget, _ = window
+    accept_date_range(widget)
+    widget._download_directory.current.rmdir()
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._open_prisma_session()
+
+    widget.prisma_lifecycle.open.assert_not_called()
+    assert widget._active_prisma_generation is None
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "Open Prisma"
+    assert message == (
+        "The selected download folder is not valid. Choose an existing, writable folder."
+    )
+
+
+def test_download_event_success_selects_the_csv_and_updates_labels(window, tmp_path):
+    widget, _ = window
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    header = ";".join(PRISMA_EXPORT_COLUMNS)
+    csv_path.write_bytes((header + "\r\n").encode("cp1252"))
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert widget._manual_csv_selection.current == csv_path.resolve()
+    assert widget.manual_csv_label.text() == csv_path.name
+    assert "PRISMA CSV downloaded" in widget.status.text()
+    assert "PRISMA CSV downloaded" in widget.activity_list.item(0).text()
+
+
+def test_download_event_failure_shows_the_stable_error_and_does_not_touch_csv_selection(
+    window, monkeypatch
+):
+    widget, _ = window
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+    message_text = describe_download_failure(PrismaDownloadOutcome.DOWNLOAD_TIMEOUT)
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, False, message_text, kind="download")
+    )
+
+    assert widget._manual_csv_selection.current is None
+    assert widget.status.text() == message_text
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "PRISMA Download"
+    assert message == message_text
+    assert "PRISMA CSV download failed" in widget.activity_list.item(0).text()
+
+
+def test_download_event_with_an_invalid_csv_contract_is_rejected(window, monkeypatch, tmp_path):
+    widget, _ = window
+    csv_path = tmp_path / "bad-export.csv"
+    csv_path.write_text("not,the,right,header\n", encoding="utf-8")
+    critical = Mock()
+    monkeypatch.setattr(QMessageBox, "critical", critical)
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert widget._manual_csv_selection.current is None
+    critical.assert_called_once()
+    title, message = critical.call_args.args[1], critical.call_args.args[2]
+    assert title == "PRISMA Download"
+    assert message == describe_manual_csv_rejection(ManualCsvOutcome.DELIMITER)
+    assert "validation failed" in widget.activity_list.item(0).text()
+
+
+def test_poll_prisma_lifecycle_routes_a_download_event_without_closing_the_session(
+    window, tmp_path
+):
+    widget, _ = window
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    header = ";".join(PRISMA_EXPORT_COLUMNS)
+    csv_path.write_bytes((header + "\r\n").encode("cp1252"))
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget.prisma_lifecycle.get_events.return_value = [
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    ]
+
+    widget._poll_prisma_lifecycle()
+
+    assert widget.manual_csv_label.text() == csv_path.name
+    assert widget._prisma_open
+    assert widget._active_prisma_generation == 11
 
 
 def test_repeated_open_prisma_click_is_a_safe_no_op_while_active(window):
@@ -806,6 +977,7 @@ def test_open_prisma_click_during_closing_is_a_deterministic_no_op(window):
 
 def test_rapid_close_then_open_cannot_produce_overlapping_sessions(window):
     widget, _ = window
+    date_range = accept_date_range(widget)
     widget.prisma_lifecycle.open.return_value = 11
     widget.prisma_lifecycle.get_events.return_value = [
         PrismaLifecycleEvent(11, True, kind="open")
@@ -833,7 +1005,9 @@ def test_rapid_close_then_open_cannot_produce_overlapping_sessions(window):
     widget._open_prisma_session()
     widget._poll_prisma_lifecycle()
 
-    widget.prisma_lifecycle.open.assert_called_once_with()
+    widget.prisma_lifecycle.open.assert_called_once_with(
+        date_range=date_range, download_directory=widget._download_directory.current,
+    )
     assert widget._prisma_open
     assert widget._active_prisma_generation == 12
 
@@ -969,6 +1143,7 @@ def test_single_drain_skips_stale_generation_events_mixed_with_active_ones(windo
 
 def test_open_prisma_startup_failure_shows_stable_english_error(window, monkeypatch):
     widget, _ = window
+    accept_date_range(widget)
     widget.prisma_lifecycle.open.return_value = 11
     widget.prisma_lifecycle.get_events.return_value = [
         PrismaLifecycleEvent(11, False, "diagnostic detail", kind="open")
@@ -1009,6 +1184,7 @@ def test_single_drain_stops_after_a_terminal_open_failure_avoiding_duplicate_dia
 
 def test_open_prisma_session_raising_synchronously_is_handled(window, monkeypatch):
     widget, _ = window
+    accept_date_range(widget)
     widget.prisma_lifecycle.open.side_effect = RuntimeError("driver missing")
     monkeypatch.setattr(QMessageBox, "critical", Mock())
 

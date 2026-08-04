@@ -1,11 +1,18 @@
 """Qt-independent boundary for the user's expected PRISMA CSV download directory.
 
-Per `Prisma Function.odt`, PrismaFunction never downloads, stages, monitors, or
-scans files itself: the user manually downloads the official CSV from PRISMA
-and later hands it to the program separately (P.36.4). This module only
-resolves a sensible default location for that manual download (the current
-Windows user's Documents folder) and tracks which single, existing, accessible
-directory the user currently expects it to land in.
+Per `Prisma Function.odt`, PrismaFunction does not scan, stage, or monitor
+arbitrary filesystem locations. Through P.36.13, the user manually downloaded
+the official CSV from PRISMA and later handed it to the program separately
+(P.36.4); `default_download_directory()` (the current Windows user's Documents
+folder) resolved the expected location for that manual handoff.
+
+As of P.36.14, PrismaFunction can also perform a user-initiated, application-
+managed download directly into an application-owned default directory
+(`default_managed_download_directory()`, `<Downloads>\\PrismaFunction`,
+auto-created idempotently by `ensure_directory_exists()`), while manual
+selection (P.36.4) remains an available fallback in the same tracked
+directory. This module tracks which single, existing, accessible directory
+the user currently expects downloads to land in, however they arrive there.
 """
 from __future__ import annotations
 
@@ -21,10 +28,18 @@ __all__ = [
     "DownloadDirectoryError",
     "DownloadDirectorySelection",
     "default_download_directory",
+    "default_downloads_directory",
+    "default_managed_download_directory",
+    "ensure_directory_exists",
     "validate_download_directory",
 ]
 
 _USER_SHELL_FOLDERS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+# Known Folder GUID for the per-user Downloads folder. Unlike "Personal"
+# (Documents), Windows does not expose Downloads through a plain named Shell
+# Folders value; the literal GUID string is the documented registry lookup key.
+_DOWNLOADS_FOLDER_GUID = "{374DE290-123F-4565-9164-39C4925E467B}"
+_MANAGED_DOWNLOAD_SUBDIRECTORY = "PrismaFunction"
 
 
 class DownloadDirectoryError(Exception):
@@ -68,6 +83,74 @@ def default_download_directory(*, environ=None, registry=None, platform: str | N
     if home.is_absolute():
         return home / "Documents"
     raise DownloadDirectoryError("The current user's Documents directory is unavailable.")
+
+
+def _registry_downloads_path(*, registry=None) -> str | None:
+    reg = registry if registry is not None else winreg
+    if reg is None:
+        return None
+    try:
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, _USER_SHELL_FOLDERS_KEY) as key:
+            value, _ = reg.QueryValueEx(key, _DOWNLOADS_FOLDER_GUID)
+    except OSError:
+        return None
+    return value or None
+
+
+def default_downloads_directory(*, environ=None, registry=None, platform: str | None = None) -> Path:
+    """Resolve the current user's Downloads folder.
+
+    Mirrors `default_download_directory()`'s tiered resolution (Shell Folders
+    registry entry, then `%USERPROFILE%`, then the interpreter's own home
+    resolution), substituting the Downloads Known Folder GUID for the
+    Documents "Personal" value. No username or machine-specific path is
+    hardcoded.
+    """
+    env = os.environ if environ is None else environ
+    selected_platform = os.name if platform is None else platform
+    if selected_platform == "nt":
+        raw = _registry_downloads_path(registry=registry)
+        if raw:
+            expanded = os.path.expandvars(raw)
+            path = Path(expanded)
+            if path.is_absolute():
+                return path
+    profile = env.get("USERPROFILE", "").strip()
+    if profile and Path(profile).expanduser().is_absolute():
+        return Path(profile).expanduser() / "Downloads"
+    home = Path.home()
+    if home.is_absolute():
+        return home / "Downloads"
+    raise DownloadDirectoryError("The current user's Downloads directory is unavailable.")
+
+
+def default_managed_download_directory(*, environ=None, registry=None, platform: str | None = None) -> Path:
+    """Resolve the P.36.14 application-managed default download directory.
+
+    Per the approved P.36.14 decision gate, this is `<Downloads>\\PrismaFunction`.
+    It is only a location resolver: the caller is responsible for creating it
+    (`ensure_directory_exists()`) before use.
+    """
+    return default_downloads_directory(
+        environ=environ, registry=registry, platform=platform
+    ) / _MANAGED_DOWNLOAD_SUBDIRECTORY
+
+
+def ensure_directory_exists(path: str | Path) -> Path:
+    """Idempotently create ``path`` (and missing parents), then validate it.
+
+    Per the approved P.36.14 decision gate, only this application-managed
+    default directory is ever auto-created; a user-selected directory
+    (`DownloadDirectorySelection.select()`) is never created automatically.
+    """
+    target = Path(path)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DownloadDirectoryError(
+            f"The default download directory could not be created: {target}"
+        ) from exc
+    return validate_download_directory(target)
 
 
 def validate_download_directory(candidate: str | Path) -> Path:
