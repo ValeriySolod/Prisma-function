@@ -7,8 +7,10 @@ Auto-loaded every session. Keep short — re-read on every turn.
 PrismaFunction is a single-user Windows desktop application built with PySide6.
 It processes official PRISMA Export CSV files into a transformed, published
 output. The former live-monitoring dashboard, scheduler, and automated
-monitoring flow are superseded by the P.36 workflow below; their code remains
-until removed by P.36.10.
+monitoring flow were superseded by the P.36 workflow below and their
+product-flow code (`BrowserController`, `monitoring.py`, `monitoring_storage.py`,
+`scheduler.py`, `notifications.py`, `auction_csv.py`, and the matching UI) was
+removed by P.36.10.
 
 Do not import requirements, contracts, or roadmap items from Prisma Function
 Mini (`Prisma-function-mini`) or any other unrelated or deleted project.
@@ -54,6 +56,9 @@ fallback path only, not the primary workflow.
   customer correction and must not guide implementation.
 - P.36.6, P.36.7, and P.36.9 are suspended/superseded. The old 14-field
   P.36.6 prompt must not be executed.
+- P.36.10 (removal of the superseded monitoring/scheduler product flow and
+  obsolete dependencies) is implemented and automated-tested on its feature
+  branch; see `ROADMAP.md` for merge status.
 - P.36.13–P.36.16 (date-range selection, application-managed download,
   transformation into the 12-column contract, and publication) are each
   implemented and merged to `main`; each still requires manual real-Windows/
@@ -67,8 +72,11 @@ fallback path only, not the primary workflow.
 
 Monitoring CSV is UTF-8 and comma-delimited, with columns `auction_id`,
 `auction_url`, `lot_number`, `item_name`, `expected_status`,
-`last_known_status`, `check_interval_seconds`, and `enabled`. It is loaded
-through "Load Monitoring CSV".
+`last_known_status`, `check_interval_seconds`, and `enabled`. Its loader and
+the live-monitoring dashboard/scheduler flow that consumed it were removed by
+P.36.10; the contract is retained only in `csv_contracts.py` so a
+Monitoring-shaped CSV is still detected and clearly rejected when selected
+where a PRISMA Export CSV is expected.
 
 The legacy PRISMA Export CSV contract is cp1252, semicolon-delimited, and has 34
 fixed columns. Detection is header-based, never filename-based.
