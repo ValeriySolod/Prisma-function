@@ -57,14 +57,15 @@ fallback path only, not the primary workflow.
 - P.36.6, P.36.7, and P.36.9 are suspended/superseded. The old 14-field
   P.36.6 prompt must not be executed.
 - P.36.10 (removal of the superseded monitoring/scheduler product flow and
-  obsolete dependencies) is implemented and automated-tested on its feature
-  branch; see `ROADMAP.md` for merge status.
+  obsolete dependencies) is implemented, automated-tested, and merged to
+  `main` via PR #65 (merge commit `d6dd456`).
 - P.36.13–P.36.16 (date-range selection, application-managed download,
   transformation into the 12-column contract, and publication) are each
   implemented and merged to `main`; each still requires manual real-Windows/
   real-PRISMA validation before it can be marked fully complete — see the
   current status recorded in `ROADMAP.md`. P.36.8 (mapping display) is
-  implemented and automated-tested, not yet merged.
+  implemented, automated-tested, and merged to `main` via PR #64 (merge
+  commit `5e3f309`).
 - Later P.36 increments must follow the dependency and status recorded in
   `ROADMAP.md`.
 
