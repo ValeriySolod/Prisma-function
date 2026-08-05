@@ -43,7 +43,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Compile Python sources
-        run: python -m compileall -q app.py auction_csv.py browser.py monitoring.py processor.py runtime_logging.py scheduler.py storage.py tests
+        run: python -m compileall -q app.py browser.py csv_contracts.py date_range_selection.py download_directory.py manual_csv_selection.py mapping_presentation.py prisma_download.py prisma_import_workflow.py prisma_lifecycle.py prisma_output.py prisma_page.py prisma_publication.py prisma_references.py prisma_source_updates.py processor.py runtime_logging.py runtime_paths.py storage.py ui_components.py validate_package.py version.py tests
 
       - name: Validate PyInstaller package
         run: python -m PyInstaller --clean --noconfirm PrismaFunction.spec

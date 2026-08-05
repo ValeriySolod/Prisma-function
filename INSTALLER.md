@@ -48,7 +48,8 @@ The version is read from the packaged executable metadata, whose source of truth
 
 ## Signing readiness
 
-The checked-in definition enables signed uninstallers. Configure a named Inno Setup
+The checked-in definition enables signed uninstallers (`SignedUninstaller=yes`,
+unconditional — not gated by `#ifdef SignToolName`). Configure a named Inno Setup
 SignTool command in the Inno Setup IDE, then pass that name while building:
 
 ```bat
@@ -56,9 +57,15 @@ set INNO_SIGNTOOL_NAME=prismasign
 build-installer.bat
 ```
 
-Unsigned local validation builds may omit `INNO_SIGNTOOL_NAME`. Certificate selection,
-secret storage, timestamp service configuration, and release signing remain external
-to the repository and must not be committed.
+`INNO_SIGNTOOL_NAME` cannot be omitted from a non-interactive `ISCC.exe`/
+`build-installer.bat` run: because `SignedUninstaller=yes` is unconditional, the
+compiler hard-aborts ("please attach your digital signature ... and compile again")
+whenever no `SignTool` is configured, even for a local, unsigned validation build. A
+local validation build without a real signing certificate must still configure some
+`SignTool` command (for example, an ephemeral, non-committed self-signed test
+certificate used only for that local build) for the compiler to complete. Certificate
+selection, secret storage, timestamp service configuration, and release signing remain
+external to the repository and must not be committed.
 
 ## Installation behavior
 

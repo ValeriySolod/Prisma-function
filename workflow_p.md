@@ -3447,7 +3447,7 @@ acceptance criteria, no additional automated work is outstanding. Note: `P.36.8`
 immediately below) adds a UI mapping *display*, not a P.36.14→P.36.15→P.36.16 pipeline trigger — it does
 not wire this module in and does not change this outstanding item.
 
-#### P.36.8. Mapping display in the UI — Implemented, automated-tested, and manually validated on real Windows (manual-selection path), not yet merged (2026-08-04)
+#### P.36.8. Mapping display in the UI — Implemented, automated-tested, and manually validated on real Windows (manual-selection path), merged to `main` via PR #64 (merge commit `5e3f309`) (2026-08-04)
 
 Per `ROADMAP.md`'s "Remaining support and finalization stages" table, `P.36.8` displays exactly `Exit
 Market`, `Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry` (this exact order and
@@ -3696,7 +3696,7 @@ refreshes as a side effect of a new CSV selection/download succeeding), so this 
 deterministically reproducible through the UI and was skipped rather than treated as a pending validation
 item.
 
-#### P.36.10. Remove superseded monitoring and obsolete dependencies — Implemented, automated-tested, packaging-validated, not yet merged (2026-08-04)
+#### P.36.10. Remove superseded monitoring and obsolete dependencies — Implemented, automated-tested, packaging-validated, merged to `main` via PR #65 (merge commit `d6dd456`) (2026-08-04)
 
 **Objective.** P.36.2 explicitly deferred "the physical removal of the superseded monitoring/dashboard/
 scheduler code" to this increment, and the "Remaining support and finalization stages" table in
@@ -3830,9 +3830,127 @@ surviving P.1–P.9/P.36 code paths — so the packaging inputs were unchanged; 
 PyInstaller's dependency graph still resolves cleanly after the module deletions. `python
 validate_package.py` passed against the freshly built `dist\PrismaFunction\` directory.
 
-**Outstanding before this increment can be marked ✅ Completed:** merge to `main` (the user creates and
-merges pull requests; none was performed here). No new real-Windows manual validation is required by this
-increment specifically, since it only removes already-unreachable code and adjusts documentation without
-changing any preserved P.36 behavior, contract, or boundary; the outstanding real-Windows validation items
-already recorded for P.36.8, P.36.14, P.36.15, and P.36.16 elsewhere in this document are unaffected and
-remain separately tracked.
+**Merged.** This increment is merged to `main` via PR #65 (merge commit `d6dd456`). No new real-Windows
+manual validation was required by this increment specifically, since it only removes already-unreachable
+code and adjusts documentation without changing any preserved P.36 behavior, contract, or boundary; the
+outstanding real-Windows validation items already recorded for P.36.8, P.36.14, P.36.15, and P.36.16
+elsewhere in this document are unaffected and remain separately tracked.
+
+#### P.36.11. Windows packaging and installer validation — Substantially complete (2026-08-05)
+
+**Objective.** Validate, and only where a concrete defect was demonstrated minimally update, the Windows
+PyInstaller onedir package and Inno Setup installer for the final post-P.36.10 dependency set (P.36.8,
+P.36.10, P.36.15, P.36.16, all confirmed merged to `main` via `git log main`: `5e3f309`, `d6dd456`,
+`c84344f`, `daf4760`). No P.36 workflow, contract, mapping, directory, or runtime-data-ownership behavior
+was changed.
+
+**Defects found and fixed (documentation/CI only, no application-behavior code changed):**
+
+1. `.github/workflows/windows-ci.yml`'s `compileall` step referenced `auction_csv.py`, `monitoring.py`, and
+   `scheduler.py` — all deleted by P.36.10 — breaking CI's packaging-validation job against the current
+   tree. Fixed to the current 22-module inventory plus `tests`.
+2. `BUILDING.md`'s "Reproduce Windows CI locally" `compileall` command was missing eight P.36.8/P.36.13–16
+   modules (`date_range_selection.py`, `download_directory.py`, `manual_csv_selection.py`,
+   `mapping_presentation.py`, `prisma_download.py`, `prisma_lifecycle.py`, `prisma_output.py`,
+   `prisma_publication.py`). Fixed to the same full current module list.
+3. `RELEASE_CHECKLIST.md`'s "Windows package validation" section still described the removed
+   live-monitoring flow. Rewritten to the current date-range/Open-Prisma/managed-download/P.36.4-fallback/
+   12-column-publication workflow.
+4. `CLAUDE.md`, `ROADMAP.md`, and this file all contained multiple stale "P.36.10 not yet merged"
+   statements (and `CLAUDE.md` also a stale "P.36.8 not yet merged" statement); all located instances were
+   corrected to record PR #65/`d6dd456` and PR #64/`5e3f309` respectively.
+5. `INSTALLER.md`'s "Signing readiness" section stated "Unsigned local validation builds may omit
+   `INNO_SIGNTOOL_NAME`" — demonstrated inaccurate by this increment's own installer build, since
+   `SignedUninstaller=yes` is unconditional and Inno Setup's non-interactive CLI compiler hard-aborts
+   without a configured `SignTool`, even for an unsigned local validation build. Corrected to state a
+   `SignTool` must always be configured for a non-interactive build to complete (a local validation build
+   without a real certificate may use an ephemeral, non-committed self-signed test certificate for that
+   purpose). `PrismaFunction.iss` and its signing-ready configuration were not changed.
+
+No change was made to `PrismaFunction.spec`, `PrismaFunction.iss`, `PrismaFunction.version`, `version.py`,
+`build.bat`, `build-installer.bat`, `release.bat`/`release.ps1`, `validate_package.py`, or `requirements.txt`.
+
+**Automated evidence (2026-08-05).** Full pytest suite: **637 passed, 1 skipped** (unchanged from the count
+recorded at P.36.10, since this increment added no test and removed no test). Project-wide `python -m
+compileall` against the corrected 22-module list exited `0`. `git diff --check` passed. Both were rerun
+after every doc/CI change with identical results.
+
+**Fresh PyInstaller build and validate_package.py.** The checked-out `dist\PrismaFunction` predated the
+P.36.10 removal commit `a27acaa` by ~43 minutes. `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` (via `build.bat`) was rerun from the current branch and succeeded — the only warning
+was the pre-existing, unrelated "Hidden import 'jinja2' not found" from Playwright's optional
+tracing-viewer hook. `python validate_package.py` passed. Independent inspection beyond
+`validate_package.py` confirmed no `monitoring`/`scheduler`/`notifications`/`auction_csv`/`BrowserController`
+name anywhere in the output, no `.py`/`.pyc`/`.log`/`.csv`/`.db` file, and no `__pycache__`/`.pytest_cache`/
+own-`tests` directory (the only two filename matches for "tests" were third-party bundled files:
+numpy's `_multiarray_tests.cp314-win_amd64.pyd` and Playwright's `programWithTestStub.js`).
+
+**Executable identity.** `PrismaFunction.exe`: `FileVersion=1.0.0`, `ProductVersion=1.0.0`,
+`ProductName=PRISMA Monitor`, `OriginalFilename=PrismaFunction.exe` — matches the documented contract.
+
+**Isolated-startup smoke checks.** Three launches of the fresh executable from `%TEMP%` (outside the repo)
+with an isolated `LOCALAPPDATA`: normal launch reached a live main window (title `PRISMA Monitor v1.0.0`)
+and closed cleanly (exit `0`); a repeat with `VIRTUAL_ENV`/`PYTHONPATH`/`PYTHONHOME` stripped and `PATH`
+reset to the machine/user default reached the same result, proving no dependency on the active virtual
+environment; the packaged exe's SHA-256 hash was unchanged before/after, proving the distribution directory
+is unaffected by startup/shutdown. The only write under the isolated root was
+`PrismaFunction\logs\prisma-function.log`.
+
+**Inno Setup installer build from a space-containing path.** `PrismaFunction.iss`, `validate_package.py`,
+`version.py`, `build-installer.bat`, and the fresh `dist\PrismaFunction` (1,345 items, robocopy-verified)
+were staged under `...\Temp\Prisma Function Installer Build\` (a path containing spaces, outside the repo).
+Inno Setup 6.7.3 (installed per-user via `winget`, landing at `%LOCALAPPDATA%\Programs\Inno Setup 6\`
+rather than the default-checked `%ProgramFiles(x86)%` path, so `INNO_SETUP_COMPILER` was set per
+`build-installer.bat`'s documented override) compiled successfully from that path.
+
+**Signing note (the one recorded deviation).** `PrismaFunction.iss` sets `SignedUninstaller=yes`
+unconditionally. Inno Setup's non-interactive CLI compiler hard-aborts when no `SignTool` is configured —
+there is no way to produce a literally zero-signature installer from this script via a single non-interactive
+invocation; this is a structural property of `SignedUninstaller=yes`, not a defect. This demonstrated that
+`INSTALLER.md`'s previous "may omit `INNO_SIGNTOOL_NAME`" wording was inaccurate — a non-interactive build
+cannot actually omit a configured `SignTool` — and that documentation defect was fixed in this same
+increment (see "Defects found and fixed" item 5 above); `INSTALLER.md` now states a `SignTool` must always
+be configured for a non-interactive build to complete. No `signtool.exe`/Windows SDK was present, and
+installing one was out
+of this increment's scope. With explicit user approval, an ephemeral, non-committed, self-signed test
+certificate (`CN=PrismaFunction Local Test`, 1-day validity) was generated locally and used only as an ad
+hoc Inno Setup `/S<name>=<command>` sign tool (`Set-AuthenticodeSignature`) to let the CLI compiler
+complete. `Get-AuthenticodeSignature` on the resulting installer confirmed the test certificate's presence
+with `Status=UnknownError` ("terminated in a root certificate which is not trusted") — expected for a
+throwaway test certificate, not a real release signature. The certificate and all staged build files were
+deleted after validation; nothing was committed to the repository; `PrismaFunction.iss`'s checked-in
+signing-ready configuration is unchanged. This satisfies the intent ("without weakening the existing
+signing-ready configuration") but not the literal word "unsigned" — the reason this increment is recorded
+as 🟡 rather than ✅.
+
+**Installer contents.** A file-by-file diff of the installed tree (1,225 files) against source
+`dist\PrismaFunction` (1,222 files) showed exactly three differences: `unins000.exe`, `unins000.dat`,
+`unins000.msg` — Inno Setup's own uninstaller files. The installer contains exactly the validated onedir
+distribution.
+
+**Real-Windows install/upgrade/uninstall/relaunch validation (standard non-administrator account
+`desktop\portm`, confirmed via `IsInRole(Administrator) = False`).** Per-user install (`/TASKS=`) exited
+`0`, installed to `%LOCALAPPDATA%\Programs\PrismaFunction`, registered only under `HKCU` (no elevation),
+created a Start Menu shortcut, no desktop shortcut by default. A separate `/TASKS=desktopicon` install
+created the optional desktop shortcut (removed after verification). Launch reached a live main window and
+closed cleanly (exit `0`). In-place reinstall/upgrade exited `0` with the app-data SQLite hash unchanged.
+Uninstall (`unins000.exe /VERYSILENT`) exited `0`, removed the install directory and Start Menu shortcut,
+and left `%LOCALAPPDATA%\PrismaFunction` byte-identical (16 files, unchanged) — confirming the checked-in
+empty `[UninstallDelete]` contract. Reinstalling after uninstall and relaunching reused the preserved
+runtime-data baseline with no migration and an unchanged data hash.
+
+One relaunch during this sequence hit `RuntimePathError: Runtime-data migration is busy in another
+PrismaFunction process` — traced to a self-inflicted test artifact: an earlier launch was force-killed
+before its main window appeared, while still holding `runtime_paths.py`'s migration lock inside its
+designed 10-second acquisition retry (`lock_timeout=10.0`) and well within the lock's 5-minute staleness
+window (`LOCK_STALE_SECONDS=300.0`, `runtime_paths.py:24`) — the lock's intended crash-safety behavior
+("Retry shortly"), not a defect. Removing the self-created stale lock and retrying without a forceful kill
+reproduced a clean launch every time afterward; no production code was changed.
+
+**Windows Application Control / signing blockers:** none encountered (no SmartScreen/AppLocker/WDAC block
+for either the executable or the installer).
+
+**Manual checks still outstanding:** validation on a second, genuinely separate 64-bit Windows machine
+(P.36.12's scope); a real code-signed (not local-self-signed-test) installer build.
+
+**P.36.12 was not performed.**
