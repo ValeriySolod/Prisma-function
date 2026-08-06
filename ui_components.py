@@ -54,8 +54,6 @@ QWidget#contentArea QTableView:focus { color: #243247; }
 QWidget#contentArea QTableView:disabled { background: #f1f4f7; color: #758397; }
 QWidget#contentArea QTableView::item:disabled { color: #758397; }
 QHeaderView::section { background: #f2f5f9; color: #56657a; border: none; border-bottom: 1px solid #dce4ed; padding: 9px; font-weight: 600; }
-QListWidget { border: none; background: white; color: #243247; selection-background-color: #dff3f8; selection-color: #172235; outline: none; }
-QListWidget::item { color: #243247; padding: 7px 4px; border-bottom: 1px solid #edf1f5; }
 QLabel#primaryStatus { color: #314157; font-weight: 600; }
 """
 

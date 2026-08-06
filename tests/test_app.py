@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QWidget
 
 import app
 import prisma_output
@@ -109,8 +109,7 @@ def test_light_workspace_widgets_use_explicit_contrast_styles(window):
 
     assert content is not None
     assert subtitle is not None
-    assert {label.text() for label in section_labels} == {"Mapping", "Recent activity", "Status:"}
-    assert widget.activity_list.objectName() == "activityList"
+    assert {label.text() for label in section_labels} == {"Mapping", "Status:"}
 
     required_rules = (
         "QWidget#contentArea QLabel { color: #243247; }",
@@ -119,14 +118,38 @@ def test_light_workspace_widgets_use_explicit_contrast_styles(window):
         "QWidget#contentArea QTableView { border: none; background: white; color: #243247;",
         "QWidget#contentArea QTableView::item { color: #243247; }",
         "QWidget#contentArea QTableView::item:selected { background: #dff3f8; color: #172235; }",
-        "QListWidget { border: none; background: white; color: #243247;",
-        "QListWidget::item { color: #243247;",
     )
     for rule in required_rules:
         assert rule in APP_STYLE
 
     assert "QFrame#sidebar QLabel { color: #d8e1ee; }" in APP_STYLE
     assert "QLabel#browserBadge {" in APP_STYLE
+
+
+def test_recent_activity_section_is_completely_removed(window):
+    widget, _ = window
+    assert widget.findChild(QWidget, "activityList") is None
+    assert not any(
+        label.text() == "Recent activity"
+        for label in widget.findChildren(QLabel, "contentSectionLabel")
+    )
+    button_texts = {button.text() for button in widget.findChildren(QPushButton)}
+    assert "Open log folder" not in button_texts
+    assert "Clear" not in button_texts
+    for attribute in ("activity_list", "open_logs_button", "clear_activity_button"):
+        assert not hasattr(widget, attribute)
+    for method_name in ("_add_activity", "clear_activity", "open_log_directory"):
+        assert not hasattr(widget, method_name)
+
+
+def test_mapping_panel_receives_positive_vertical_stretch(window):
+    widget, _ = window
+    content = widget.findChild(QWidget, "contentArea")
+    main_layout = content.layout()
+    mapping_panel = widget.mapping_table.parentWidget()
+    index = main_layout.indexOf(mapping_panel)
+    assert index >= 0
+    assert main_layout.stretch(index) > 0
 
 
 def test_download_directory_defaults_to_provided_documents_folder(window):
@@ -277,7 +300,7 @@ def test_choosing_a_valid_manual_csv_updates_state_and_label(window, monkeypatch
 
     assert widget._manual_csv_selection.current == target.resolve()
     assert widget.manual_csv_label.text() == "PRISMA_Export.csv"
-    assert "PRISMA Export CSV selected" in widget.activity_list.item(0).text()
+    assert widget.status.text() == "PRISMA Export CSV selected."
 
 
 def test_invalid_manual_csv_selection_shows_generic_error_and_preserves_state(
@@ -647,7 +670,7 @@ def test_validating_same_day_range_accepts_and_updates_label(window):
     assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-01"
     assert widget.start_date_edit.date() == QDate(2026, 3, 1)
     assert widget.end_date_edit.date() == QDate(2026, 3, 1)
-    assert "Date range accepted" in widget.activity_list.item(0).text()
+    assert widget.status.text() == "Date range accepted."
 
 
 def test_validating_multi_day_range_accepts_and_updates_label(window):
@@ -859,7 +882,6 @@ def test_download_event_success_selects_the_csv_and_updates_labels(window, tmp_p
     assert widget._manual_csv_selection.current == csv_path.resolve()
     assert widget.manual_csv_label.text() == csv_path.name
     assert "PRISMA CSV downloaded" in widget.status.text()
-    assert "PRISMA CSV downloaded" in widget.activity_list.item(0).text()
 
 
 def test_download_event_failure_shows_the_stable_error_and_does_not_touch_csv_selection(
@@ -880,7 +902,6 @@ def test_download_event_failure_shows_the_stable_error_and_does_not_touch_csv_se
     title, message = critical.call_args.args[1], critical.call_args.args[2]
     assert title == "PRISMA Download"
     assert message == message_text
-    assert "PRISMA CSV download failed" in widget.activity_list.item(0).text()
 
 
 def test_download_event_with_an_invalid_csv_contract_is_rejected(window, monkeypatch, tmp_path):
@@ -899,7 +920,9 @@ def test_download_event_with_an_invalid_csv_contract_is_rejected(window, monkeyp
     title, message = critical.call_args.args[1], critical.call_args.args[2]
     assert title == "PRISMA Download"
     assert message == describe_manual_csv_rejection(ManualCsvOutcome.DELIMITER)
-    assert "validation failed" in widget.activity_list.item(0).text()
+    assert widget.status.text() == (
+        "The downloaded PRISMA CSV did not match the expected export format."
+    )
 
 
 def test_poll_prisma_lifecycle_routes_a_download_event_without_closing_the_session(
@@ -1099,6 +1122,8 @@ def test_single_drain_with_open_then_manual_closed_loses_no_event(window):
             11, False, "The PRISMA browser was closed manually.", kind="closed"
         ),
     ]
+    status_spy = Mock(wraps=widget.status.setText)
+    widget.status.setText = status_spy
 
     widget._poll_prisma_lifecycle()
 
@@ -1108,11 +1133,9 @@ def test_single_drain_with_open_then_manual_closed_loses_no_event(window):
     assert "Open Prisma to retry" in widget.status.text()
     assert widget.open_prisma_button.isEnabled()
     assert not widget.close_prisma_button.isEnabled()
-    activity_texts = [
-        widget.activity_list.item(i).text()
-        for i in range(widget.activity_list.count())
-    ]
-    assert sum("Prisma closed manually" in text for text in activity_texts) == 1
+    status_texts = [call.args[0] for call in status_spy.call_args_list]
+    assert status_texts.count("PRISMA opened in the managed browser session.") == 1
+    assert status_texts.count("PRISMA was closed manually. Open Prisma to retry.") == 1
 
 
 def test_single_drain_with_open_then_close_completed_loses_no_event(window):
@@ -1349,7 +1372,6 @@ def test_processing_success_preserves_full_statistics(window, monkeypatch):
         "accepted Processed: 4; inserted: 1; updated: 2; unchanged: 1; "
         "filtered: 0; rejected: 0; audit issues: 0. Output: result.xlsx"
     )
-    assert "PRISMA import completed" in widget.activity_list.item(0).text()
     assert not widget._processing_active
     assert widget._active_processing_thread is None
     assert not widget._processing_threads
@@ -1381,13 +1403,6 @@ def test_import_processing_success_and_error_restore_controls(window, monkeypatc
     assert not widget._processing_active
     assert widget.process_button.isEnabled()
     assert "Unsupported CSV format" in widget.status.text()
-
-
-def test_clear_activity_does_not_touch_logs(window):
-    widget, _ = window
-    widget._add_activity("Something")
-    widget.clear_activity()
-    assert widget.activity_list.count() == 0
 
 
 def test_close_defers_without_blocking_until_live_workers_finish(window, monkeypatch):

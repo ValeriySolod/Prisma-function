@@ -3954,3 +3954,68 @@ for either the executable or the installer).
 (P.36.12's scope); a real code-signed (not local-self-signed-test) installer build.
 
 **P.36.12 was not performed.**
+
+#### P.36.17. Remove Recent activity panel and expand the Mapping workspace — Implemented, automated-tested, packaging-validated; not yet merged (2026-08-06)
+
+**Objective.** Remove the complete user-visible "Recent activity" section (heading, list widget, "Open log
+folder" and "Clear" buttons) from the main window and let the Mapping table expand into the released
+vertical space. Scoped as UI-only: no change to CSV parsing, transformation, mapping, publication,
+download, browser lifecycle, filenames, directories, thresholds, or the exact 12-column output contract.
+
+**`app.py` changes.** Removed the "Recent activity" content panel and its widgets
+(`self.activity_list` `QListWidget`, `self.open_logs_button`, `self.clear_activity_button`); the
+`ActivityKind` enum; the `_add_activity`/`clear_activity` methods; `open_log_directory` (its only caller was
+the removed "Open log folder" button, and no other code referenced it); and all 18
+`self._add_activity(...)` call sites across the Prisma-lifecycle, date-range, manual/managed CSV selection,
+and processing-result handlers. The two per-issue activity entries in `_processing_succeeded`
+("PRISMA import completed…" and one line per audit issue) were dropped rather than relocated — their only
+surface was the removed list, and the Status row already reports the same outcome via `result.summary()`.
+Now-unused imports (`QListWidget`, `QListWidgetItem`, `QColor`, `Enum`) were removed. The Mapping panel now
+receives a positive vertical stretch factor (`main.addWidget(mapping_panel, 1)`,
+`mapping_layout.addWidget(self.mapping_table, 1)`, both previously unset/0) so it absorbs the space released
+by the removed panel at open, resize, and maximize; the header and Status row keep their fixed size. Every
+other control — PRISMA Export Date, Import PRISMA Export, Open Result, date-range selection,
+download-directory selection, Open/Close Prisma, manual CSV fallback, managed download, Mapping
+refresh/stale-row clearing, and shutdown/worker cleanup — is unchanged.
+
+**`ui_components.py` changes.** Removed the `QListWidget`/`QListWidget::item` rules from `APP_STYLE`, since
+they styled only the removed activity list and no other widget uses `QListWidget`. `MappingTableModel` and
+every other rule are unchanged.
+
+**Preserved.** File logging and runtime diagnostics (`runtime_logging.py`) were not touched by this
+increment; `tests/test_runtime_logging.py` is unaffected and still passes. The Status row and every dialog
+error report keep their existing wording and behavior.
+
+**Automated evidence (2026-08-06).** In `tests/test_app.py`: removed the "Recent activity" section-label and
+`activity_list.objectName()` assertions and the two `QListWidget` CSS-rule assertions from
+`test_light_workspace_widgets_use_explicit_contrast_styles`; added
+`test_recent_activity_section_is_completely_removed` (no `activityList`-named widget, no "Recent activity"
+section label, no "Open log folder"/"Clear" button text among the window's buttons, and none of the
+`activity_list`/`open_logs_button`/`clear_activity_button`/`_add_activity`/`clear_activity`/
+`open_log_directory` attributes remain) and `test_mapping_panel_receives_positive_vertical_stretch` (the
+Mapping panel's index in the content `QVBoxLayout` has `stretch() > 0`); replaced `activity_list`-based
+assertions with the already-present equivalent `status.text()` assertions in the manual-CSV-selection,
+date-range-acceptance, downloaded-CSV-rejection, and processing-success tests; replaced the
+"Prisma closed manually" activity-count assertion in
+`test_single_drain_with_open_then_manual_closed_loses_no_event` with a `Mock(wraps=...)` spy on
+`widget.status.setText` proving the "PRISMA opened…" and "PRISMA was closed manually…" status messages each
+fire exactly once during a single event-drain pass, preserving the test's "loses no event" regression intent
+without the removed list; deleted `test_clear_activity_does_not_touch_logs`, whose subject no longer exists.
+Focused run: `pytest tests/test_app.py -q` — **71 passed**. Full suite: `pytest -q` — **638 passed, 1
+skipped** (net +1 versus the 637 passed/1 skipped baseline recorded at P.36.11: two tests added, one
+removed). Project-wide `python -m compileall` against the `BUILDING.md`-documented module list exited `0`.
+`git diff --check` passed; the only untracked files in the working tree are the pre-existing
+`*-final-review.diff` scratch files from earlier increments, out of this increment's scope.
+
+**Packaging validation (2026-08-06).** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec`
+completed successfully, with only the pre-existing, unrelated "Hidden import 'jinja2' not found" Playwright
+warning recorded in every prior packaging entry in this file. No `requirements.txt`/`PrismaFunction.spec`
+change was needed, since this increment removes no dependency. `python validate_package.py` passed against
+the freshly built `dist\PrismaFunction\` directory.
+
+**Not yet merged.** Branch `feature/p36-17-remove-recent-activity`. No real-Windows manual validation has
+been performed for this increment. Outstanding before ✅ Completed: on a real Windows desktop, confirm
+Recent activity, Open log folder, and Clear are absent with no empty gap left where the panel was; confirm
+the Mapping table visibly expands vertically on launch; confirm it resizes correctly when maximizing and
+restoring the window; confirm it still renders valid CSV rows; confirm the Status row remains visible and
+continues to report operations correctly.

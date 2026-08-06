@@ -6,13 +6,12 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from enum import Enum
 from pathlib import Path
 
 from collections.abc import Callable
 
 from PySide6.QtCore import QDate, QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -22,8 +21,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLayout,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -78,11 +75,6 @@ class ProcessingOutcome:
     generation: int
 
 
-class ActivityKind(Enum):
-    ACTIVITY = "activity"
-    STATUS_CHANGE = "status-change"
-
-
 class WorkerSignals(QObject):
     processing_finished = Signal(object)
 
@@ -117,7 +109,6 @@ class PrismaMonitorApp(QMainWindow):
         self._prisma_timer.timeout.connect(self._poll_prisma_lifecycle)
         self._build_ui()
         self._update_controls()
-        self._add_activity("Application ready")
 
     def _button(
         self,
@@ -282,32 +273,14 @@ class PrismaMonitorApp(QMainWindow):
         self.mapping_table.verticalHeader().hide()
         mapping_hdr = self.mapping_table.horizontalHeader()
         mapping_hdr.setSectionResizeMode(QHeaderView.Stretch)
-        mapping_layout.addWidget(self.mapping_table)
+        mapping_layout.addWidget(self.mapping_table, 1)
         self.mapping_empty_label = QLabel(
             "No mapping evidence to display. Select or download a PRISMA Export CSV."
         )
         self.mapping_empty_label.setAlignment(Qt.AlignCenter)
         self.mapping_empty_label.setStyleSheet("color:#718096; padding:18px")
         mapping_layout.addWidget(self.mapping_empty_label)
-        main.addWidget(mapping_panel)
-        activity_panel = QFrame()
-        activity_panel.setObjectName("panel")
-        activity_layout = QVBoxLayout(activity_panel)
-        activity_header = QHBoxLayout()
-        activity_title = QLabel("Recent activity")
-        activity_title.setObjectName("contentSectionLabel")
-        activity_header.addWidget(activity_title)
-        activity_header.addStretch()
-        self.open_logs_button = self._button("Open log folder", self.open_log_directory, sidebar=False)
-        self.clear_activity_button = self._button("Clear", self.clear_activity, sidebar=False)
-        activity_header.addWidget(self.open_logs_button)
-        activity_header.addWidget(self.clear_activity_button)
-        self.activity_list = QListWidget()
-        self.activity_list.setObjectName("activityList")
-        self.activity_list.setMaximumHeight(105)
-        activity_layout.addLayout(activity_header)
-        activity_layout.addWidget(self.activity_list)
-        main.addWidget(activity_panel)
+        main.addWidget(mapping_panel, 1)
         status_row = QHBoxLayout()
         status_caption = QLabel("Status:")
         status_caption.setObjectName("contentSectionLabel")
@@ -340,28 +313,6 @@ class PrismaMonitorApp(QMainWindow):
         badge.style().unpolish(badge)
         badge.style().polish(badge)
 
-    def _add_activity(
-        self, message: str, kind: ActivityKind = ActivityKind.ACTIVITY
-    ) -> None:
-        label = "Status change — " if kind is ActivityKind.STATUS_CHANGE else ""
-        item = QListWidgetItem(f"{datetime.now():%H:%M:%S}  {label}{message}")
-        item.setData(Qt.UserRole, kind.value)
-        if kind is ActivityKind.STATUS_CHANGE:
-            font = item.font()
-            font.setBold(True)
-            item.setFont(font)
-            item.setForeground(QColor("#075985"))
-            item.setData(
-                Qt.AccessibleDescriptionRole,
-                f"Status change notification. {message}",
-            )
-        self.activity_list.insertItem(0, item)
-        while self.activity_list.count() > 50:
-            self.activity_list.takeItem(self.activity_list.count() - 1)
-
-    def clear_activity(self) -> None:
-        self.activity_list.clear()
-
     def _update_controls(self) -> None:
         self.process_button.setEnabled(not self._processing_active)
         self.import_date.setEnabled(not self._processing_active)
@@ -391,7 +342,6 @@ class PrismaMonitorApp(QMainWindow):
             return
         self.download_directory_label.setText(str(directory))
         self.status.setText("Download folder updated.")
-        self._add_activity("Download folder changed")
 
     def _update_mapping_empty_state(self) -> None:
         has_rows = self.mapping_table_model.rowCount() > 0
@@ -449,7 +399,6 @@ class PrismaMonitorApp(QMainWindow):
             return
         self.manual_csv_label.setText(result.path.name)
         self.status.setText("PRISMA Export CSV selected.")
-        self._add_activity("PRISMA Export CSV selected")
         self._refresh_mapping_display(result.path)
 
     @staticmethod
@@ -484,7 +433,6 @@ class PrismaMonitorApp(QMainWindow):
         self._set_date_range_widgets(result.date_range)
         self.date_range_label.setText(self._format_date_range(result.date_range))
         self.status.setText("Date range accepted.")
-        self._add_activity("Date range accepted")
 
     def _open_prisma_session(self) -> None:
         if (
@@ -531,7 +479,6 @@ class PrismaMonitorApp(QMainWindow):
                     self._prisma_open = True
                     self._set_badge(self.prisma_badge, "Prisma open", "ready")
                     self.status.setText("PRISMA opened in the managed browser session.")
-                    self._add_activity("Prisma opened")
                     controls_dirty = True
                 else:
                     self._prisma_open_failed(event.error or "Unknown error")
@@ -546,7 +493,6 @@ class PrismaMonitorApp(QMainWindow):
                     self._prisma_timer.stop()
                     self._set_badge(self.prisma_badge, "Prisma closed", "idle")
                     self.status.setText("PRISMA closed")
-                    self._add_activity("Prisma closed")
                     controls_dirty = True
                 else:
                     self._prisma_close_failed(event.error or "Unknown error")
@@ -558,7 +504,6 @@ class PrismaMonitorApp(QMainWindow):
                 self._prisma_timer.stop()
                 self._set_badge(self.prisma_badge, "Prisma closed", "idle")
                 self.status.setText("PRISMA was closed manually. Open Prisma to retry.")
-                self._add_activity("Prisma closed manually")
                 controls_dirty = True
                 terminal_reached = True
         if controls_dirty:
@@ -572,7 +517,6 @@ class PrismaMonitorApp(QMainWindow):
             )
             self.status.setText(event.error or "The PRISMA CSV download failed.")
             self._show_error("PRISMA Download", event.error or "The PRISMA CSV download failed.")
-            self._add_activity("PRISMA CSV download failed")
             return
         result = self._manual_csv_selection.select(event.csv_path)
         if not result.accepted:
@@ -585,11 +529,9 @@ class PrismaMonitorApp(QMainWindow):
             )
             self._clear_mapping_display()
             self._show_error("PRISMA Download", describe_rejection(result.outcome))
-            self._add_activity("PRISMA CSV download validation failed")
             return
         self.manual_csv_label.setText(result.path.name)
         self.status.setText(f"PRISMA CSV downloaded: {result.path.name}")
-        self._add_activity(f"PRISMA CSV downloaded: {result.path.name}")
         self._refresh_mapping_display(result.path)
 
     def _prisma_open_failed(self, exc: Exception | str) -> None:
@@ -606,7 +548,6 @@ class PrismaMonitorApp(QMainWindow):
             "PRISMA could not be opened. Check Chrome or Edge and try again.",
         )
         self.status.setText("Failed to open PRISMA")
-        self._add_activity("Prisma error")
 
     def _prisma_close_failed(self, exc: Exception | str) -> None:
         self._active_prisma_generation = None
@@ -626,7 +567,6 @@ class PrismaMonitorApp(QMainWindow):
             "PRISMA could not be confirmed closed. Restart PrismaFunction after "
             "checking Task Manager for a lingering browser process."
         )
-        self._add_activity("Prisma close error")
 
     def _close_prisma_session(self) -> None:
         if self._prisma_closing or self._prisma_close_error:
@@ -637,13 +577,11 @@ class PrismaMonitorApp(QMainWindow):
             self._prisma_open = False
             self._set_badge(self.prisma_badge, "Prisma closed", "idle")
             self.status.setText("PRISMA closed")
-            self._add_activity("Prisma closed")
             self._update_controls()
             return
         self._prisma_closing = True
         self._set_badge(self.prisma_badge, "Closing Prisma…", "working")
         self.status.setText("Closing PRISMA…")
-        self._add_activity("Prisma closing")
         self._update_controls()
 
     def start_processing(self) -> None:
@@ -657,7 +595,6 @@ class PrismaMonitorApp(QMainWindow):
         source = Path(selected)
         self._processing_active = True
         self.status.setText("Importing PRISMA Export CSV…")
-        self._add_activity(f"PRISMA import started: {source.name}")
         self._update_controls()
         selected_date = self.import_date.date().toPython()
         self._processing_generation += 1
@@ -723,14 +660,6 @@ class PrismaMonitorApp(QMainWindow):
     ) -> None:
         if not self._is_closing and self._finish_processing(thread):
             self.status.setText(result.summary())
-            self._add_activity(
-                f"PRISMA import completed: {result.processed} processed, "
-                f"{len(result.issues)} audit issues"
-            )
-            for issue in result.issues[:5]:
-                self._add_activity(
-                    f"Row {issue.source_row_number}: {issue.status.value} — {issue.message}"
-                )
 
     def _processing_failed(
         self, error: str, thread: threading.Thread | None
@@ -751,12 +680,6 @@ class PrismaMonitorApp(QMainWindow):
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(result)))
-
-    def open_log_directory(self) -> None:
-        path = self._runtime_paths.log.parent
-        path.mkdir(parents=True, exist_ok=True)
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-            self._show_error("Log Folder", "The log folder could not be opened.")
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
