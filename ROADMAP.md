@@ -1807,6 +1807,67 @@ visibly expands vertically on launch and fills the released space; confirm it re
 maximizing and restoring the window; confirm it still renders valid CSV rows; and confirm the Status row
 remains visible and continues to report operations correctly.
 
+### P.36.18 — Order Mapping rows by Flow Start descending ✅
+
+**Status:**  Implemented, automated-tested; not yet merged (the user creates and merges pull requests).
+Branched from `main` as `feature/mapping-flow-start-descending`.
+**Dependencies:** P.36.8 (Mapping display), merged to `main`.
+
+**Objective.** Order the rows shown in the Mapping table by the source CSV field `Flow Start`,
+descending (the latest Flow Start first), so rows closest to the end date selected for the CSV
+download appear first. This is a UI-presentation-only ordering change: it does not alter
+`import_result.rows`, the 12-column output CSV contract, `prisma_output.py`, `prisma_publication.py`,
+or any publication/issue-collection order.
+
+**`mapping_presentation.py` changes.** `build_mapping_rows(import_result)` now sorts a local copy of
+`import_result.rows` by each row's already-parsed `flow_start` value (an ISO datetime string produced
+by `processor._parse_row`/`_parse_date` from the authoritative `DD.MM.YYYY HH:MM` PRISMA export
+contract) before mapping to the five-field `MappingDisplayRow` presentation, using
+`datetime.fromisoformat(row["flow_start"])` as the sort key — never a lexical comparison of a
+formatted date string. Sorting uses Python's stable `sorted(..., reverse=True)`, so rows with an equal
+`flow_start` retain their original import order. `import_result.rows` itself is read, not mutated
+(`sorted()` returns a new list), so this ordering never reaches the accepted rows, the output CSV, or
+publication. No new field, column, or interactive sort control was added: `MAPPING_DISPLAY_FIELDS` and
+`MappingDisplayRow` are unchanged, and `ui_components.py`'s `MappingTableModel` requires no change,
+since it only renders whatever row order `build_mapping_rows()` already returns.
+
+**Shared path.** `build_mapping_rows()` has exactly one call site, `app.py`'s
+`_refresh_mapping_display(path)`, which both `_select_manual_csv()` (P.36.4 manual selection) and
+`_handle_download_event()` (P.36.14 managed download) call after their own CSV-contract acceptance
+check succeeds — so this ordering applies identically to Mapping rows produced after either path with
+no separate wiring.
+
+**Automated evidence (2026-08-06).** `tests/test_mapping_presentation.py` gained 6 tests (17 total, up
+from 11): descending order across distinct `flow_start` values; equal `flow_start` values retaining
+original import order (stable tie-break); a full row (`exit_market`/`entry_market`/`network_point`/
+`tso_exit`/`tso_entry`) staying intact and grouped together after reordering; a single-row input
+remaining valid; a regression proving `import_result.rows`'s own order is never mutated by
+`build_mapping_rows()`; and an integration-level test through the real
+`processor.import_prisma_export` boundary proving the sort is chronological, not lexical — two rows use
+raw `DD.MM.YYYY` source dates (`"01.12.2025"`, 1 Dec 2025, and `"12.01.2025"`, 12 Jan 2025) whose
+lexical string order is the opposite of their chronological order, and the resulting display order is
+verified against the correct chronological-descending expectation while `import_result.rows` itself
+keeps the original source/import order. Focused run: `pytest tests/test_mapping_presentation.py -q` —
+**17 passed**. Focused `tests/test_app.py` run (covering both the manual-selection and managed-download
+mapping-refresh paths) — **71 passed**, unchanged from the P.36.17 baseline, since existing multi-row
+`test_app.py` fixtures share one identical `Product Runtime Start` value per test and so exercise the
+new stable equal-`flow_start` tie-break rather than needing any assertion change. Full suite:
+`pytest -q` — **644 passed, 1 skipped** (net +6 versus the 638 passed/1 skipped baseline recorded at
+P.36.17, exactly the 6 new `test_mapping_presentation.py` tests). Project-wide
+`python -m compileall` against the `BUILDING.md`-documented module list exited `0`. `git diff --check`
+passed.
+
+**Packaging validation (2026-08-06).** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec`
+completed successfully; no `requirements.txt`/`PrismaFunction.spec` change was needed, since this
+increment adds no dependency and no new module. `python validate_package.py` passed against the
+freshly built `dist\PrismaFunction\` directory.
+
+**Not yet merged.** Branch `feature/mapping-flow-start-descending`. No real-Windows manual validation
+has been performed for this increment. Outstanding before ✅ Completed: on a real Windows desktop, with
+a PRISMA Export CSV containing multiple auctions with distinct Flow Start values, confirm the Mapping
+table visibly lists the latest Flow Start first through both the manual-selection and managed-download
+paths, and confirm the 12-column output CSV/publication order is unaffected.
+
 ### Remaining support and finalization stages
 
 | ID | Stage | Status | Dependencies and scope |
@@ -1815,6 +1876,7 @@ remains visible and continues to report operations correctly.
 | P.36.10 | Remove superseded monitoring and obsolete dependencies | ✅ Implemented, automated-tested, packaging-validated, and merged to `main` via PR #65 (merge commit `d6dd456`) | See its own dated section above for the full implemented result and evidence. |
 | P.36.11 | Windows packaging and installer validation | 🟡 Substantially complete (2026-08-05) | Requires the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16 (all merged, met). See its own dated section above for the full implemented result, defects fixed, and real-Windows validation evidence, including the one recorded signing deviation. |
 | P.36.17 | Remove Recent activity panel and expand the Mapping workspace | 🟡 Implemented, automated-tested; not yet merged | UI-only removal, no change to the 12-column contract or any P.36 processing/publication behavior. See its own dated section above. Real-Windows validation of the released vertical space and Mapping resize behavior remains outstanding. |
+| P.36.18 | Order Mapping rows by Flow Start descending | 🟡 Implemented, automated-tested, packaging-validated; not yet merged | Presentation-only ordering in `mapping_presentation.py`; no change to `import_result.rows`, the 12-column output CSV, or publication order. See its own dated section above. Real-Windows validation remains outstanding. |
 | P.36.12 | Regression and clean-Windows acceptance | ⬜ Planned | Final gate after all required P.36 implementation and packaging stages. Run the full suite and the approved real-Windows end-to-end checklist. |
 
 ## Current blockers and risks
@@ -1867,6 +1929,10 @@ remains visible and continues to report operations correctly.
   packaging-validated (2026-08-06; see its dated entry above) on branch
   `feature/p36-17-remove-recent-activity`; not yet merged, and real-Windows validation of the released
   vertical space and Mapping resize behavior remains outstanding.
+- P.36.18 (order Mapping rows by Flow Start descending) is implemented, automated-tested, and
+  packaging-validated (2026-08-06; see its dated entry above) on branch
+  `feature/mapping-flow-start-descending`; not yet merged, and real-Windows validation of the displayed
+  order remains outstanding.
 
 ## Next recommended increment
 
@@ -1906,6 +1972,9 @@ remains visible and continues to report operations correctly.
 11. P.36.17 (remove Recent activity panel, expand Mapping) is implemented, automated-tested, and
     packaging-validated (2026-08-06, see its own dated section above); obtain real-Windows validation of
     the removed panel/released Mapping space, then merge before P.36.12.
+12. P.36.18 (order Mapping rows by Flow Start descending) is implemented, automated-tested, and
+    packaging-validated (2026-08-06, see its own dated section above); obtain real-Windows validation of
+    the displayed order, then merge before P.36.12.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 
