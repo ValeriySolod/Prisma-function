@@ -1735,6 +1735,78 @@ increment's scope.
 **P.36.12 was not performed** by this increment (no regression/clean-Windows acceptance pass beyond what is
 recorded above).
 
+### P.36.17 — Remove Recent activity panel and expand the Mapping workspace
+
+**Status:** 🟡 Implemented, automated-tested. Branched from `main` (post-P.36.11 tree) as
+`feature/p36-17-remove-recent-activity`; not yet merged (the user creates and merges pull requests).
+**Dependencies:** P.36.8 (Mapping display), all merged to `main`.
+
+**Objective.** Remove the complete user-visible "Recent activity" section from the main window (heading,
+list widget, "Open log folder" and "Clear" buttons) and let the Mapping table expand into the released
+vertical space. This is a UI-only increment: it changes no CSV parsing, transformation, mapping,
+publication, download, browser-lifecycle, filename, directory, or threshold behavior, and it does not
+change the 12-column output contract.
+
+**`app.py` changes.** Removed: the "Recent activity" content panel (heading, `self.activity_list`
+`QListWidget`, `self.open_logs_button`/`self.clear_activity_button` and their handlers); the `ActivityKind`
+enum; the `_add_activity` and `clear_activity` methods; `open_log_directory` (unreachable once its only
+caller, the "Open log folder" button, was removed — no other caller existed); and every
+`self._add_activity(...)` call site across the Prisma lifecycle, date-range, manual/managed CSV selection,
+and processing-result handlers (18 call sites). The two per-row "PRISMA import completed"/`Row N: ...`
+activity entries in `_processing_succeeded` were dropped rather than redirected anywhere, since their only
+surface was the removed list and the Status row already reports the same outcome via `result.summary()`.
+The now-unused `QListWidget`, `QListWidgetItem`, `QColor`, and `Enum` imports were removed. The Mapping
+panel's `main.addWidget(mapping_panel, 1)` call (previously no stretch factor) and
+`mapping_layout.addWidget(self.mapping_table, 1)` now give the Mapping panel and its table a positive
+vertical stretch factor, so the panel absorbs the space released by the removed panel at open, resize, and
+maximize, while the header and Status row keep their fixed size. Every other control (PRISMA Export Date,
+Import PRISMA Export, Open Result, date-range selection, download-directory selection, Open/Close Prisma,
+manual CSV fallback, managed download, Mapping refresh/stale-row clearing, shutdown/worker cleanup) is
+unchanged.
+
+**`ui_components.py` changes.** Removed the `QListWidget`/`QListWidget::item` CSS rules from `APP_STYLE`,
+since they styled only the removed activity list and no other widget in the application uses `QListWidget`.
+`MappingTableModel` and every other rule are unchanged.
+
+**Preserved.** File logging and runtime diagnostics (`runtime_logging.py`, `initialize_runtime_logging`,
+`safe_log`) are completely untouched by this increment — no call site into that module was touched, and
+`tests/test_runtime_logging.py` (unaffected by this change) still passes. The Status row, its wording, and
+every dialog-based error report are unchanged in behavior; several tests that previously asserted only
+against `activity_list` were updated to assert the equivalent, already-present `status.text()` value instead
+so status-reporting coverage is not reduced by the removal.
+
+**Automated evidence.** `tests/test_app.py` updates: removed the "Recent activity" label and
+`activity_list.objectName()` assertions and the two `QListWidget` CSS-rule assertions from
+`test_light_workspace_widgets_use_explicit_contrast_styles`; added
+`test_recent_activity_section_is_completely_removed` (no `activityList`-named widget, no "Recent activity"
+section label, no "Open log folder"/"Clear" button text, and none of the `activity_list`/`open_logs_button`/
+`clear_activity_button`/`_add_activity`/`clear_activity`/`open_log_directory` attributes remain on the
+window) and `test_mapping_panel_receives_positive_vertical_stretch` (the Mapping panel's index in the
+content `QVBoxLayout` has `stretch() > 0`); replaced `activity_list`-based assertions with equivalent
+`status.text()` assertions in the manual-CSV-selection, date-range-acceptance, downloaded-CSV-rejection, and
+processing-success tests; replaced the "Prisma closed manually" activity-count assertion in
+`test_single_drain_with_open_then_manual_closed_loses_no_event` with a `Mock(wraps=...)` spy on
+`widget.status.setText` proving the "PRISMA opened…" and "PRISMA was closed manually…" status messages each
+fire exactly once during a single event-drain pass (preserving the test's "loses no event" intent without
+the removed list); and deleted `test_clear_activity_does_not_touch_logs`, whose subject no longer exists.
+Focused run: `pytest tests/test_app.py -q` — **71 passed**. Full suite:
+`pytest -q` — **638 passed, 1 skipped** (net +1 versus the 637 passed/1 skipped baseline recorded at
+P.36.11: two new tests added, one obsolete test removed). Project-wide `python -m compileall` against the
+`BUILDING.md`-documented 22-module-plus-`tests` list exited `0`. `git diff --check` passed.
+
+**Packaging validation.** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` completed
+successfully (only the pre-existing, unrelated "Hidden import 'jinja2' not found" Playwright warning,
+recorded in every prior packaging entry in this file). No `requirements.txt`/`PrismaFunction.spec` change
+was needed: this increment removes no dependency. `python validate_package.py` passed against the freshly
+built `dist\PrismaFunction\` directory.
+
+**Not yet merged.** No real-Windows manual validation has been performed for this increment. The following
+remains outstanding before this increment can be marked ✅ Completed: on a real Windows desktop, confirm
+Recent activity/Open log folder/Clear are absent with no empty gap left behind; confirm the Mapping table
+visibly expands vertically on launch and fills the released space; confirm it resizes correctly when
+maximizing and restoring the window; confirm it still renders valid CSV rows; and confirm the Status row
+remains visible and continues to report operations correctly.
+
 ### Remaining support and finalization stages
 
 | ID | Stage | Status | Dependencies and scope |
@@ -1742,6 +1814,7 @@ recorded above).
 | P.36.8 | Mapping display in the UI | 🟡 Implemented, automated-tested, merged to `main` (PR #64); manually validated on real Windows (manual-selection path only) | Requires P.36.15 (met). See its own dated section above for the full implemented result and evidence. |
 | P.36.10 | Remove superseded monitoring and obsolete dependencies | ✅ Implemented, automated-tested, packaging-validated, and merged to `main` via PR #65 (merge commit `d6dd456`) | See its own dated section above for the full implemented result and evidence. |
 | P.36.11 | Windows packaging and installer validation | 🟡 Substantially complete (2026-08-05) | Requires the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16 (all merged, met). See its own dated section above for the full implemented result, defects fixed, and real-Windows validation evidence, including the one recorded signing deviation. |
+| P.36.17 | Remove Recent activity panel and expand the Mapping workspace | 🟡 Implemented, automated-tested; not yet merged | UI-only removal, no change to the 12-column contract or any P.36 processing/publication behavior. See its own dated section above. Real-Windows validation of the released vertical space and Mapping resize behavior remains outstanding. |
 | P.36.12 | Regression and clean-Windows acceptance | ⬜ Planned | Final gate after all required P.36 implementation and packaging stages. Run the full suite and the approved real-Windows end-to-end checklist. |
 
 ## Current blockers and risks
@@ -1790,6 +1863,10 @@ recorded above).
 - P.36.10 (superseded monitoring/scheduler removal) is implemented, automated-tested,
   packaging-validated, and merged to `main` via PR #65 (merge commit `d6dd456`, 2026-08-05; see its
   dated entry above).
+- P.36.17 (remove Recent activity panel, expand Mapping) is implemented, automated-tested, and
+  packaging-validated (2026-08-06; see its dated entry above) on branch
+  `feature/p36-17-remove-recent-activity`; not yet merged, and real-Windows validation of the released
+  vertical space and Mapping resize behavior remains outstanding.
 
 ## Next recommended increment
 
@@ -1826,6 +1903,9 @@ recorded above).
    installer build" acceptance item permanently.
 10. P.36.12 (regression and clean-Windows acceptance) remains planned; do not begin it until P.36.11 is
     merged and any remaining signing decision from item 9 is resolved.
+11. P.36.17 (remove Recent activity panel, expand Mapping) is implemented, automated-tested, and
+    packaging-validated (2026-08-06, see its own dated section above); obtain real-Windows validation of
+    the removed panel/released Mapping space, then merge before P.36.12.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 
