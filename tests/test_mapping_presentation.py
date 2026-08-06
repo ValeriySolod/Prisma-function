@@ -45,7 +45,7 @@ def test_mapping_display_fields_exact_order_and_spelling() -> None:
 def _row(**overrides) -> dict:
     row = {
         "exit_market": "", "entry_market": "", "network_point": "",
-        "tso_exit": "", "tso_entry": "",
+        "tso_exit": "", "tso_entry": "", "flow_start": "2025-01-01T00:00:00",
     }
     row.update(overrides)
     return row
@@ -110,6 +110,62 @@ def test_build_mapping_rows_does_not_swap_or_infer_across_sides() -> None:
     assert row.tso_name_exit == ""
     assert row.entry_market == "VGS Storage Hub"
     assert row.tso_name_entry == "GUD"
+
+
+# --- P.36.18: Flow Start descending ordering ---------------------------------
+
+def test_build_mapping_rows_orders_by_flow_start_descending() -> None:
+    result = _result([
+        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00"),
+        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00"),
+        _row(exit_market="Feb", flow_start="2025-02-01T00:00:00"),
+    ])
+    rows = build_mapping_rows(result)
+    assert [row.exit_market for row in rows] == ["Mar", "Feb", "Jan"]
+
+
+def test_build_mapping_rows_equal_flow_start_preserves_original_order() -> None:
+    result = _result([
+        _row(exit_market="A", flow_start="2025-06-01T00:00:00"),
+        _row(exit_market="B", flow_start="2025-06-01T00:00:00"),
+        _row(exit_market="C", flow_start="2025-06-01T00:00:00"),
+    ])
+    rows = build_mapping_rows(result)
+    assert [row.exit_market for row in rows] == ["A", "B", "C"]
+
+
+def test_build_mapping_rows_sorting_keeps_complete_row_data_together() -> None:
+    result = _result([
+        _row(
+            exit_market="Early", entry_market="Early-Entry", network_point="Early-Point",
+            tso_exit="Early-TSO-X", tso_entry="Early-TSO-Y", flow_start="2025-01-01T00:00:00",
+        ),
+        _row(
+            exit_market="Late", entry_market="Late-Entry", network_point="Late-Point",
+            tso_exit="Late-TSO-X", tso_entry="Late-TSO-Y", flow_start="2025-12-01T00:00:00",
+        ),
+    ])
+    rows = build_mapping_rows(result)
+    assert rows == (
+        MappingDisplayRow("Late", "Late-Entry", "Late-Point", "Late-TSO-X", "Late-TSO-Y"),
+        MappingDisplayRow("Early", "Early-Entry", "Early-Point", "Early-TSO-X", "Early-TSO-Y"),
+    )
+
+
+def test_build_mapping_rows_single_row_input_is_valid() -> None:
+    result = _result([_row(exit_market="Only", flow_start="2025-05-01T00:00:00")])
+    rows = build_mapping_rows(result)
+    assert [row.exit_market for row in rows] == ["Only"]
+
+
+def test_build_mapping_rows_does_not_mutate_import_result_rows_order() -> None:
+    imported_rows = [
+        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00"),
+        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00"),
+    ]
+    result = _result(imported_rows)
+    build_mapping_rows(result)
+    assert [row["exit_market"] for row in result.imported_rows] == ["Jan", "Mar"]
 
 
 # --- integration through the real P.36.15 import/enrichment boundary --------
@@ -187,6 +243,41 @@ def test_multiple_accepted_rows_preserve_import_order(tmp_path: Path) -> None:
     assert [row.network_point_name for row in display] == [
         "VIP DK-THE (H646) (H646)", "VGS Storage Hub (4290)",
     ]
+
+
+def test_build_mapping_rows_orders_chronologically_not_lexically_through_real_pipeline(
+    tmp_path: Path,
+) -> None:
+    # "01.12.2025" (1 Dec 2025) sorts lexically BEFORE "12.01.2025" (12 Jan
+    # 2025) as raw DD.MM.YYYY strings, since '0' < '1' in the first
+    # character. Chronologically 12 Jan 2025 is earlier than 1 Dec 2025, so a
+    # correct descending-by-date sort must put 1 Dec 2025 first even though a
+    # naive lexical sort of the formatted strings would disagree.
+    # Both are real evidenced exit aliases in the authoritative catalog
+    # (resolving to distinct canonical markets, THE and CEGH), so this
+    # exercises the real side-specific resolution boundary, not invented data.
+    december_row = {
+        **BASE, "Auction ID": "601", "Direction": "Exit",
+        "Start of Auction": "01.12.2025 09:00",
+        "Product Runtime Start": "01.12.2025 10:00", "Product Runtime End": "01.12.2025 11:00",
+        "Network Point Name Exit": "VIP DK-THE (H646) (H646)", "Network Point ID Exit": "EXIT-1",
+    }
+    january_row = {
+        **BASE, "Auction ID": "602", "Direction": "Exit",
+        "Start of Auction": "12.01.2025 09:00",
+        "Product Runtime Start": "12.01.2025 10:00", "Product Runtime End": "12.01.2025 11:00",
+        "Network Point Name Exit": "Baumgarten WAG AT->SK", "Network Point ID Exit": "EXIT-2",
+    }
+    # Source order is January-then-December, the opposite of both the
+    # expected chronological-descending display order and the wrong lexical
+    # order, so this cannot pass by accident.
+    source = write_csv(tmp_path, [january_row, december_row])
+    imported = import_prisma_export(source)
+    assert imported.rejected_count == 0 and imported.filtered_count == 0
+    display = build_mapping_rows(imported)
+    assert [row.exit_market for row in display] == ["THE", "CEGH"]
+    # The underlying accepted rows keep the original source/import order.
+    assert [row["exit_market"] for row in imported.rows] == ["CEGH", "THE"]
 
 
 def test_filtered_and_rejected_rows_are_excluded_from_the_real_pipeline(
