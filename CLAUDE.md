@@ -17,15 +17,19 @@ Mini (`Prisma-function-mini`) or any other unrelated or deleted project.
 
 ## Source of truth — read before any change
 
-- Read every applicable `AGENTS.md`.
-- Read `ROADMAP.md` and `workflow_p.md` completely.
+- Read `AGENTS.md` completely. It defines repository-wide engineering
+  rules: source-of-truth precedence, scope control, validation/testing/
+  packaging requirements, the review-and-correction workflow, Git safety
+  rules, and the Definition of Done. This file (`CLAUDE.md`) does not repeat
+  that content.
+- Read `ROADMAP.md` completely.
 - Read the architecture and technical documentation referenced by those files.
 - Inspect relevant production code, tests, configuration, and packaging files.
 - Run `git status --short --branch` before starting.
 - Priority when sources conflict: the newest explicitly approved customer
   decision, then the newest authoritative specification (`Prisma
-  Function.odt`), then the corrected `ROADMAP.md` and `workflow_p.md`, then
-  implementation evidence in the repository, then this file.
+  Function.odt`), then the corrected `ROADMAP.md`, then implementation
+  evidence in the repository, then `AGENTS.md`/this file.
 
 `Prisma Function.odt` is the sole authoritative business specification for the
 P.36 line. Never infer missing requirements.
@@ -93,7 +97,11 @@ additionally show `Network Point Name`, `TSO Name Exit`, and `TSO Name Entry`,
 but must never add, remove, rename, or reorder the 12 output columns. Do not
 reuse the Prisma Function Mini contract by assumption.
 
-## Non-negotiable rules
+## Non-negotiable product rules
+
+See `AGENTS.md` for repository-wide engineering rules (language, scope
+control, testing/packaging, review workflow, Git safety, Definition of
+Done). The rules below are specific to the Prisma Function product:
 
 - Only auctions with booked capacity at or above the authoritative threshold
   after unit normalization are relevant. For P.36, follow the approved 1 MWh
@@ -112,36 +120,7 @@ reuse the Prisma Function Mini contract by assumption.
 - P.36 downloaded and published user-facing files follow the approved
   Documents-directory-or-user-selected-directory contract (`P.36.3`), not
   `%LOCALAPPDATA%`.
-- Code, identifiers, comments, UI text, CSV headers and values, technical
-  documentation, branch names, and commit messages must be English.
 - Never bypass PRISMA authentication, anti-bot protection, or terms.
-- Preserve validation, auditing, error context, atomicity, recovery, security,
-  and backward compatibility.
-
-## Working style
-
-- One increment equals one bounded branch and one independently tested task.
-- Do not include unrelated refactoring, cleanup, formatting, or dependency
-  updates.
-- Prefer tests over production changes when existing behavior only needs proof.
-- Run focused tests, the complete test suite, Python compilation, relevant
-  packaging validation, and `git diff --check`.
-- Update documentation and `ROADMAP.md` when behavior, configuration,
-  contracts, conditions, or status change.
-- Implementation executor may be Claude Code or Codex, but both use the same
-  roadmap, branch boundaries, requirements, and Definition of Done.
-- Review may use GitHub Copilot without allowing it to edit files.
-- Never commit, push, merge, rebase, force-push, release, or delete a branch
-  without explicit user authorization. The user creates and merges pull
-  requests.
-
-## Definition of Done
-
-The increment contains only the agreed scope; English UI and CSV contracts are
-preserved; errors, retry, and cleanup are handled; focused and full tests pass;
-authoritative requirements remain intact; no critical review finding remains;
-documentation is current; the change is merged to `main`; and the feature
-branch is deleted.
 
 ## Claude Code efficiency
 

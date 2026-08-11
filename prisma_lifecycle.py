@@ -340,8 +340,8 @@ class PrismaLifecycleController:
             # is an independent, lower-level ground-truth signal, layered on
             # top of the Playwright-level page/context/browser signals above:
             # real Windows X-button validation showed those alone were not
-            # always sufficient (see workflow_p.md P.36.2 real-runtime
-            # evidence log).
+            # always sufficient (see ROADMAP.md's P.36.2 entry and Git history
+            # for workflow_p.md's now-superseded real-runtime evidence log).
             try:
                 cdp_session = browser.new_browser_cdp_session()
                 cdp_session.send("Target.setDiscoverTargets", {"discover": True})

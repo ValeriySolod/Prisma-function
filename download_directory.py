@@ -175,7 +175,7 @@ class DownloadDirectorySelection:
     operations ledger and `prisma_import_state.json` are narrowly typed to the
     PRISMA source-import lifecycle (accepted sources), not arbitrary UI
     selections, and inventing a second settings store for this one value is
-    out of scope for this increment (see ROADMAP.md / workflow_p.md P.36.3).
+    out of scope for this increment (see ROADMAP.md's P.36.3 entry).
     """
 
     def __init__(self, initial: Path) -> None:

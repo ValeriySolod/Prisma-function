@@ -1,7 +1,7 @@
 # Prisma-function Roadmap
 
 `ROADMAP.md` records implementation history and the current dependency-ordered product plan.
-`workflow_p.md` defines detailed engineering rules, validation requirements, and the Definition of Done.
+`AGENTS.md` defines detailed engineering rules, validation requirements, and the Definition of Done.
 The newest explicitly approved customer requirements supersede older roadmap text when a conflict is recorded below.
 
 ## Status legend
@@ -76,7 +76,7 @@ Contract rules:
 | P.35–P.35.1 | Authoritative mapping catalog expansion | ✅ Completed | Preserve exact side-specific evidence and regression rules. |
 | P.35.2–P.35.5 | Paired CSV/PDF acquisition line | ❌ Cancelled | Do not restore the cancelled paired-source or PDF-processing design. |
 
-Detailed historical records and test counts remain in `workflow_p.md` and Git history. This summary must not be used to claim that an unrun current test suite has passed.
+Detailed historical records and test counts remain in Git history (see `workflow_p.md` as it existed before its removal and consolidation into `AGENTS.md`/`CLAUDE.md`). This summary must not be used to claim that an unrun current test suite has passed.
 
 ## P.36 implementation roadmap
 
@@ -158,13 +158,13 @@ importer, or any download workflow; the completed P.36.2–P.36.4 behavior is un
 - UI controls reflect the accepted range and remain retryable after errors;
 - no browser or file operation occurs;
 - relevant focused tests, full regression tests required by project rules, compilation, and `git diff --check` pass;
-- `workflow_p.md` and this roadmap record the final implemented behavior and exact executed validation results.
+- this roadmap records the final implemented behavior and exact executed validation results (see Git history for `workflow_p.md`'s now-superseded copy).
 
 **Verified evidence (2026-08-02, merged via PR #59, merge commit `ff07b68`):** `tests/test_date_range_selection.py` (17 tests) and
 the 10 focused P.36.13 tests in `tests/test_app.py` passed; the complete suite passed with 592 tests
 (up from 565) in 15.33s; project-wide `compileall` (excluding `.venv`, `build`, `.git`, `__pycache__`)
 exited 0, with one pre-existing, unrelated `.pytest_tmp` permission warning predating this increment;
-and `git diff --check` passed. See `workflow_p.md`'s P.36.13 completion record for the full detail. No
+and `git diff --check` passed. See Git history for `workflow_p.md`'s (now-superseded) P.36.13 completion record for the full detail. No
 real-browser, real-PRISMA, filesystem, CSV-processing, publication, or later-increment behavior was
 added or exercised by this increment.
 
@@ -486,7 +486,7 @@ out of scope and untouched):
 
 **Automated evidence.** The complete pytest suite passed with **695 tests** (`tests/test_prisma_download.py`:
 68; `tests/test_prisma_lifecycle.py`: 57), covering both fixes' success, absence, and failure paths (see
-`workflow_p.md`'s matching entry for the full enumerated list). `python -m compileall` and `git diff --check`
+Git history for `workflow_p.md`'s matching (now-superseded) entry for the full enumerated list). `python -m compileall` and `git diff --check`
 both passed. `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` was rerun and succeeded;
 `python validate_package.py` passed against the fresh distribution; an isolated-`LOCALAPPDATA` smoke launch
 of `PrismaFunction.exe` reached a live main window and shut down cleanly (exit code `0`, no forced kill, no
@@ -510,7 +510,7 @@ a defect in either fix delivered in this round; per this round's explicit scope 
 diagnostic side effect of not being able to narrow the result set also surfaced a PRISMA-native "Your
 download contains only 5000 of 10068 items" confirmation modal requiring a second click for large unfiltered
 result sets — not expected with a real narrow date range, and not handled here since it is tied to the
-same out-of-scope blocker. See `workflow_p.md` for the complete diagnostic record.
+same out-of-scope blocker. See Git history for `workflow_p.md`'s (now-superseded) complete diagnostic record.
 
 **Outstanding before this increment can be marked ✅ Completed:** because of the newly confirmed date-filter
 blocker above, a full live pass of the corrected, fully-automated flow — including PrismaFunction itself
@@ -659,7 +659,7 @@ to call `save_as()` on for a file the fallback found on disk). `PrismaLifecycleC
 `download_directory` through to `configure()`; no second wait loop, thread, or filesystem-polling mechanism
 was added — the fallback is polled from inside the exact same non-blocking `await_and_finalize()` call already
 interleaved with the existing `cancel_event.wait(0.1)` idle loop, so Close Prisma's responsiveness is
-unaffected. See `workflow_p.md`'s matching dated entry for the full implementation and test record.
+unaffected. See Git history for `workflow_p.md`'s matching (now-superseded) dated entry for the full implementation and test record.
 
 **Automated evidence (2026-08-03).** The complete pytest suite passed with **725 tests** (up from 711;
 `tests/test_prisma_download.py`: 91, up from 79, +12; `tests/test_prisma_lifecycle.py`: 64, up from 62, +2),
@@ -971,7 +971,7 @@ pass through unchanged as the ISO 8601 strings already treated as authoritative 
 (`storage.py`'s SQLite/Excel export uses the same representation); `exit_market`/`entry_market` map directly
 (each populated only from its own side's resolved evidence, exactly as `processor.py` already guarantees);
 `direction` (`"entry"`/`"exit"`/`"bundle"`) maps to `Capacity Type` unchanged, matching the authoritative
-specification's exact wording (`workflow_p.md` section 1.1, item 5); `network_point` maps to
+specification's exact wording; `network_point` maps to
 `Network Point Name`; `product_type` maps to `Product Type`; `booked_capacity_kwh_h`, `runtime_hours`,
 `tariff_eur_mwh_h`, and `premium_eur_mwh_h` map to `Booked Capacity`, `Flow Duration Hours`, `Tariff Price`,
 and `Premium Price` respectively, each formatted via Python's own `str(float)` (always dot-decimal; no
@@ -1920,7 +1920,7 @@ paths, and confirm the 12-column output CSV/publication order is unaffected.
   manual-selection (P.36.4) trigger path (2026-08-04, see its dated entry above); branched from `main` at
   merge commit `daf4760` and merged to `main` via PR #64 (merge commit `5e3f309`). Real-Windows validation
   of the managed-download (P.36.14) trigger path remains outstanding.
-- `ROADMAP.md`, `workflow_p.md`, and `CLAUDE.md` must remain synchronized on the active 12-column contract and P.36 dependency order.
+- `ROADMAP.md` and `CLAUDE.md` must remain synchronized on the active 12-column contract and P.36 dependency order.
 - Completed P.36.4 remains useful as fallback, but treating it as the primary flow would contradict the current specification.
 - P.36.10 (superseded monitoring/scheduler removal) is implemented, automated-tested,
   packaging-validated, and merged to `main` via PR #65 (merge commit `d6dd456`, 2026-08-05; see its
@@ -1936,7 +1936,7 @@ paths, and confirm the 12-column output CSV/publication order is unaffected.
 
 ## Next recommended increment
 
-1. Complete and review the documentation correction across `ROADMAP.md`, `workflow_p.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
+1. Complete and review the documentation correction across `ROADMAP.md`, `AGENTS.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
 2. P.36.13 is implemented and merged to `main` via PR #59 (merge commit `ff07b68`); it is completed.
 3. P.36.14's decision gate is resolved and it is implemented, automated-tested, and merged to `main` via
    PR #61 (merge commit `36b7615`); obtain the required real-Windows/real-PRISMA validation before it can be
