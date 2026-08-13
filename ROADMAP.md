@@ -72,7 +72,7 @@ Contract rules:
 | P.26–P.32 | Runtime paths, packaging, CI, dashboard, installer, and release foundations | ✅ Repository-side foundations completed | Revalidate packaging, installer, and clean-Windows behavior after the P.36 dependency set is final. |
 | P.33–P.33.8 | PRISMA CSV import, persistence, publication, enrichment, and mapping foundations | ✅ Completed | Reuse only compatible, tested business and safety boundaries. Do not restore superseded output shapes. |
 | P.34.1 | Safe auction deduplication | ✅ Completed | Existing identity, conflict, and audit behavior is available for reuse if the approved P.36 publication design needs it. |
-| P.34.2 | Maximize managed browser window | ✅ Completed | Real-Windows behavior validated. |
+| P.34.2 | Maximize managed browser window | ✅ Completed; superseded by P.36.20 | Real-Windows behavior validated at the time. The `--start-maximized` launch requirement itself is superseded by the 2026-08-13 customer-approved P.36.20 minimized-launch requirement; this row's historical implementation and validation record is preserved, not erased. |
 | P.35–P.35.1 | Authoritative mapping catalog expansion | ✅ Completed | Preserve exact side-specific evidence and regression rules. |
 | P.35.2–P.35.5 | Paired CSV/PDF acquisition line | ❌ Cancelled | Do not restore the cancelled paired-source or PDF-processing design. |
 
@@ -2372,10 +2372,62 @@ rule, which remains established solely by existing automated coverage
 and `tests/test_app.py`'s equivalent end-to-end coverage), not by these
 screenshots.
 
+### P.36.20 — Minimize the managed browser window
+
+**Status:** 🟡 Implemented, automated-tested, real-Windows manually validated (2026-08-13); not yet
+merged. Branched from `main` as `feature/minimized-prisma-browser`.
+**Dependencies:** P.36.2 (Open Prisma / Close Prisma lifecycle), P.34.2 (superseded by this
+increment), merged to `main`.
+
+**Approved customer decision (2026-08-13).** After the user selects "Open Prisma", the
+application-managed Chrome or Edge window must launch minimized in the Windows taskbar — never
+brought to the foreground, never opened as a normal visible window, never maximized, and never
+placed in F11/full-screen mode — and must remain available in the taskbar until the user selects
+"Close Prisma" or closes the browser manually. Prisma Function must continue navigating PRISMA,
+configuring the requested date range, downloading the CSV, and detecting browser closure while the
+browser stays minimized. This supersedes P.34.2's "maximize managed browser window" requirement
+(✅ Completed, real-Windows-validated at the time); P.34.2's historical implementation and
+validation record is preserved above and in Git history, not erased.
+
+**Implemented result.** `prisma_lifecycle.py`'s `PrismaLifecycleController._run()` launches the
+managed browser with `args=["--start-minimized"]` instead of P.34.2's `args=["--start-maximized"]`
+— the only change to `launch_kwargs`. This is a native Chromium launch switch supported by both
+Google Chrome and Microsoft Edge, applies identically whether or not a managed download is
+configured (`downloads_path` is still set exactly as before when `date_range`/`download_directory`
+are supplied), and requires no new Win32 window-search, process-search, or window-state-manipulation
+code — the application never targets any window or process other than the one it just launched.
+`page = browser.new_page(no_viewport=True)` and the rest of the lifecycle (navigation, date-range
+configuration, download orchestration, manual-closure detection via the browser/page/context/CDP
+signals, Close Prisma, cleanup) are unchanged.
+
+**Automated evidence (2026-08-13).** `tests/test_prisma_lifecycle.py` gained
+`test_open_launches_the_managed_browser_minimized_not_maximized`, asserting the managed browser's
+`launch()` call receives exactly `args=["--start-minimized"]` (and not `"--start-maximized"`), that
+`no_viewport=True` is unchanged, and that Open Prisma still reaches `PrismaLifecycleState.OPEN` and
+Close Prisma still reaches `PrismaLifecycleState.IDLE` with the browser confirmed closed.
+`test_managed_download_launches_the_browser_with_downloads_path_set_to_the_configured_directory` was
+extended with the same `args` assertion, proving the minimized launch and the existing
+`downloads_path` contract compose correctly. The complete pytest suite passed with **798 tests
+passed, 1 skipped** (up from 797 passed, 1 skipped; +1, matching this increment's one new test).
+Project-wide `python -m compileall` (the exact file list documented in `BUILDING.md`) exited `0`.
+`git diff --check` passed. `python -m pytest -q tests/test_packaging.py` passed (10 tests); no
+`.spec`, dependency, or entry-point file changed, so a full `PyInstaller` rebuild was judged not
+required for this increment (only `prisma_lifecycle.py` and its test file changed).
+
+**Manual real-Windows validation (2026-08-13).** The customer completed the real-Windows validation
+successfully. Confirmed: the managed browser launched minimized in the Windows taskbar; PRISMA
+automation and CSV download continued successfully while minimized; "Close Prisma" closed the
+managed browser session cleanly. Only one browser configuration was exercised in this validation
+pass; a separate Chrome-vs-Edge comparison was not performed and is not claimed here.
+
+**Outstanding before this increment can be marked ✅ Completed:** merge `feature/minimized-prisma-browser`
+to `main`. Implementation, automated tests, and required manual Windows validation have all passed.
+
 ### Remaining support and finalization stages
 
 | ID | Stage | Status | Dependencies and scope |
 |---|---|---|---|
+| P.36.20 | Minimize the managed browser window | 🟡 Implemented, automated-tested, real-Windows manually validated (2026-08-13); not yet merged | Supersedes P.34.2's maximized launch. Single-argument change in `prisma_lifecycle.py` (`--start-minimized` replacing `--start-maximized`); no change to navigation, date-range configuration, download orchestration, or closure detection. See its own dated section above. Remaining requirement: merge to `main`. |
 | P.36.8 | Mapping display in the UI | 🟡 Implemented, automated-tested, merged to `main` (PR #64); manually validated on real Windows (manual-selection path only) | Requires P.36.15 (met). See its own dated section above for the full implemented result and evidence. |
 | P.36.10 | Remove superseded monitoring and obsolete dependencies | ✅ Implemented, automated-tested, packaging-validated, and merged to `main` via PR #65 (merge commit `d6dd456`) | See its own dated section above for the full implemented result and evidence. |
 | P.36.11 | Windows packaging and installer validation | 🟡 Substantially complete (2026-08-05) | Requires the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16 (all merged, met). See its own dated section above for the full implemented result, defects fixed, and real-Windows validation evidence, including the one recorded signing deviation. |

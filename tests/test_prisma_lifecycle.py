@@ -284,6 +284,37 @@ def test_successful_open_navigates_only_to_the_approved_url(monkeypatch):
     assert browser.closed.is_set()
 
 
+def test_open_launches_the_managed_browser_minimized_not_maximized(monkeypatch):
+    """Approved behavior: the application-owned browser starts minimized to
+    the taskbar (P.34.2's `--start-maximized` launch is superseded). The
+    existing no-fixed-viewport (`no_viewport=True`) behavior is unchanged.
+    """
+    browser = FakeBrowser()
+    launch_calls = []
+
+    def capturing_launch(**kwargs):
+        launch_calls.append(kwargs)
+        return browser
+
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, capturing_launch)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    assert controller.state is PrismaLifecycleState.OPEN
+    assert len(launch_calls) == 1
+    assert launch_calls[0]["args"] == ["--start-minimized"]
+    assert "--start-maximized" not in launch_calls[0]["args"]
+    assert browser.new_page_options == [{"no_viewport": True}]
+
+    controller.close()
+    join_worker(controller)
+    assert controller.state is PrismaLifecycleState.IDLE
+    assert browser.closed.is_set()
+
+
 def test_repeated_open_while_active_is_a_safe_deterministic_no_op(monkeypatch):
     browser = FakeBrowser()
     controller = PrismaLifecycleController()
@@ -1560,6 +1591,7 @@ def test_managed_download_launches_the_browser_with_downloads_path_set_to_the_co
 
     assert len(launch_calls) == 1
     assert launch_calls[0]["downloads_path"] == str(tmp_path)
+    assert launch_calls[0]["args"] == ["--start-minimized"]
     controller.close()
     join_worker(controller)
 

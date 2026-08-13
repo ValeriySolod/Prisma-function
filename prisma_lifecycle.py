@@ -377,7 +377,11 @@ class PrismaLifecycleController:
 
             launch_kwargs = {
                 "executable_path": str(executable), "headless": False,
-                "args": ["--start-maximized"],
+                # Approved behavior (superseding P.34.2's maximized launch):
+                # the application-owned browser must start minimized to the
+                # Windows taskbar, never foregrounded, maximized, or in
+                # F11/full-screen mode, while automation continues normally.
+                "args": ["--start-minimized"],
             }
             if managed_download:
                 # Real-Windows defect (2026-08-03): without this, Chrome/CDP's
