@@ -43,24 +43,39 @@ from download_directory import (
 )
 from manual_csv_selection import ManualCsvSelection, describe_rejection
 from mapping_presentation import build_mapping_rows
+from prisma_auction_lookup import PrismaAuctionLookup
 from prisma_download import (
     PrismaDownloadValidationOutcome,
     describe_validation_rejection,
     validate_download_configuration,
 )
 from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
-from prisma_lifecycle import PrismaLifecycleController, PrismaLifecycleEvent, PrismaLifecycleState
+from prisma_lifecycle import (
+    ManagedPrismaAuctionDetailFetcher,
+    PrismaLifecycleController,
+    PrismaLifecycleEvent,
+    PrismaLifecycleState,
+)
 from processor import PrismaImportError, import_prisma_export
+from rate_resolution import resolve_rates_for_rows
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
     safe_log,
 )
 from runtime_paths import RuntimePathError, RuntimePaths, migrate_legacy_runtime_data, runtime_paths
+from storage import AuctionStorage, AuctionStorageError
 from ui_components import APP_STYLE, MappingTableModel
 from version import APP_DISPLAY_NAME, __version__
 
 PRISMA_SHUTDOWN_GRACE_SECONDS = 5.0
+
+# Sensible initial pixel widths for the Mapping table, one per
+# `mapping_presentation.MAPPING_DISPLAY_FIELDS` column in the same order, wide
+# enough that no header label is clipped. Interactive resize mode (see
+# PrismaMonitorApp._build_ui) lets the user resize further; a horizontal
+# scrollbar appears whenever the available window width is insufficient.
+_MAPPING_COLUMN_WIDTHS = (130, 160, 160, 200, 150, 150, 130, 100, 110, 110)
 
 
 def _current_local_date() -> date:
@@ -272,7 +287,12 @@ class PrismaMonitorApp(QMainWindow):
         self.mapping_table.setAccessibleName("Mapping")
         self.mapping_table.verticalHeader().hide()
         mapping_hdr = self.mapping_table.horizontalHeader()
-        mapping_hdr.setSectionResizeMode(QHeaderView.Stretch)
+        mapping_hdr.setSectionResizeMode(QHeaderView.Interactive)
+        mapping_hdr.setStretchLastSection(False)
+        mapping_hdr.setMinimumSectionSize(90)
+        self.mapping_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        for column, width in enumerate(_MAPPING_COLUMN_WIDTHS):
+            self.mapping_table.setColumnWidth(column, width)
         mapping_layout.addWidget(self.mapping_table, 1)
         self.mapping_empty_label = QLabel(
             "No mapping evidence to display. Select or download a PRISMA Export CSV."
@@ -379,7 +399,30 @@ class PrismaMonitorApp(QMainWindow):
                 "The mapping evidence for the selected PRISMA Export CSV could not be displayed.",
             )
             return
-        self.mapping_table_model.set_rows(build_mapping_rows(imported))
+        auction_lookup = None
+        if self.prisma_lifecycle.is_open:
+            # Reuse the single already-open managed PRISMA session (P.36.19
+            # defect fix) instead of leaving every Finished auction
+            # permanently "Unavailable". Manual CSV selection (or a session
+            # that is not currently open) omits this, so the default
+            # PrismaAuctionLookup()/page=None combination below fails safely
+            # (a typed AUCTION_END_UNAVAILABLE per row, not a crash or a
+            # fabricated rate) instead of touching the managed session.
+            auction_lookup = PrismaAuctionLookup(
+                fetcher=ManagedPrismaAuctionDetailFetcher(self.prisma_lifecycle)
+            )
+        try:
+            resolutions = resolve_rates_for_rows(
+                imported.rows, storage=AuctionStorage(self._runtime_paths.database),
+                auction_lookup=auction_lookup,
+            )
+        except AuctionStorageError as exc:
+            safe_log(
+                self._logger, logging.ERROR,
+                "P.36.19 rate resolution unavailable for this Mapping refresh: %s", exc,
+            )
+            resolutions = {}
+        self.mapping_table_model.set_rows(build_mapping_rows(imported, resolutions))
         self._update_mapping_empty_state()
 
     def _select_manual_csv(self) -> None:

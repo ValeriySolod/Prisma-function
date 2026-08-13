@@ -1868,6 +1868,510 @@ a PRISMA Export CSV containing multiple auctions with distinct Flow Start values
 table visibly lists the latest Flow Start first through both the manual-selection and managed-download
 paths, and confirm the 12-column output CSV/publication order is unaffected.
 
+### P.36.19 — Historical ECB exchange rate to EUR in Mapping
+
+**Status:** 🟡 Implemented, automated-tested, real-Windows Mapping display validated
+(2026-08-13, run from source, not the packaged executable); not yet merged. Branched from `main`
+as `feature/auction-end-date-ecb-rate`.
+**Dependencies:** P.36.8 (Mapping display), P.35–P.35.1 (market/storage mapping catalog), merged to `main`.
+
+**2026-08-13 correction.** Live Windows/PRISMA DevTools research discovered the official
+auction-detail endpoint (see "Live-environment evidence" below); `PlaywrightAuctionDetailFetcher`
+was implemented against it, replacing the blocking placeholder recorded below, and one exact
+approved catalog entry (`VGS Storage Hub`) received evidenced EUR currency metadata. Everything
+else recorded in this section (approved decisions, `csv_contracts.py`/`processor.py`,
+`ecb_rates.py`, `rate_resolution.py`, `storage.py`, `mapping_presentation.py`/`ui_components.py`,
+`app.py`) is unchanged by this correction.
+
+**2026-08-13 defect fixes (same day, second correction).** A final review of the above correction
+identified two blocking integration defects, both now fixed on the same branch; see
+"`prisma_lifecycle.py`/`app.py` page-wiring fix" and "EXIT/ENTRY currency-leak fix" below for the
+full detail, and "Automated evidence for the 2026-08-13 defect fixes" for the exact commands and
+results. (1) `app.py` passed no managed Playwright page to `resolve_rates_for_rows()`, so
+`PlaywrightAuctionDetailFetcher` was unreachable in the real application and every Finished
+auction still produced "Unavailable" even after the endpoint was discovered; fixed by marshalling
+rate resolution onto `PrismaLifecycleController`'s own owner thread via a new `run_on_page()`
+method and a new `ManagedPrismaAuctionDetailFetcher` transport adapter. (2) The live evidence
+proves only `direction: EXIT` for `VGS Storage Hub`, but the catalog stored currency at the
+canonical-entry level shared by both its EXIT and ENTRY aliases, so an ENTRY-side auction for the
+same canonical name would have incorrectly resolved to EUR too; fixed by making
+`PrismaReference`/`PrismaReferenceCatalog.currency_for()` side-specific (`exit_currency`/
+`entry_currency`, keyed by `ReferenceSide`).
+
+**2026-08-13 correction (Mapping contract restored to 10 columns, third correction).** A
+customer review found the Mapping presentation recorded and implemented below (`Exit Market`,
+`Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`, `Currency`, `Rate to
+EUR`, `Rate Date` — 8 columns) incomplete: the authoritative Mapping contract is exactly 10
+columns, in this order: `Auction Date`, `Exit Market`, `Entry Market`, `Network Point Name`,
+`TSO Name Exit`, `TSO Name Entry`, `Booked Capacity`, `Currency`, `Rate to EUR`, `Rate Date`.
+`mapping_presentation.MAPPING_DISPLAY_FIELDS`/`MappingDisplayRow` gained `Auction Date` (first
+column) and `Booked Capacity` (immediately after `TSO Name Entry`, before `Currency`), both
+read straight from the same already-parsed `processor._import_row` fields the 12-column output
+CSV already uses unchanged (`row["auction_date"]`, `str(row["booked_capacity_kwh_h"])`) — no new
+parsing, no fuzzy/inferred value, and no change to the 12-column output CSV contract or the
+35-column input contract. `ui_components.MappingTableModel.data()` was updated for the same
+10-field order. `app.py`'s Mapping `QTableView` header resize mode changed from `Stretch` (which
+silently clipped header text as columns were forced to shrink and never allowed horizontal
+scrolling) to `Interactive` with sensible initial per-column pixel widths
+(`_MAPPING_COLUMN_WIDTHS`) and an explicit `Qt.ScrollBarAsNeeded` horizontal scrollbar policy, so
+all 10 headers stay readable and a horizontal scrollbar appears whenever the window is narrower
+than the table's natural width. Every other behavior recorded in this section (rate resolution,
+currency evidence, PRISMA/ECB lookups, Flow Start descending ordering, cancellation/rejection
+handling) is unchanged by this correction. See "Automated evidence for the 2026-08-13 Mapping
+contract correction" below for the exact commands and results.
+
+**Objective.** Display, for each finished PRISMA auction shown in Mapping, the
+historical ECB exchange rate to EUR fixed for that auction's authoritative end
+date, without changing the 35-column input contract or the 12-column output
+contract.
+
+**Approved customer decisions (2026-08-12).** The verified sample PRISMA
+Export CSV has 35 columns, including `Auction ID` and `State`, and no `End of
+Auction`/currency column (`csv_contracts.PRISMA_EXPORT_COLUMNS` already
+reflected this 35-column shape before this increment; no CSV contract change
+was needed). The approved contract, exactly as specified by the customer:
+`Auction ID` is the exact auction identity; `State = Finished` is the
+eligibility condition (`Cancelled` and every other state are not eligible);
+`State = Finished` proves the auction ended but not its exact end timestamp,
+so the authoritative end timestamp must come from official PRISMA data
+looked up by the exact Auction ID, never from `Start of Auction`, `Product
+Runtime Start`/`End`, the selected report end date, the CSV download date,
+the processing date, or the current date; currency is determined only from
+the already-approved exact market mapping, never from a new CSV column,
+geography, TSO, EIC, substring matching, or currency-based inference;
+missing/ambiguous currency metadata is a contextual Mapping resolution
+failure, never a guess; the ECB is the sole rate source, using the newest
+publication on or before the auction end date and never a later one; EUR is
+an identity rate of 1 requiring no ECB lookup; resolution is durably cached
+per Auction ID and deterministic on reprocessing; and the result is
+Mapping-display-only.
+
+**`csv_contracts.py`/`processor.py`.** No change to `PRISMA_EXPORT_COLUMNS`
+(still 35 columns, `Auction ID` and `State` already present, no `End of
+Auction`/currency column). `processor._import_row` already retained
+`auction_id` and `state` (unchanged, pre-existing P.33 behavior) on every
+enriched row for internal processing; this increment relies on those
+existing fields and adds nothing to the 35-column input contract or the
+12-column output contract.
+
+**`prisma_auction_lookup.py` (new).** A Qt- and Playwright-transport-independent
+business layer: `parse_auction_end_record(auction_id, raw_fields)` validates
+an already-retrieved raw detail payload — exact Auction ID match (rejects a
+mismatched or missing returned ID), the authoritative `Finished` state when
+the payload exposes one, an explicit `End of Auction` field (rejects
+missing/blank), and explicit-timezone parsing (an ISO 8601 offset/`Z`
+timestamp, or the existing `DD.MM.YYYY HH:MM` PRISMA local convention
+explicitly attached to `Europe/Berlin` — the same authoritative timezone
+`prisma_download.py` already live-verified for PRISMA's own date-filter
+interpretation, never assumed to be UTC or naive). `authoritative_end_date()`
+converts to the Europe/Berlin local calendar date used for ECB rate
+selection (proven, not assumed, to differ from the UTC calendar date near
+midnight — see its test). `PrismaAuctionLookup`/`AuctionDetailFetcher` split
+transport from business rules, mirroring `prisma_download.py`'s existing
+`PrismaDownloadOrchestrator` split.
+
+**Live-environment evidence (2026-08-13) — the former real-environment blocker is resolved.**
+Live Windows/PRISMA DevTools inspection of a real finished auction (Auction ID `62756895`)
+found that its public details page
+(`https://app.prisma-capacity.eu/reporting/auctions/details/62756895`) itself performs
+`GET https://platform.prisma-capacity.eu/rest/auctions/62756895` (`200 OK`), returning a JSON
+object exposing `id` (`62756895`), `phase` (`"FINISHED"`), and the authoritative `auctionEnd`
+field (`"2026-08-01T15:00:23.589Z"`, UTC — `2026-08-01 17:00:23.589` in Europe/Berlin). The same
+response also contains `auctionStart` (`"2026-08-01T14:30:00.008Z"`) and
+`runtime.start`/`runtime.end` (`"2026-08-02T04:00:00.000Z"`/`"2026-08-03T04:00:00.000Z"`) —
+different fields, confirmed distinct from `auctionEnd`, and never read by the implementation
+below. `PlaywrightAuctionDetailFetcher.fetch()` now issues this exact request through the page's
+own `page.request` (Playwright's `APIRequestContext`, which automatically carries the managed
+browser context's cookies, keeping the lookup inside `PrismaLifecycleController`'s existing
+managed PRISMA session rather than an independent connection), requires a 2xx JSON-object
+response, validates the response `id` against the requested Auction ID (explicit string
+normalization of the JSON number, never a fuzzy match) and `phase == "FINISHED"`, then hands the
+normalized fields to the unchanged, already-tested `parse_auction_end_record` business layer. The
+former `PrismaAuctionDetailSurfaceNotDiscoveredError` blocker class had no remaining legitimate
+use once the surface was found and was removed, along with its two now-obsolete "always raises"
+tests; the new `tests/test_prisma_auction_lookup.py` fetcher coverage (endpoint/timeout,
+non-2xx/invalid-JSON/non-object-JSON rejection, ID/phase validation, and end-to-end resolution
+using the exact sanitized live payload above) replaces them — see "Automated evidence" below.
+
+**`prisma_lifecycle.py`/`app.py` page-wiring fix (2026-08-13, same-day defect fix).** The original
+version of this correction left `app.py` passing no `page` object into `resolve_rates_for_rows()`,
+so `PlaywrightAuctionDetailFetcher` was unreachable and every Finished auction still reported
+`AUCTION_END_UNAVAILABLE` in a running application — a blocking integration defect, not a merely
+outstanding item. Fixed by adding `PrismaLifecycleController.run_on_page(func, *, timeout=20.0)`:
+it marshals `func(page)` onto the controller's own `_run()` worker thread — the only thread
+Playwright's sync API may safely drive — via a small internal task queue drained once per ~0.1s
+poll iteration (and once more, with `page=None`, during teardown, so a task queued exactly as the
+session closes fails immediately with a typed `PrismaLifecycleNoActivePageError` instead of
+hanging until its own timeout). The raw page object itself never leaves that worker thread. A new
+`ManagedPrismaAuctionDetailFetcher` (also in `prisma_lifecycle.py`, keeping Playwright transport
+logic out of `rate_resolution.py`/`mapping_presentation.py`/`app.py`) implements
+`prisma_auction_lookup.AuctionDetailFetcher` by delegating to the real
+`PlaywrightAuctionDetailFetcher` through `run_on_page()`, translating
+`PrismaLifecycleNoActivePageError` into the existing `PrismaAuctionDetailTransportError` so
+`rate_resolution.py`'s existing `except PrismaAuctionLookupError` handling needs no change.
+`app.py`'s `_refresh_mapping_display()` now builds `PrismaAuctionLookup(fetcher=
+ManagedPrismaAuctionDetailFetcher(self.prisma_lifecycle))` only when
+`self.prisma_lifecycle.is_open`; manual CSV selection (or any refresh while Prisma is not open)
+passes `auction_lookup=None`, which already failed safely before this fix (a real
+`PlaywrightAuctionDetailFetcher()` called with `page=None` raises inside its own `try`/`except`,
+producing a typed, non-crashing `AUCTION_END_UNAVAILABLE`) and is unchanged. The existing
+cache-first, once-per-unique-Auction-ID, and no-partial-persist-on-failure behavior in
+`resolve_auction_rate()`/`resolve_rates_for_rows()` is untouched — a cached resolution never
+reaches the fetcher (so it never needs an open page), and a PRISMA failure is returned as a typed
+outcome before `storage.save_rate_resolution()` is ever called. With this fix, an uncached
+Finished auction resolved while Prisma is open reaches the real live-evidenced endpoint (see
+"Live-environment evidence" below) through the single already-open managed session; no second
+browser, page, dependency, user action, or UI control was added. No live-Windows visual validation
+of the Mapping display has been performed for either the resolved endpoint or the `VGS Storage
+Hub` EUR evidence below.
+
+**`ecb_rates.py` (new).** `resolve_rate_to_eur(currency, on_or_before,
+source=...)` is the isolated, UI- and PRISMA-independent business interface.
+`EUR` short-circuits to identity rate `1` with `publication_date ==
+on_or_before` and no network access. Any other currency is validated as an
+exact three-letter uppercase ISO 4217 code, then resolved through an
+injectable `EcbRateSource` (production default: `EcbSdwHttpRateSource`,
+`urllib`-only, querying the official ECB Statistical Data Warehouse `EXR`
+dataflow, `D.<CCY>.EUR.SP00.A`, with `lastNObservations=1` bounded by
+`endPeriod=<on_or_before>` — confirmed by a live read-only probe against the
+public `data-api.ecb.europa.eu` endpoint during implementation that this
+correctly returns the prior business day's rate for a requested weekend or
+ECB-holiday date and never a later publication). The ECB's own quotation
+(foreign-currency units per 1 EUR) is inverted into an unambiguous
+rate-to-EUR value using exact `decimal.Decimal` arithmetic (never binary
+floating point), quantized to 10 decimal places. A later-than-requested
+publication is rejected as defense in depth even though the production
+query's own `endPeriod` bound already prevents it. No unit test performs
+real network access; every test injects a fake `EcbRateSource`.
+
+**`prisma_references.py`.** `PrismaReference` gained an optional `currency:
+str | None = None` ISO 4217 field (validated: exactly three uppercase ASCII
+letters, or `None`), and `PrismaReferenceCatalog.currency_for(canonical_name)`
+returns the approved currency for an already-resolved canonical market/storage
+name, or `None` when no approved decision exists — this is never a guess, and
+an unknown canonical name and a known one without currency evidence both
+return `None`. Per the approved contract ("do not silently guess a
+currency... record that exact missing mapping as an outstanding evidence
+item rather than guessing"), this increment added the currency-metadata
+mechanism and its validation but originally populated no production
+currency values without approved, evidenced customer decisions (mirroring
+the P.35.1 evidence-batch process already used for market/storage aliases).
+
+**2026-08-13 evidenced addition.** Live Windows/PRISMA DevTools inspection (Auction ID
+`62756895`, see "Live-environment evidence" above) tied its `networkPoint` — `"VGS Storage Hub"`,
+identifier `"4290"`, `direction: "EXIT"`, `tso0Name: "ONTRAS Gastransport GmbH"` — to ISO currency
+`EUR` (`startingPrice[].unit.currency`, `auctionSurcharge[].unit.currency`,
+`regulatedTariff0.unit.currency`, and `possibleUnits[].unit.currency` all `"EUR"`;
+`multiCurrency: false`). This identity and side (EXIT) exactly match the catalog's single existing
+`VGS Storage Hub` canonical entry (built from the `Auction_overview.csv`-evidenced source value
+`"VGS Storage Hub (4290)"`, present as both an exit and an entry alias — see
+`_storage_catalog_entries()`).
+
+**EXIT/ENTRY currency-leak fix (2026-08-13, same-day defect fix).** The version above set that one
+shared canonical entry's `currency` field directly, with no side distinction, even though the live
+evidence proves only `direction: EXIT` and the entry carries alias evidence on both sides — so an
+ENTRY-side auction resolved to the same canonical `VGS Storage Hub` name would have incorrectly
+inherited the EXIT-only EUR evidence too, violating this project's "Entry and Exit evidence are
+side-specific" rule. Fixed by splitting `PrismaReference.currency` into `exit_currency`/
+`entry_currency` (both validated independently as an exact ISO 4217 code or `None`) and changing
+`PrismaReferenceCatalog.currency_for(canonical_name)` to
+`currency_for(canonical_name, side: ReferenceSide)`; `rate_resolution._select_currency()` now
+calls it once per side (`ReferenceSide.EXIT` for `exit_market`, `ReferenceSide.ENTRY` for
+`entry_market`) instead of by name alone. `VGS Storage Hub`'s catalog entry now carries
+`exit_currency="EUR"`, `entry_currency=None` — an ENTRY-side lookup of the same canonical name
+resolves `None` (`CURRENCY_UNKNOWN`), never the EXIT-only EUR value. No other catalog entry (BG,
+HTP, RS, CEGH, MGP, PSV, SK, THE, or any other storage entry) has approved currency evidence yet;
+every one of them still resolves `currency_for()` to `None` on both sides, locked in by
+`test_currency_defaults_to_none_for_every_current_catalog_entry_except_vgs_storage_hub` (updated
+for the two-field shape) and `test_vgs_storage_hub_resolves_to_evidenced_eur_currency`; the leak
+itself is guarded by two new regression tests,
+`test_vgs_storage_hub_entry_side_has_no_currency_evidence` and
+`test_currency_evidenced_only_on_exit_does_not_leak_to_entry` (`prisma_references.py`), plus
+`test_currency_evidenced_only_on_exit_does_not_leak_to_entry_side_lookup`
+(`rate_resolution.py`, using a synthetic both-sides-aliased catalog entry independent of the real
+`VGS Storage Hub` data). Until a future evidenced batch adds further currency values, every other
+current market/storage still resolves as `RateResolutionOutcome.CURRENCY_UNKNOWN` ("Unknown" in
+Mapping); `VGS Storage Hub`'s EXIT side now resolves `RESOLVED` with `Currency: EUR`, `Rate to
+EUR: 1`, `Rate Date: <authoritative auction end date>` (EUR is `ecb_rates.py`'s identity currency
+and requires no ECB network access), while its ENTRY side resolves `CURRENCY_UNKNOWN`.
+
+**`rate_resolution.py` (new).** Orchestrates, per unique Auction ID:
+cache lookup first (a previously fixed result is always reused, regardless
+of newer ECB data — this is what makes reprocessing deterministic); then
+eligibility (`state == "Finished"`); then the exact-Auction-ID PRISMA lookup;
+then currency resolution (exit-market currency preferred, entry-market
+currency as fallback — mirrors this codebase's existing exit-before-entry
+convention, e.g. `mapping_presentation.MAPPING_DISPLAY_FIELDS` and
+`storage.AuctionStorage.EXCEL_COLUMNS`; not an approved customer decision,
+since the approved contract does not address which side's currency governs a
+bundle row spanning two markets — recorded here as an implementation
+decision, not hidden); then ECB rate resolution; then atomic caching.
+`resolve_rates_for_rows()` resolves each unique Auction ID across an entire
+import at most once, so multiple rows sharing one Auction ID (for example
+several network points on one auction) share one resolution attempt and
+result — the "no uncontrolled network request per Mapping repaint" boundary.
+Every outcome is a typed `RateResolutionResult`
+(`RESOLVED`/`NOT_FINISHED`/`AUCTION_END_UNAVAILABLE`/`CURRENCY_UNKNOWN`/
+`ECB_RATE_UNAVAILABLE`/`CONFLICT`); only `RESOLVED` carries a
+currency/rate/date, so a caller can never display a fabricated value for any
+other outcome.
+
+**`storage.py`.** A new `auction_rate_resolutions` SQLite table (created
+alongside the existing `auctions`/`prisma_source_operations` tables, same
+database file under the existing `%LOCALAPPDATA%\PrismaFunction\` convention)
+persists, per Auction ID: auction state used for eligibility, the
+authoritative auction end timestamp, resolved ISO currency, actual ECB
+publication date, the normalized rate-to-EUR value (stored as exact decimal
+text, never a binary float), when it was first fixed, and source/version
+metadata sufficient to audit the resolution safely.
+`AuctionStorage.get_rate_resolution()`/`save_rate_resolution()` are atomic
+(`BEGIN IMMEDIATE`-wrapped, matching the existing
+`historical_market_storage_*`/`prisma_source_operations` transactional
+pattern): saving an identical previously fixed result is an idempotent no-op
+(`resolved_at_utc` excluded from the equality check, since reuse must not
+fail merely because time passed); any other difference from a previously
+fixed record for the same Auction ID raises a typed
+`RateResolutionConflictError` with both records for diagnostics, never
+silently overwriting the previously fixed result. A PRISMA or ECB
+retrieval/parsing failure never reaches `save_rate_resolution` at all (the
+typed failure outcome is returned first), so no partial or contradictory
+row is ever committed.
+
+**`mapping_presentation.py`/`ui_components.py`.** `MAPPING_DISPLAY_FIELDS`
+gains exactly three new trailing columns — `Currency`, `Rate to EUR`, `Rate
+Date` — after the existing five (`Exit Market`, `Entry Market`, `Network
+Point Name`, `TSO Name Exit`, `TSO Name Entry`, unchanged in order/spelling,
+still never reordered). `build_mapping_rows(import_result, rate_resolutions)`
+takes the already-computed per-Auction-ID `RateResolutionResult` mapping
+(typically produced once per import by `resolve_rates_for_rows`) and performs
+no PRISMA/ECB/currency resolution of its own. Any outcome other than
+`RESOLVED` (including a row whose Auction ID has no supplied resolution at
+all) shows a short, technical-detail-free English placeholder in all three
+new columns (`"Not finished"`, `"Unavailable"`, `"Unknown"`, or
+`"Unresolved"`) — the smallest existing status/error presentation mechanism
+(plain cell text, no new dialog/status widget), with full diagnostic detail
+kept only in logs. A `RESOLVED` EUR row shows `Currency: EUR`, `Rate to EUR:
+1`, `Rate Date: <the authoritative auction end date>` — never a fabricated
+ECB publication. `MappingTableModel.data()` renders the three new columns
+identically to the existing five (plain `Qt.DisplayRole` text); no new Qt
+widget, dialog, or interaction was added. The 12-column output CSV contract
+(`prisma_output.py`) and its writer are completely untouched.
+
+**This 5-plus-3 (8-column) shape described in the paragraph above was itself found
+incomplete** and further corrected by the "Mapping contract restored to 10 columns" dated note
+earlier in this section, which adds `Auction Date` and `Booked Capacity`; see that note for the
+current, authoritative 10-column contract.
+
+**`app.py`.** `_refresh_mapping_display()` calls
+`rate_resolution.resolve_rates_for_rows(imported.rows, storage=...)` (a
+fresh `storage.AuctionStorage(self._runtime_paths.database)` per refresh —
+cheap and idempotent, matching the existing `_process_worker` pattern of
+constructing its own workflow objects per call) immediately after the
+existing P.36.15 import boundary succeeds, then passes the result into
+`build_mapping_rows()`. A `storage.AuctionStorageError` during resolution is
+logged and treated as "no resolutions available for this refresh" (every row
+shows the unresolved placeholder) rather than destroying the whole Mapping
+display — consistent with the approved requirement that cancellation/failure
+must not unexpectedly destroy a previously valid Mapping display. No `page`
+object is currently passed to the resolver (`PrismaLifecycleController` does
+not yet expose its managed page outside its own worker thread — see "Still
+outstanding" under "Live-environment evidence" above), so a bare `object()`
+reaches `PlaywrightAuctionDetailFetcher.fetch()` and its own request call
+fails with a sanitized `PrismaAuctionDetailTransportError` for every Finished
+auction in a running application today; this is expected and safe (typed
+`AUCTION_END_UNAVAILABLE`, "Unavailable" in Mapping), not a defect. Both
+existing Mapping-refresh trigger paths
+(`_select_manual_csv` and `_handle_download_event`) share this one call site
+unchanged, so the ordering/replacement/cancellation behavior P.36.17/P.36.18
+already established is unaffected. This runs synchronously on the UI thread
+like the pre-existing `_refresh_mapping_display` body; this is safe today
+because a cache hit is a fast local SQLite read and a cache miss fails
+immediately at the PRISMA-lookup blocker (no real network attempt), and the
+currently-empty currency catalog means no real ECB network call fires either
+— moving this off the UI thread should be reconsidered as a follow-up once
+live PRISMA retrieval and approved currency evidence are both in place, not
+implemented speculatively now.
+
+**Automated evidence (2026-08-12).** New/updated focused suites: `tests/test_ecb_rates.py`
+(26 tests — quotation direction/arithmetic, exact Decimal precision, EUR
+identity with no network access, publication-day/weekend/ECB-holiday
+selection, never-a-later-publication rejection, malformed-currency/rate/date
+rejection, CSV parsing); `tests/test_prisma_auction_lookup.py` (30 tests —
+Finished/Cancelled/other-state eligibility, exact-Auction-ID request,
+mismatched/missing-ID rejection, explicit ISO-offset/`Z`/PRISMA-local
+timestamp parsing, missing/malformed end-field rejection, `Start of
+Auction`/`Product Runtime End` never consulted, Europe/Berlin calendar-date
+conversion across a UTC/local-date boundary, and the production transport's
+explicit real-environment-blocker error — since superseded, see the
+2026-08-13 update below); `tests/test_rate_resolution.py`
+(18 tests — eligibility short-circuiting before any lookup, exit-then-entry
+currency fallback, EUR skipping ECB entirely, every typed unavailable/unknown/
+conflict outcome, cached reuse without duplicate retrieval, determinism after
+newer ECB data becomes available, two distinct Auction IDs receiving
+independent rates in one import, rows sharing one Auction ID resolving once,
+a simulated storage conflict surfacing as a typed outcome, and no partial
+commit on a PRISMA or ECB failure); `tests/test_prisma_references.py` gained
+6 tests (61 total, up from 55) for currency validation and lookup, including
+the outstanding-evidence-gap regression guard; `tests/test_storage.py`
+gained 8 tests for the new cache table (round-trip, idempotent reuse,
+per-field conflict rejection, independent Auction IDs, idempotent table
+creation); `tests/test_mapping_presentation.py` gained/updated coverage (28
+tests total) for the three new columns, every unresolved-outcome placeholder,
+shared-Auction-ID/independent-Auction-ID display, and EUR identity display,
+alongside the pre-existing P.36.8/P.36.18 coverage (all updated for the
+8-field `MappingDisplayRow`, still asserting the original five-field values
+unchanged); `tests/test_app.py` gained 1 test and extended 1 existing test
+(72 total, up from 71) proving the real end-to-end wiring shows
+"Not finished" for a non-Finished row and "Unavailable" for a Finished row
+(the current real-environment-blocker state), through the actual
+`_select_manual_csv` path, with no change to any other existing assertion.
+
+**Automated evidence for the 2026-08-13 correction.** `tests/test_prisma_auction_lookup.py`'s
+two "always raises the blocker" tests were removed (the blocker no longer exists) and replaced
+with fetcher-level coverage using fake Playwright `page.request`/`APIResponse` objects (no real
+network access): exact endpoint construction and explicit request timeout (default and
+overridden), non-2xx/connection-failure/invalid-JSON/non-object-JSON rejection, mismatched/missing
+response-id rejection, numeric-to-string id normalization, `FINISHED`-phase normalization to the
+business layer's `Finished` convention, non-finished/missing-phase rejection, `auctionEnd`-only
+field extraction, a sanitized-error-message check (no cookie/authorization/token text), and three
+end-to-end `PrismaAuctionLookup` tests using the exact sanitized live evidence payload (proving the
+correct instant/calendar-date result, that `auctionStart`/`runtime.start`/`runtime.end` are never
+substituted even though present in the same fixture, and that a fixture missing only `auctionEnd`
+still fails). `python -m pytest tests/test_prisma_auction_lookup.py --collect-only -q` reports 49
+tests collected (up from 30). `tests/test_prisma_references.py`'s
+`test_currency_defaults_to_none_for_every_current_catalog_entry` was replaced by
+`test_currency_defaults_to_none_for_every_current_catalog_entry_except_vgs_storage_hub` (the same
+guard, carved out for the one new evidenced exception) and
+`test_vgs_storage_hub_resolves_to_evidenced_eur_currency`;
+`python -m pytest tests/test_prisma_references.py --collect-only -q` reports 56 tests collected.
+No other test file changed. Actually executed and passing (2026-08-13, after installing this
+environment's previously-missing `PySide6`/`openpyxl`/`pandas`/`playwright` dependencies from
+`requirements.txt`):
+`python -m pytest tests/test_prisma_auction_lookup.py tests/test_prisma_references.py tests/test_rate_resolution.py tests/test_ecb_rates.py tests/test_storage.py tests/test_mapping_presentation.py tests/test_app.py -q`
+→ `296 passed`; the complete suite, `python -m pytest tests/ -q` → `770 passed, 1 skipped` (the one
+skip is pre-existing and unrelated to this correction); the documented compilation check,
+`python -m compileall -q <the BUILDING.md module list> tests` → succeeded with no output; and
+`git diff --check` → no whitespace errors. No packaging-affecting file changed in this correction
+(no new dependency, no changed PyInstaller spec/build files), so no packaging re-validation was
+required or performed.
+
+**Documentation.** `BUILDING.md` and `.github/workflows/windows-ci.yml` both
+add `ecb_rates.py`, `prisma_auction_lookup.py`, and `rate_resolution.py` to
+their `compileall` module lists.
+
+**Automated evidence for the 2026-08-13 defect fixes.** `prisma_lifecycle.py` gained
+`PrismaLifecycleNoActivePageError`, `_PageTask`, `PrismaLifecycleController.run_on_page()`/
+`_drain_page_tasks()`, and `ManagedPrismaAuctionDetailFetcher`; `tests/test_prisma_lifecycle.py`
+gained 8 tests covering: owner-thread execution with the real managed page, the callable's own
+exception propagating unchanged, a deterministic bounded timeout when nothing drains the queue, a
+task queued exactly as the session closes failing explicitly via the teardown drain, the adapter
+delegating through `run_on_page()` with the real page, the adapter's typed failure when no session
+is open, and the adapter propagating the delegate's own transport error —
+`python -m pytest tests/test_prisma_lifecycle.py --collect-only -q` reports 77 tests collected (up
+from 69). `app.py`'s `_refresh_mapping_display()` now builds the managed fetcher only when
+`self.prisma_lifecycle.is_open`; `tests/test_app.py` gained 8 tests (a hand-written
+`FakeManagedLifecycle`/`RecordingAuctionDetailFetcher` pair, since the file's existing
+`PrismaLifecycleController` mock never actually invokes callables passed to it) covering: an
+uncached Finished auction resolved through the real managed page end-to-end, duplicate Auction IDs
+fetched once per refresh, a cached resolution never invoking the managed page (both with Prisma
+open and with it closed), manual CSV selection without a managed page failing safely, an explicit
+closed/missing-page error not crashing the refresh, a PRISMA failure leaving no partial cache row
+and no misleading Mapping update, and closing Prisma after a successful refresh preserving the
+displayed rows — `python -m pytest tests/test_app.py --collect-only -q` reports 80 tests collected
+(up from 72). `prisma_references.py`'s `PrismaReference.currency` was split into
+`exit_currency`/`entry_currency` and `PrismaReferenceCatalog.currency_for()` gained a required
+`side: ReferenceSide` parameter; `rate_resolution.py`'s `_select_currency()` was updated to call it
+once per side. `tests/test_prisma_references.py` gained 4 tests (the EXIT/ENTRY leak regression
+guards described above, plus an `entry_currency` invalid-shape validation test mirroring the
+existing `exit_currency` one) and updated every existing currency test call site for the new
+two-field/side-aware shape — `python -m pytest tests/test_prisma_references.py --collect-only -q`
+reports 65 tests collected (up from 56). `tests/test_rate_resolution.py` gained 1 test (the
+synthetic both-sides-aliased leak guard) and updated its `_catalog()` helper and one existing
+entry-side test for the new shape — `python -m pytest tests/test_rate_resolution.py --collect-only
+-q` reports 19 tests collected (up from 18). No other test file changed. Actually executed and
+passing (2026-08-13):
+`python -m pytest tests/test_prisma_references.py tests/test_rate_resolution.py tests/test_prisma_lifecycle.py tests/test_app.py -q`
+→ `241 passed`; the complete suite, `python -m pytest tests/ -q` → `796 passed, 1 skipped` (the one
+skip is pre-existing and unrelated to these fixes); the documented compilation check,
+`python -m compileall -q app.py browser.py csv_contracts.py date_range_selection.py download_directory.py ecb_rates.py manual_csv_selection.py mapping_presentation.py prisma_auction_lookup.py prisma_download.py prisma_import_workflow.py prisma_lifecycle.py prisma_output.py prisma_page.py prisma_publication.py prisma_references.py prisma_source_updates.py processor.py rate_resolution.py runtime_logging.py runtime_paths.py storage.py ui_components.py validate_package.py version.py tests`
+→ succeeded with no output; and `git diff --check` → no whitespace errors. No packaging-affecting
+file changed by these fixes (no new dependency, no changed PyInstaller spec/build files), so no
+packaging re-validation was required or performed. No commit or push was made without explicit
+authorization.
+
+**Automated evidence for the 2026-08-13 Mapping contract correction.**
+`mapping_presentation.MAPPING_DISPLAY_FIELDS`/`MappingDisplayRow` gained `Auction Date` and
+`Booked Capacity`; `build_mapping_rows()` populates them from the same already-parsed
+`row["auction_date"]`/`row["booked_capacity_kwh_h"]` fields `prisma_output.transform_row()`
+already uses unchanged. `ui_components.MappingTableModel.data()` was updated for the new 10-field
+order. `app.py`'s Mapping `QTableView` header resize mode changed from `Stretch` to `Interactive`
+with a new `_MAPPING_COLUMN_WIDTHS` initial-width tuple and an explicit
+`Qt.ScrollBarAsNeeded` horizontal scrollbar policy. `tests/test_mapping_presentation.py` was
+updated for the 10-field `MappingDisplayRow` shape throughout and gained 1 new test,
+`test_build_mapping_rows_populates_auction_date_and_booked_capacity_from_row_fields` (asserts
+`Auction Date`/`Booked Capacity` come from the row's own fields, using values distinct from every
+other test's defaults so it cannot pass by coincidence) —
+`python -m pytest tests/test_mapping_presentation.py --collect-only -q` reports 29 tests
+collected (up from 28). `tests/test_app.py`'s existing Mapping column-index assertions were
+updated for the new column positions (no test added or removed) —
+`python -m pytest tests/test_app.py --collect-only -q` still reports 80 tests collected. No other
+test file changed. Actually executed and passing (2026-08-13):
+`python -m pytest tests/test_mapping_presentation.py tests/test_app.py -q` → `109 passed`;
+`python -m pytest tests/test_mapping_presentation.py tests/test_app.py tests/test_prisma_lifecycle.py tests/test_prisma_references.py tests/test_rate_resolution.py tests/test_ecb_rates.py tests/test_storage.py tests/test_prisma_auction_lookup.py -q`
+→ `392 passed`; the complete suite, `python -m pytest tests/ -q` → `797 passed, 1 skipped` (the
+one skip is pre-existing and unrelated to this correction, up from 796 passed by exactly the 1
+new focused test above); the documented compilation check,
+`python -m compileall -q app.py browser.py csv_contracts.py date_range_selection.py download_directory.py ecb_rates.py manual_csv_selection.py mapping_presentation.py prisma_auction_lookup.py prisma_download.py prisma_import_workflow.py prisma_lifecycle.py prisma_output.py prisma_page.py prisma_publication.py prisma_references.py prisma_source_updates.py processor.py rate_resolution.py runtime_logging.py runtime_paths.py storage.py ui_components.py validate_package.py version.py tests`
+→ succeeded with no output; and `git diff --check` → no whitespace errors. No packaging-affecting
+file changed by this correction (no new dependency, no changed PyInstaller spec/build files), so
+no packaging re-validation was required or performed. No commit or push was made without explicit
+authorization.
+
+**Outstanding before this increment can be marked ✅ Completed:** the ECB
+integration is implemented, unit-tested with fakes, and additionally
+confirmed via a live read-only probe against the real public ECB SDW
+endpoint (weekend/holiday fallback and BGN/USD arithmetic both confirmed
+against real published data) — no further ECB validation is required. The
+PRISMA auction-detail retrieval blocker is resolved (2026-08-13): live
+Windows/PRISMA DevTools inspection discovered the real endpoint and
+`PlaywrightAuctionDetailFetcher` now implements it for real (see
+"Live-environment evidence" above), and the same-day defect fix now wires
+`PrismaLifecycleController`'s managed page into rate resolution via
+`run_on_page()`/`ManagedPrismaAuctionDetailFetcher` (see the "page-wiring
+fix" note above), so an uncached Finished auction resolved while Prisma is
+open reaches the real endpoint end-to-end. Market/storage currency evidence
+is approved for exactly one catalog entry (`VGS Storage Hub`, EUR on its
+EXIT side only — see the "EXIT/ENTRY currency-leak fix" note above); every
+other current catalog entry, and `VGS Storage Hub`'s own ENTRY side, still
+resolves as `CURRENCY_UNKNOWN` until a future evidenced batch (mirroring the
+P.35.1 process) adds further approved ISO 4217 currency decisions — that
+evidence-batch item remains outstanding.
+
+**Real-Windows Mapping validation (2026-08-13, completed).** Prisma Function was
+run from source (not the packaged/installed executable — see P.36.11 for separate
+packaging validation, not re-run by this check) on real Windows against a real
+PRISMA Export CSV. Screenshots confirm: the Mapping table displays exactly the
+10 authoritative columns in the approved order (`Auction Date`, `Exit Market`,
+`Entry Market`, `Network Point Name`, `TSO Name Exit`, `TSO Name Entry`,
+`Booked Capacity`, `Currency`, `Rate to EUR`, `Rate Date`); `Auction Date` and
+`Booked Capacity` are populated; both `TSO Name Exit` and `TSO Name Entry`
+remain present; `Currency`, `Rate to EUR`, and `Rate Date` are present; row
+values align with their headers; all 10 headers are fully accessible and
+unclipped under the `Interactive` header resize mode; the horizontal
+scrollbar appears and works; and scrolling right correctly exposes the final
+rate columns (partial clipping at the left edge while horizontally scrolled
+is expected, not a defect). This closes the real-Windows visual Mapping-columns
+validation gap for the resolved endpoint, the page wiring, the `VGS Storage
+Hub` EUR result, and the current 10-column contract. This is visual
+confirmation of the displayed columns only: it does not revalidate the packaged
+executable, and it is not evidence for the Flow Start descending row-ordering
+rule, which remains established solely by existing automated coverage
+(`tests/test_mapping_presentation.py`'s
+`test_build_mapping_rows_orders_by_flow_start_descending` and
+`test_build_mapping_rows_orders_chronologically_not_lexically_through_real_pipeline`,
+and `tests/test_app.py`'s equivalent end-to-end coverage), not by these
+screenshots.
+
 ### Remaining support and finalization stages
 
 | ID | Stage | Status | Dependencies and scope |
@@ -1877,6 +2381,7 @@ paths, and confirm the 12-column output CSV/publication order is unaffected.
 | P.36.11 | Windows packaging and installer validation | 🟡 Substantially complete (2026-08-05) | Requires the final dependency set after P.36.8, P.36.10, P.36.15, and P.36.16 (all merged, met). See its own dated section above for the full implemented result, defects fixed, and real-Windows validation evidence, including the one recorded signing deviation. |
 | P.36.17 | Remove Recent activity panel and expand the Mapping workspace | 🟡 Implemented, automated-tested; not yet merged | UI-only removal, no change to the 12-column contract or any P.36 processing/publication behavior. See its own dated section above. Real-Windows validation of the released vertical space and Mapping resize behavior remains outstanding. |
 | P.36.18 | Order Mapping rows by Flow Start descending | 🟡 Implemented, automated-tested, packaging-validated; not yet merged | Presentation-only ordering in `mapping_presentation.py`; no change to `import_result.rows`, the 12-column output CSV, or publication order. See its own dated section above. Real-Windows validation remains outstanding. |
+| P.36.19 | Historical ECB exchange rate to EUR in Mapping | 🟡 Implemented, automated-tested, real-Windows Mapping display validated (2026-08-13); not yet merged | Mapping-display-only addition; no change to the 35-column input or 12-column output contract. See its own dated section above. The live auction-detail endpoint is discovered and implemented (2026-08-13); the same-day page-wiring and EXIT/ENTRY currency-leak defect fixes are implemented and automated-tested; the Mapping contract is corrected to its authoritative 10 columns (`Auction Date`/`Booked Capacity` restored, same day) and its real-Windows visual validation (run from source, not the packaged executable) is complete; outstanding: a future evidenced batch adding further approved market/storage currency metadata beyond the one evidenced `VGS Storage Hub` EXIT-side entry. |
 | P.36.12 | Regression and clean-Windows acceptance | ⬜ Planned | Final gate after all required P.36 implementation and packaging stages. Run the full suite and the approved real-Windows end-to-end checklist. |
 
 ## Current blockers and risks
@@ -1933,6 +2438,29 @@ paths, and confirm the 12-column output CSV/publication order is unaffected.
   packaging-validated (2026-08-06; see its dated entry above) on branch
   `feature/mapping-flow-start-descending`; not yet merged, and real-Windows validation of the displayed
   order remains outstanding.
+- P.36.19 (historical ECB exchange rate to EUR in Mapping) is implemented and automated-tested
+  (2026-08-12, corrected 2026-08-13, same-day defect fixes 2026-08-13; see its dated entry above)
+  on branch `feature/auction-end-date-ecb-rate`; not yet merged. The former real-environment
+  blocker is resolved: live Windows/PRISMA DevTools inspection (2026-08-13) discovered the official
+  auction-detail endpoint (`GET https://platform.prisma-capacity.eu/rest/auctions/{auction_id}`),
+  and `PlaywrightAuctionDetailFetcher` now implements it for real. Two blocking integration defects
+  found in a final review of that correction are both fixed on the same day: (1) `app.py` now
+  passes the existing managed Playwright page into rate resolution via
+  `PrismaLifecycleController.run_on_page()` and a new `ManagedPrismaAuctionDetailFetcher` adapter
+  (marshalled onto the controller's own owner thread, since Playwright's sync API is not safe to
+  call from any other thread), so an uncached Finished auction resolved while Prisma is open now
+  reaches the real endpoint; (2) `VGS Storage Hub`'s EUR currency evidence (proven EXIT-only) no
+  longer leaks onto its ENTRY side, now that `PrismaReferenceCatalog.currency_for()` takes an
+  explicit `ReferenceSide`. Still outstanding: market/storage currency evidence remains approved
+  for exactly one catalog entry (`VGS Storage Hub`, EUR, EXIT side only), so
+  `PrismaReferenceCatalog.currency_for()` still returns `None` for every other current catalog
+  entry (and for `VGS Storage Hub`'s own ENTRY side) until a future evidenced batch adds further
+  decisions — the correct, safe behavior for unevidenced data, not a defect. The ECB integration
+  itself required no such blocker and was additionally confirmed against the real public ECB SDW
+  endpoint (see its dated entry above). Real-Windows visual validation of the Mapping display
+  (run from source, not the packaged executable) is complete for the current 10-column contract
+  (2026-08-13; see the dated "Real-Windows Mapping validation" note above) — the remaining gap is
+  the further evidenced currency batch above, not the display itself.
 
 ## Next recommended increment
 
@@ -1975,6 +2503,19 @@ paths, and confirm the 12-column output CSV/publication order is unaffected.
 12. P.36.18 (order Mapping rows by Flow Start descending) is implemented, automated-tested, and
     packaging-validated (2026-08-06, see its own dated section above); obtain real-Windows validation of
     the displayed order, then merge before P.36.12.
+13. P.36.19 (historical ECB exchange rate to EUR in Mapping) is implemented and automated-tested
+    (2026-08-12, corrected 2026-08-13, same-day defect fixes 2026-08-13, see its own dated section
+    above). The live auction-detail endpoint is discovered and `PlaywrightAuctionDetailFetcher`
+    implements it for real; `app.py` now wires the existing managed Playwright page into rate
+    resolution via `PrismaLifecycleController.run_on_page()`/`ManagedPrismaAuctionDetailFetcher`;
+    `VGS Storage Hub` has evidenced EUR currency metadata correctly scoped to its EXIT side only;
+    the Mapping contract is corrected to its authoritative 10 columns (`Auction Date`/`Booked
+    Capacity` restored). Real-Windows visual validation of the Mapping display (run from source,
+    not the packaged executable), including the now-live page wiring and the current 10-column
+    contract, is complete (2026-08-13; see the dated "Real-Windows Mapping validation" note
+    above). Before it can be marked ✅ Completed: obtain or record further approved, evidenced
+    market/storage currency decisions (mirroring the P.35.1 process) for catalog entries — and
+    sides — beyond `VGS Storage Hub`'s EXIT side; then merge before P.36.12.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 

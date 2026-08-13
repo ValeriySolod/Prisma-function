@@ -14,6 +14,7 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QWidget
 
 import app
+import prisma_lifecycle
 import prisma_output
 import prisma_publication
 from csv_contracts import PRISMA_EXPORT_COLUMNS
@@ -23,10 +24,12 @@ from manual_csv_selection import ManualCsvOutcome
 from manual_csv_selection import describe_rejection as describe_manual_csv_rejection
 from mapping_presentation import MAPPING_DISPLAY_FIELDS
 from processor import PrismaImportError
+from prisma_auction_lookup import PrismaAuctionDetailTransportError
 from prisma_download import PrismaDownloadOutcome, describe_download_failure
 from prisma_import_workflow import PrismaWorkflowResult
-from prisma_lifecycle import PrismaLifecycleEvent, PrismaLifecycleState
+from prisma_lifecycle import PrismaLifecycleEvent, PrismaLifecycleNoActivePageError, PrismaLifecycleState
 from prisma_source_updates import SourceUpdateStatus
+from storage import AuctionStorage, RateResolutionRecord
 from version import APP_DISPLAY_NAME, __version__
 from ui_components import APP_STYLE
 
@@ -429,12 +432,322 @@ def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
         return model.data(model.index(row, column))
 
     # Deterministic order: rows appear exactly as they were in the source CSV.
-    assert (cell(0, 0), cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4)) == (
-        "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD",
+    # Both source rows share `_MAPPING_ROW_DEFAULTS`' "Start of Auction"
+    # ("01.01.2025 09:00") and "Marketed Capacity"/"Unit Marketed Capacity"
+    # ("1000"/"kWh/h"), so both display the same authoritative Auction Date
+    # and Booked Capacity.
+    assert (cell(0, 0), cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4), cell(0, 5), cell(0, 6)) == (
+        "2025-01-01T09:00:00", "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD", "1000.0",
     )
-    assert (cell(1, 0), cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4)) == (
-        "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "",
+    assert (cell(1, 0), cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4), cell(1, 5), cell(1, 6)) == (
+        "2025-01-01T09:00:00", "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "", "1000.0",
     )
+    # P.36.19: neither source row has an explicit State of "Finished" (both
+    # default to blank), so both are ineligible for rate resolution and must
+    # never display a fabricated Currency/Rate to EUR/Rate Date.
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Not finished",) * 3
+    assert (cell(1, 7), cell(1, 8), cell(1, 9)) == ("Not finished",) * 3
+
+
+def test_finished_auction_shows_unavailable_rate_pending_live_prisma_surface(
+    window, monkeypatch, tmp_path
+):
+    # P.36.19: a Finished auction is eligible for rate resolution, but no
+    # live official PRISMA auction-detail surface has been discovered yet
+    # (see ROADMAP.md's P.36.19 entry) — this must surface as a safe
+    # "Unavailable" placeholder end-to-end through the real app wiring,
+    # never a fabricated date/currency/rate.
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [
+        {"Auction ID": "1", "State": "Finished"},
+    ])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
+
+
+# --- P.36.19 defect fix: real managed-page wiring for rate resolution ---
+#
+# `_build_app` replaces `PrismaLifecycleController` with a bare Mock, which is
+# unsuitable for proving the real page-wiring behavior (a Mock's methods
+# never actually invoke the callables passed to them). These tests instead
+# substitute `widget.prisma_lifecycle` with `FakeManagedLifecycle`, a small
+# hand-written double that models exactly the two members `app.py`'s wiring
+# actually uses (`is_open`, `run_on_page`), and monkeypatch
+# `prisma_lifecycle.PlaywrightAuctionDetailFetcher` (the real transport
+# `ManagedPrismaAuctionDetailFetcher` delegates to by default) with
+# `RecordingAuctionDetailFetcher` so the real `ManagedPrismaAuctionDetailFetcher`
+# and `PrismaAuctionLookup` classes run unmodified end-to-end.
+
+_MARKER_PAGE = object()
+
+
+class FakeManagedLifecycle:
+    """Models the two `PrismaLifecycleController` members `app.py`'s P.36.19
+    wiring uses. `run_on_page` executes `func` immediately with
+    `_MARKER_PAGE` (proving the exact object the wiring threads through),
+    unless `page_error` is set, modeling a session that closes/times out
+    between the `is_open` check and the drain.
+    """
+
+    def __init__(self, *, open_: bool, page_error: Exception | None = None):
+        self._open = open_
+        self._page_error = page_error
+        self.run_on_page_calls = 0
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+    def run_on_page(self, func, *, timeout: float = 20.0):
+        self.run_on_page_calls += 1
+        if self._page_error is not None:
+            raise self._page_error
+        return func(_MARKER_PAGE)
+
+    def close(self) -> None:
+        """No-op: these tests never exercise the close/poll lifecycle beyond
+        proving that closing does not disturb an already-displayed Mapping."""
+
+    def join(self, timeout: float | None = None) -> bool:
+        """No-op: matches the shape `PrismaMonitorApp.closeEvent()` (used by
+        the `window` fixture's teardown) requires from `prisma_lifecycle`."""
+        return True
+
+    @property
+    def state(self):
+        """Matches the shape `PrismaMonitorApp.closeEvent()` (used by the
+        `window` fixture's teardown) requires from `prisma_lifecycle`."""
+        return prisma_lifecycle.PrismaLifecycleState.IDLE
+
+
+class RecordingAuctionDetailFetcher:
+    def __init__(self, *, result=None, error: Exception | None = None):
+        self.calls: list[tuple[object, str, int]] = []
+        self._result = result
+        self._error = error
+
+    def fetch(self, page, auction_id, *, timeout_ms):
+        self.calls.append((page, auction_id, timeout_ms))
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+def _install_recording_fetcher(monkeypatch, **kwargs) -> RecordingAuctionDetailFetcher:
+    fetcher = RecordingAuctionDetailFetcher(**kwargs)
+    monkeypatch.setattr(prisma_lifecycle, "PlaywrightAuctionDetailFetcher", lambda: fetcher)
+    return fetcher
+
+
+_FINISHED_AUCTION_RAW_FIELDS = {
+    "Auction ID": "1", "State": "Finished", "End of Auction": "2026-08-01T15:00:00Z",
+}
+
+
+def test_managed_download_success_resolves_an_uncached_finished_auction_through_the_real_page(
+    window, monkeypatch, tmp_path,
+):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert widget.prisma_lifecycle.run_on_page_calls == 1
+    assert len(fetcher.calls) == 1
+    called_page, auction_id, _ = fetcher.calls[0]
+    assert called_page is _MARKER_PAGE
+    assert auction_id == "1"
+    assert widget.mapping_table_model.rowCount() == 1
+
+
+def test_duplicate_auction_ids_are_fetched_once_per_refresh(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [
+        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-1"},
+        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-2"},
+    ])
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert widget.mapping_table_model.rowCount() == 2
+    assert len(fetcher.calls) == 1
+
+
+def test_cached_resolution_does_not_invoke_the_managed_page(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    AuctionStorage(widget._runtime_paths.database).save_rate_resolution(
+        RateResolutionRecord(
+            auction_id="1", auction_state="Finished",
+            auction_end_at="2026-08-01T15:00:00+00:00", currency="EUR",
+            ecb_publication_date="2026-08-01", rate_to_eur="1",
+            resolved_at_utc="2026-08-01T15:05:00+00:00", source_version="test",
+        )
+    )
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert fetcher.calls == []
+    assert widget.prisma_lifecycle.run_on_page_calls == 0
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("EUR", "1", "2026-08-01")
+
+
+def test_cached_resolution_works_even_without_an_open_managed_page(window, monkeypatch, tmp_path):
+    """A previously fixed resolution must not require an open PRISMA page at
+    all (P.36.19 requirement 7): here `prisma_lifecycle` reports closed, yet
+    the cached rate still displays correctly."""
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=False)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    AuctionStorage(widget._runtime_paths.database).save_rate_resolution(
+        RateResolutionRecord(
+            auction_id="1", auction_state="Finished",
+            auction_end_at="2026-08-01T15:00:00+00:00", currency="EUR",
+            ecb_publication_date="2026-08-01", rate_to_eur="1",
+            resolved_at_utc="2026-08-01T15:05:00+00:00", source_version="test",
+        )
+    )
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1", "State": "Finished"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    assert fetcher.calls == []
+    assert widget.prisma_lifecycle.run_on_page_calls == 0
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("EUR", "1", "2026-08-01")
+
+
+def test_manual_csv_selection_without_a_managed_page_fails_safely(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=False)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1", "State": "Finished"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    assert fetcher.calls == []
+    assert widget.prisma_lifecycle.run_on_page_calls == 0
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
+
+
+def test_a_closed_or_missing_page_produces_an_explicit_unresolved_result_not_a_crash(
+    window, monkeypatch, tmp_path,
+):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(
+        open_=True,
+        page_error=PrismaLifecycleNoActivePageError(
+            "The managed PRISMA session closed before this request could run."
+        ),
+    )
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
+
+
+def test_prisma_retrieval_failure_persists_no_partial_cache_and_no_misleading_mapping(
+    window, monkeypatch, tmp_path,
+):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _install_recording_fetcher(
+        monkeypatch, error=PrismaAuctionDetailTransportError("official request failed")
+    )
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
+
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+
+    assert len(fetcher.calls) == 1
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
+    assert AuctionStorage(widget._runtime_paths.database).get_rate_resolution("1") is None
+
+
+def test_closing_prisma_after_a_successful_refresh_preserves_the_mapping_display(
+    window, monkeypatch, tmp_path,
+):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
+    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
+    widget._handle_download_event(
+        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    )
+    assert widget.mapping_table_model.rowCount() == 1
+
+    widget._active_prisma_generation = 11
+    widget._prisma_open = True
+    widget._update_controls()
+    widget._close_prisma_session()
+
+    assert widget.mapping_table_model.rowCount() == 1
+    assert not widget.mapping_table.isHidden()
 
 
 def test_filtered_and_rejected_only_csv_leaves_mapping_display_empty(
