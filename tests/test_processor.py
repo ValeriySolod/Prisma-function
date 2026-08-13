@@ -174,12 +174,60 @@ def test_invalid_capacity_is_explicit(tmp_path: Path, capacity: str, unit: str, 
     (datetime(2025, 1, 2), timedelta(hours=24), "Day Ahead"),
     (datetime(2025, 1, 2), timedelta(days=31), "Month"),
     (datetime(2025, 1, 2), timedelta(days=31, minutes=1), "Quarter"),
+    # These two boundary cases start in January and their 93-day span crosses
+    # the 2025-03-30 Europe/Berlin spring DST transition on purpose: Product
+    # Type classification is defined in LOCAL WALL-CLOCK hours (see
+    # `processor._product_type`/`prisma_datetime.local_wall_clock_hours`),
+    # deliberately independent of `runtime_hours`/`Flow Duration Hours`'s real
+    # DST-aware elapsed time, so these boundary cases must classify exactly as
+    # they did before the DST-aware duration correction, unaffected by the
+    # transition they happen to cross.
     (datetime(2025, 1, 2), timedelta(days=93), "Quarter"),
     (datetime(2025, 1, 2), timedelta(days=93, minutes=1), "Year"),
 ])
 def test_product_type_boundaries(tmp_path: Path, start: datetime, duration: timedelta, expected: str) -> None:
     row = {**BASE, "Product Runtime Start": start.strftime("%d.%m.%Y %H:%M"), "Product Runtime End": (start + duration).strftime("%d.%m.%Y %H:%M")}
     assert process_csv(write_csv(tmp_path, [row]))[0]["product_type"] == expected
+
+
+def test_product_type_boundary_crossing_spring_dst_uses_wall_clock_not_real_elapsed_hours(
+    tmp_path: Path,
+) -> None:
+    # Same exact interval as the restored "Year" boundary case above
+    # (2025-01-02 + 93 days + 1 minute), asserted together with its Flow
+    # Duration Hours to make the wall-clock-vs-real-elapsed distinction
+    # explicit in one place: Product Type still reflects the 93*24h+1min
+    # local wall-clock duration ("Year"), while Flow Duration Hours reflects
+    # the real elapsed time, which is exactly one hour less because the
+    # interval crosses the 2025-03-30 spring-forward transition.
+    start = datetime(2025, 1, 2)
+    end = start + timedelta(days=93, minutes=1)
+    row = {
+        **BASE,
+        "Product Runtime Start": start.strftime("%d.%m.%Y %H:%M"),
+        "Product Runtime End": end.strftime("%d.%m.%Y %H:%M"),
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    wall_clock_hours = 93 * 24 + 1 / 60
+    assert result["product_type"] == "Year"
+    assert result["runtime_hours"] == pytest.approx(wall_clock_hours - 1)
+
+
+def test_product_type_boundary_at_exactly_93_days_crossing_spring_dst_remains_quarter(
+    tmp_path: Path,
+) -> None:
+    # Same exact interval as the restored "Quarter" boundary case above
+    # (2025-01-02 + exactly 93 days).
+    start = datetime(2025, 1, 2)
+    end = start + timedelta(days=93)
+    row = {
+        **BASE,
+        "Product Runtime Start": start.strftime("%d.%m.%Y %H:%M"),
+        "Product Runtime End": end.strftime("%d.%m.%Y %H:%M"),
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert result["product_type"] == "Quarter"
+    assert result["runtime_hours"] == pytest.approx(93 * 24 - 1)
 
 
 @pytest.mark.parametrize(("field", "value"), [
@@ -349,7 +397,7 @@ def test_process_csv_compatibility_and_output_keys(tmp_path: Path) -> None:
     assert set(result[0]) == {"auction_id", "auction_date", "exit_market", "entry_market", "direction", "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type", "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours", "tariff_eur_mwh_h", "premium_eur_mwh_h", "state"}
 
 
-def test_cp1252_text_iso_dates_and_numeric_prices_are_preserved(tmp_path: Path) -> None:
+def test_cp1252_text_and_numeric_prices_are_preserved(tmp_path: Path) -> None:
     catalog = PrismaReferenceCatalog((PrismaReference(
         "München", ReferenceClassification.MARKET,
         (ReferenceAlias("München", ReferenceSide.ENTRY),),
@@ -360,11 +408,121 @@ def test_cp1252_text_iso_dates_and_numeric_prices_are_preserved(tmp_path: Path) 
     ).rows[0]
     assert row["network_point"] == "München"
     assert (row["auction_date"], row["flow_start"], row["flow_end"]) == (
-        "2025-01-01T09:00:00",
-        "2025-01-02T00:00:00",
-        "2025-01-03T00:00:00",
+        "2025-01-01",
+        "2025-01-02 00:00",
+        "2025-01-03 00:00",
     )
     assert row["tariff_eur_mwh_h"] == 20.0
     assert row["premium_eur_mwh_h"] == 5.0
     assert isinstance(row["tariff_eur_mwh_h"], float)
     assert isinstance(row["premium_eur_mwh_h"], float)
+
+
+# --- P.36 output date/time contract (Europe/Berlin, YYYY-MM-DD / YYYY-MM-DD HH:mm) ---
+
+
+def test_auction_date_is_exactly_yyyy_mm_dd(tmp_path: Path) -> None:
+    row = process_csv(write_csv(tmp_path, [BASE]))[0]
+    assert row["auction_date"] == "2025-01-01"
+
+
+def test_flow_start_and_end_are_exactly_yyyy_mm_dd_hh_mm(tmp_path: Path) -> None:
+    row = process_csv(write_csv(tmp_path, [BASE]))[0]
+    assert row["flow_start"] == "2025-01-02 00:00"
+    assert row["flow_end"] == "2025-01-03 00:00"
+
+
+@pytest.mark.parametrize("field", ["auction_date", "flow_start", "flow_end"])
+def test_output_datetime_fields_never_contain_t_seconds_or_offset(tmp_path: Path, field: str) -> None:
+    row = process_csv(write_csv(tmp_path, [BASE]))[0]
+    value = row[field]
+    assert "T" not in value
+    assert "+" not in value
+    assert value.count(":") <= 1
+
+
+def test_normal_cet_period_input_is_interpreted_correctly(tmp_path: Path) -> None:
+    # 10 January 2026 is standard time (CET, UTC+1) in Europe/Berlin.
+    row = {
+        **BASE,
+        "Start of Auction": "10.01.2026 09:00",
+        "Product Runtime Start": "10.01.2026 10:00",
+        "Product Runtime End": "10.01.2026 16:00",
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert (result["auction_date"], result["flow_start"], result["flow_end"]) == (
+        "2026-01-10", "2026-01-10 10:00", "2026-01-10 16:00",
+    )
+    assert result["runtime_hours"] == 6.0
+
+
+def test_normal_cest_period_input_is_interpreted_correctly(tmp_path: Path) -> None:
+    # 10 July 2026 is daylight-saving time (CEST, UTC+2) in Europe/Berlin.
+    row = {
+        **BASE,
+        "Start of Auction": "10.07.2026 09:00",
+        "Product Runtime Start": "10.07.2026 10:00",
+        "Product Runtime End": "10.07.2026 16:00",
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert (result["auction_date"], result["flow_start"], result["flow_end"]) == (
+        "2026-07-10", "2026-07-10 10:00", "2026-07-10 16:00",
+    )
+    assert result["runtime_hours"] == 6.0
+
+
+def test_flow_duration_hours_correct_across_spring_dst_transition(tmp_path: Path) -> None:
+    # Europe/Berlin spring-forward in 2026 is 2026-03-29 (clocks jump
+    # 02:00 CET -> 03:00 CEST); the wall-clock difference (3 hours) is one
+    # hour more than the true elapsed time (2 hours) because of the jump.
+    row = {
+        **BASE,
+        "Start of Auction": "28.03.2026 09:00",
+        "Product Runtime Start": "29.03.2026 01:00",
+        "Product Runtime End": "29.03.2026 04:00",
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert result["runtime_hours"] == 2.0
+
+
+def test_flow_duration_hours_correct_across_autumn_dst_transition(tmp_path: Path) -> None:
+    # Europe/Berlin autumn-back in 2026 is 2026-10-25 (clocks fall back
+    # 03:00 CEST -> 02:00 CET); both endpoints below are unambiguous
+    # (before and after the overlap), and the true elapsed time (4 hours)
+    # is one hour more than the wall-clock difference (3 hours).
+    row = {
+        **BASE,
+        "Start of Auction": "24.10.2026 09:00",
+        "Product Runtime Start": "25.10.2026 01:00",
+        "Product Runtime End": "25.10.2026 04:00",
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert result["runtime_hours"] == 4.0
+
+
+def test_nonexistent_local_time_is_rejected(tmp_path: Path) -> None:
+    # 2026-03-29 02:30 does not exist in Europe/Berlin (spring-forward gap).
+    row = {**BASE, "Product Runtime Start": "29.03.2026 02:30"}
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.rows == []
+    issue = result.issues[0]
+    assert issue.reason_code == "nonexistent_flow_start"
+    assert "does not exist" in issue.message
+
+
+def test_ambiguous_local_time_is_rejected(tmp_path: Path) -> None:
+    # 2026-10-25 02:30 occurs twice in Europe/Berlin (autumn-back overlap),
+    # and no authoritative rule resolves which of the two instants applies.
+    row = {**BASE, "Product Runtime Start": "25.10.2026 02:30"}
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.rows == []
+    issue = result.issues[0]
+    assert issue.reason_code == "ambiguous_flow_start"
+    assert "ambiguous" in issue.message
+
+
+def test_invalid_datetime_input_remains_a_typed_row_rejection(tmp_path: Path) -> None:
+    row = {**BASE, "Product Runtime Start": "not a date"}
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.rows == []
+    assert result.issues[0].reason_code == "invalid_flow_start"

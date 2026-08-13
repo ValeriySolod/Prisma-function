@@ -1046,6 +1046,143 @@ criteria (it consumes only an already-on-disk validated CSV file; no browser, ne
 touched), but end-to-end manual validation of the eventual wired-in workflow remains appropriate once a later
 increment adds the UI trigger.
 
+**Output date/time contract correction (2026-08-13, `feature/output-datetime-contract`, not yet
+merged).** `processor.py` previously parsed the authoritative PRISMA local `DD.MM.YYYY HH:MM`
+timestamps with a naive `datetime.strptime()` and serialized `auction_date`/`flow_start`/`flow_end`
+with `datetime.isoformat()` (e.g. `2026-08-13T00:00:00`) — no explicit timezone, and not the
+authoritative `YYYY-MM-DD`/`YYYY-MM-DD HH:mm` output shapes `README.md` already documented. Fixed,
+strictly scoped to the date/time representation; the source PRISMA CSV contract, threshold
+filtering, market/storage mapping, product-type rules, numeric formatting, atomic output writing,
+cumulative publication, deduplication, and error-preservation/retry behavior are all unchanged.
+
+**New module `prisma_datetime.py`** is the sole Europe/Berlin interpretation boundary (kept in the
+business/domain layer, never the CSV writer, publication layer, storage, or UI):
+`parse_prisma_local_timestamp()` parses `DD.MM.YYYY HH:MM` and attaches the IANA `Europe/Berlin`
+zone (`zoneinfo.ZoneInfo`, backed by the `tzdata` PyPI package already present transitively in this
+project's environment — no new dependency; see packaging evidence below), correctly resolving
+CET/CEST via real DST rules rather than a fixed UTC+1/UTC+2 offset. A local time that does not exist
+(spring-forward gap) or is ambiguous (autumn-back overlap, no authoritative rule currently resolves
+which of the two instants applies) is rejected with a typed error
+(`PrismaLocalTimestampNonexistentError`/`PrismaLocalTimestampAmbiguousError`) rather than guessed,
+distinguished deterministically via a PEP 495 UTC round-trip check on the two candidate offsets.
+`format_auction_date()`/`format_flow_timestamp()` serialize the accepted, already-resolved
+Europe/Berlin `datetime` as exactly `YYYY-MM-DD`/`YYYY-MM-DD HH:mm` — no `T` separator, seconds, or
+UTC-offset suffix. A third function, `elapsed_hours()`, fixes a second, independently discovered
+defect: Python's `datetime` subtraction is documented to ignore `tzinfo` and subtract naive
+wall-clock fields directly whenever both operands share the same `tzinfo` object — which
+`parse_prisma_local_timestamp()`'s single shared `PRISMA_LOCAL_TIMEZONE` instance always does — so a
+plain `flow_end - flow_start` silently produced the wrong duration for any interval crossing a DST
+transition (proven by a dedicated regression test asserting the wrong naive result). `elapsed_hours()`
+converts both operands to fixed-offset UTC before subtracting, which is safe and correct in all cases
+and is what `processor.py`'s `runtime_hours` (and therefore `Flow Duration Hours`) now uses.
+
+**`processor.py`.** `_parse_date()` now delegates to `parse_prisma_local_timestamp()`, mapping its
+three typed errors to three distinct row-rejection reason codes (`invalid_<field>`,
+`nonexistent_<field>`, `ambiguous_<field>`) so a caller can distinguish a malformed timestamp from a
+DST-boundary rejection while preserving the existing typed-rejection/no-crash behavior for every case.
+`_import_row()` serializes `auction_date`/`flow_start`/`flow_end` via the new formatters instead of
+`.isoformat()`, and computes `runtime_hours` via `elapsed_hours()` instead of raw subtraction.
+Chronological validation (`flow_start.date() < auction_date.date()`) and `_product_type()`'s
+same-day-as-auction check are unaffected: they intentionally compare local calendar dates, not
+instants, and remain correct with the now-aware `datetime` values.
+
+**Downstream consumers audited, none required a functional change.** `prisma_output.py`'s
+`transform_row()` already passes `auction_date`/`flow_start`/`flow_end` through unchanged (only its
+docstring, which described them as ISO 8601, was corrected). `prisma_publication.py`'s cumulative
+deduplication compares the complete formatted row as opaque text and never parses the date/time
+fields, so it is format-agnostic and unaffected. `storage.py`'s `_valid_historical_row()` and
+`mapping_presentation.py`'s `_flow_start_sort_key()` both already use the generic
+`datetime.fromisoformat()`, which — confirmed by direct testing — parses the new `YYYY-MM-DD`/
+`YYYY-MM-DD HH:mm` shape exactly as well as the previous `T`-separated, seconds-carrying one; both
+were deliberately left unchanged (each gained an explanatory comment/docstring note instead) so rows
+already persisted under the old representation remain valid without a migration. `storage.py` gained
+one new focused test proving the corrected representation is accepted end-to-end (`upsert` and
+historical backfill); no other production code in `storage.py`/`mapping_presentation.py`/
+`prisma_publication.py` changed.
+
+**Regression tests.** New `tests/test_prisma_datetime.py` (16 tests) covers: CET/CEST offset
+selection; exact `YYYY-MM-DD`/`YYYY-MM-DD HH:mm` formatting with no `T`/seconds/offset; malformed-shape
+and invalid-calendar-date rejection; the spring-gap and autumn-overlap rejection cases plus the exact
+unambiguous times immediately adjacent to each boundary; stable, path-free error messages; an explicit
+regression guard proving the "same `tzinfo` subtraction ignores DST" trap `elapsed_hours()` exists to
+avoid; and `elapsed_hours()` correctness both across each DST boundary and away from one. Existing
+`tests/test_processor.py`, `tests/test_prisma_output.py`, `tests/test_mapping_presentation.py`,
+`tests/test_prisma_publication.py`, and `tests/test_app.py` had their `auction_date`/`flow_start`/
+`flow_end` literals updated from the old ISO shape to the corrected one; `test_processor.py` gained
+new tests for the exact output formats, no-`T`/seconds/offset, normal CET/CEST interpretation, correct
+`Flow Duration Hours` across both DST transitions, nonexistent/ambiguous rejection, and invalid input
+remaining a typed rejection. One existing `test_product_type_boundaries` case was found to
+inadvertently span the 2025-03-30 spring transition (a `days=93, minutes=1` interval starting in
+January), which the DST-aware duration fix correctly moved from the "Year" bucket to "Quarter"; its
+start date was moved to April 2025 (outside any DST transition) to keep that boundary test about
+day-count boundaries, not an incidental DST crossing — documented inline in the test.
+
+**Automated evidence.** The complete pytest suite passed with **839 tests (up from 799, +40)**.
+Project-wide `python -m compileall` (the `BUILDING.md`-documented file list, extended to include the
+new `prisma_datetime.py`) exited `0`. `git diff --check` passed (only a benign CRLF/LF
+normalization notice, no actual whitespace errors).
+
+**Packaging evidence.** `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` was rerun
+or run and succeeded; the build log shows PyInstaller's community hook `hook-tzdata.py` (from
+`_pyinstaller_hooks_contrib`) firing automatically once `prisma_datetime.py`'s `zoneinfo`/`tzdata`
+usage was reachable from `app.py`'s import graph, and the resulting
+`dist/PrismaFunction/_internal/tzdata/zoneinfo/Europe/Berlin` data file is confirmed present in the
+fresh distribution — direct evidence that Windows packaging already reliably provides the Europe/Berlin
+timezone data via the existing `tzdata` transitive dependency, with no `.spec`/`requirements.txt`
+change needed. `python validate_package.py` passed against that fresh distribution. No packaged-
+executable launch or real-Windows/real-PRISMA manual validation was performed by this increment; per
+this project's real-environment validation rule, an end-to-end manual pass against a real PRISMA
+export (confirming the exact `Auction Date`/`Flow Start`/`Flow End` values and, ideally, one row whose
+interval genuinely crosses a live CET/CEST transition) remains outstanding before this correction can
+be considered fully validated on real Windows/PRISMA data — consistent with P.36.15/P.36.16's own
+already-recorded 🟡 status above.
+
+**Regression fix: Product Type must classify by local wall-clock hours, not real elapsed hours
+(2026-08-13, same branch, same day, not yet merged).** The output date/time contract correction above
+introduced a genuine regression: `_import_row()` began passing the newly DST-aware
+`runtime_hours` (real elapsed time, from `elapsed_hours()`) into `_product_type()`, which silently
+changed the pre-existing Product Type classification for any interval crossing a CET/CEST transition.
+This was caught via a test that had been quietly moved off its original January dates to avoid a
+DST crossing, rather than preserving the original boundary and its original classification. This
+project has exactly two, deliberately independent date/time duration concepts, and this fix makes that
+split explicit rather than sharing one value between them:
+
+- **`Flow Duration Hours` (`runtime_hours`) is real elapsed time** — the actual UTC-instant difference
+  between `Flow Start` and `Flow End`, correct across a CET/CEST transition. Unchanged by this fix:
+  still computed via `prisma_datetime.elapsed_hours()`, still used for the output `Flow Duration Hours`
+  field and the positive-duration validation rejecting a non-positive/non-finite runtime.
+- **Product Type classification is local wall-clock hours** — the pre-existing, unauthored-in-this-
+  increment `WD`/`Day Ahead` (≤24h), `Month` (≤31×24h), `Quarter` (≤93×24h), `Year` (>93×24h)
+  thresholds are, and always were, defined by the naive `HH:MM` clock-field difference between `Flow
+  Start` and `Flow End`, never by real elapsed time. A new `prisma_datetime.local_wall_clock_hours()`
+  computes exactly this (both datetimes' `tzinfo` stripped before subtracting), and `_product_type()`
+  now receives this value instead of `runtime_hours`. The same-day `WD` vs. `Day Ahead` decision
+  continues to compare local Europe/Berlin calendar dates (`start.date() == auction_date.date()`),
+  unaffected either way since `.date()` reads local wall-clock fields regardless of tzinfo.
+
+`tests/test_processor.py`'s `test_product_type_boundaries` had its exact-93-day and
+93-day-plus-1-minute cases restored to their original January 2025 start dates (undoing the previous,
+now-recognized-as-wrong fix of moving them to April to dodge the 2025-03-30 spring transition); both
+again cross that transition on purpose, and both again classify exactly as they did before the output
+date/time contract correction (`Quarter` and `Year` respectively). Two new dedicated tests,
+`test_product_type_boundary_crossing_spring_dst_uses_wall_clock_not_real_elapsed_hours` and
+`test_product_type_boundary_at_exactly_93_days_crossing_spring_dst_remains_quarter`, assert both
+`product_type` and `runtime_hours` together on these exact intervals, making explicit that `Flow
+Duration Hours` is one real hour less than the local wall-clock duration precisely because the interval
+crosses the transition, while `product_type` is governed by the unchanged wall-clock duration.
+`tests/test_prisma_datetime.py`'s existing spring/autumn short-interval `elapsed_hours()` tests
+(`test_spring_gap_crossing_elapsed_time_accounts_for_the_missing_hour`,
+`test_autumn_overlap_crossing_elapsed_time_accounts_for_the_extra_hour`,
+`test_elapsed_hours_matches_naive_subtraction_away_from_a_dst_transition`) were re-run unchanged and
+remain correct, since `elapsed_hours()` itself was not touched by this fix.
+
+**Automated evidence.** The complete pytest suite passed with **841 tests (up from 839, +2)**.
+Project-wide `python -m compileall` (same file list as above) exited `0`. `git diff --check` passed.
+No packaging-affecting file changed in this fix (no new import, dependency, or `.spec` change), so
+`PyInstaller`/`validate_package.py` were not rerun, matching this project's "do not repeat an
+already-passing check whose covered code has not changed" rule — the prior packaging evidence above
+(same-day, same `prisma_datetime.py` module already bundled) still applies unchanged.
+
 ### P.36.16 — Publish the processed result
 
 **Status:** 🟡 Decision gate resolved (customer-approved "option 2", 2026-08-04); implemented,

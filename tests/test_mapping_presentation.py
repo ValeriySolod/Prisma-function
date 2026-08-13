@@ -48,14 +48,14 @@ def test_mapping_display_fields_exact_order_and_spelling() -> None:
 
 # --- pure field mapping and ordering (no processor/catalog involved) --------
 
-_AUCTION_DATE = "2025-01-01T09:00:00"
+_AUCTION_DATE = "2025-01-01"
 _BOOKED_CAPACITY = "1000.0"
 
 
 def _row(**overrides) -> dict:
     row = {
         "exit_market": "", "entry_market": "", "network_point": "",
-        "tso_exit": "", "tso_entry": "", "flow_start": "2025-01-01T00:00:00",
+        "tso_exit": "", "tso_entry": "", "flow_start": "2025-01-01 00:00",
         "auction_id": "1", "auction_date": _AUCTION_DATE,
         "booked_capacity_kwh_h": 1000.0,
     }
@@ -90,10 +90,10 @@ def test_build_mapping_rows_populates_auction_date_and_booked_capacity_from_row_
     # Distinct values from every other test's defaults, so this cannot pass
     # by coincidentally matching a hardcoded/default value.
     result = _result([
-        _row(auction_date="2026-03-04T12:30:00", booked_capacity_kwh_h=2500.5),
+        _row(auction_date="2026-03-04", booked_capacity_kwh_h=2500.5),
     ])
     row = build_mapping_rows(result)[0]
-    assert row.auction_date == "2026-03-04T12:30:00"
+    assert row.auction_date == "2026-03-04"
     assert row.booked_capacity == "2500.5"
 
 
@@ -144,9 +144,9 @@ def test_build_mapping_rows_does_not_swap_or_infer_across_sides() -> None:
 
 def test_build_mapping_rows_orders_by_flow_start_descending() -> None:
     result = _result([
-        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00", auction_id="1"),
-        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00", auction_id="2"),
-        _row(exit_market="Feb", flow_start="2025-02-01T00:00:00", auction_id="3"),
+        _row(exit_market="Jan", flow_start="2025-01-01 00:00", auction_id="1"),
+        _row(exit_market="Mar", flow_start="2025-03-01 00:00", auction_id="2"),
+        _row(exit_market="Feb", flow_start="2025-02-01 00:00", auction_id="3"),
     ])
     rows = build_mapping_rows(result)
     assert [row.exit_market for row in rows] == ["Mar", "Feb", "Jan"]
@@ -154,9 +154,9 @@ def test_build_mapping_rows_orders_by_flow_start_descending() -> None:
 
 def test_build_mapping_rows_equal_flow_start_preserves_original_order() -> None:
     result = _result([
-        _row(exit_market="A", flow_start="2025-06-01T00:00:00", auction_id="1"),
-        _row(exit_market="B", flow_start="2025-06-01T00:00:00", auction_id="2"),
-        _row(exit_market="C", flow_start="2025-06-01T00:00:00", auction_id="3"),
+        _row(exit_market="A", flow_start="2025-06-01 00:00", auction_id="1"),
+        _row(exit_market="B", flow_start="2025-06-01 00:00", auction_id="2"),
+        _row(exit_market="C", flow_start="2025-06-01 00:00", auction_id="3"),
     ])
     rows = build_mapping_rows(result)
     assert [row.exit_market for row in rows] == ["A", "B", "C"]
@@ -166,12 +166,12 @@ def test_build_mapping_rows_sorting_keeps_complete_row_data_together() -> None:
     result = _result([
         _row(
             exit_market="Early", entry_market="Early-Entry", network_point="Early-Point",
-            tso_exit="Early-TSO-X", tso_entry="Early-TSO-Y", flow_start="2025-01-01T00:00:00",
+            tso_exit="Early-TSO-X", tso_entry="Early-TSO-Y", flow_start="2025-01-01 00:00",
             auction_id="1",
         ),
         _row(
             exit_market="Late", entry_market="Late-Entry", network_point="Late-Point",
-            tso_exit="Late-TSO-X", tso_entry="Late-TSO-Y", flow_start="2025-12-01T00:00:00",
+            tso_exit="Late-TSO-X", tso_entry="Late-TSO-Y", flow_start="2025-12-01 00:00",
             auction_id="2",
         ),
     ])
@@ -189,15 +189,15 @@ def test_build_mapping_rows_sorting_keeps_complete_row_data_together() -> None:
 
 
 def test_build_mapping_rows_single_row_input_is_valid() -> None:
-    result = _result([_row(exit_market="Only", flow_start="2025-05-01T00:00:00")])
+    result = _result([_row(exit_market="Only", flow_start="2025-05-01 00:00")])
     rows = build_mapping_rows(result)
     assert [row.exit_market for row in rows] == ["Only"]
 
 
 def test_build_mapping_rows_does_not_mutate_import_result_rows_order() -> None:
     imported_rows = [
-        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00", auction_id="1"),
-        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00", auction_id="2"),
+        _row(exit_market="Jan", flow_start="2025-01-01 00:00", auction_id="1"),
+        _row(exit_market="Mar", flow_start="2025-03-01 00:00", auction_id="2"),
     ]
     result = _result(imported_rows)
     build_mapping_rows(result)
@@ -267,8 +267,8 @@ def test_unresolved_outcomes_never_display_a_fabricated_rate(outcome, expected_t
 
 def test_multiple_rows_sharing_one_auction_id_share_one_resolution() -> None:
     result = _result([
-        _row(auction_id="1", network_point="A", flow_start="2025-01-01T00:00:00"),
-        _row(auction_id="1", network_point="B", flow_start="2025-02-01T00:00:00"),
+        _row(auction_id="1", network_point="A", flow_start="2025-01-01 00:00"),
+        _row(auction_id="1", network_point="B", flow_start="2025-02-01 00:00"),
     ])
     resolutions = {
         "1": RateResolutionResult(
@@ -282,8 +282,8 @@ def test_multiple_rows_sharing_one_auction_id_share_one_resolution() -> None:
 
 def test_two_auctions_show_independently_resolved_rates() -> None:
     result = _result([
-        _row(auction_id="1", network_point="A", flow_start="2025-01-01T00:00:00"),
-        _row(auction_id="2", network_point="B", flow_start="2025-02-01T00:00:00"),
+        _row(auction_id="1", network_point="A", flow_start="2025-01-01 00:00"),
+        _row(auction_id="2", network_point="B", flow_start="2025-02-01 00:00"),
     ])
     resolutions = {
         "1": RateResolutionResult(

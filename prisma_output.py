@@ -136,13 +136,14 @@ def transform_row(row: dict) -> dict[str, str]:
     exact 12-column output contract.
 
     ``row`` is one entry of `PrismaImportResult.rows`: parsing, unit
-    normalization, capacity-threshold filtering, and side-specific
-    Market/Storage resolution already happened there and are not repeated
-    here. `Auction Date`/`Flow Start`/`Flow End` are passed through unchanged
-    as the ISO 8601 strings `processor.py` and `storage.py` already treat as
-    the authoritative timestamp representation; the numeric fields use
-    Python's own `str(float)` representation, which always uses a dot
-    decimal separator.
+    normalization, capacity-threshold filtering, side-specific Market/Storage
+    resolution, and Europe/Berlin date/time interpretation already happened
+    there and are not repeated here. `Auction Date`/`Flow Start`/`Flow End`
+    are passed through unchanged as the already-formatted `YYYY-MM-DD`/
+    `YYYY-MM-DD HH:mm` strings `processor.py` (via `prisma_datetime.py`) and
+    `storage.py` already treat as the authoritative timestamp representation;
+    the numeric fields use Python's own `str(float)` representation, which
+    always uses a dot decimal separator.
     """
     return {
         "Auction Date": row["auction_date"],

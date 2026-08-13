@@ -101,32 +101,45 @@ def test_successful_transformation_maps_fields_correctly(tmp_path: Path) -> None
     assert result.succeeded
     _, records = _read_output(result.output_path)
     row = records[0]
-    assert row["Auction Date"] == "2025-01-01T09:00:00"
+    assert row["Auction Date"] == "2025-01-01"
     assert row["Exit Market"] == ""
     assert row["Entry Market"] == "VGS Storage Hub"
     assert row["Capacity Type"] == "entry"
     assert row["Network Point Name"] == "VGS Storage Hub (4290)"
     assert row["Product Type"] == "Day Ahead"
-    assert row["Flow Start"] == "2025-01-02T00:00:00"
-    assert row["Flow End"] == "2025-01-03T00:00:00"
+    assert row["Flow Start"] == "2025-01-02 00:00"
+    assert row["Flow End"] == "2025-01-03 00:00"
     assert row["Booked Capacity"] == "1000.0"
     assert row["Flow Duration Hours"] == "24.0"
     assert float(row["Tariff Price"]) == pytest.approx(20.0)
     assert float(row["Premium Price"]) == pytest.approx(5.0)
 
 
+def test_output_datetime_columns_never_contain_t_seconds_or_offset(tmp_path: Path) -> None:
+    source = write_csv(tmp_path, [BASE])
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = write_prisma_output(source, out_dir)
+    _, records = _read_output(result.output_path)
+    row = records[0]
+    for column in ("Auction Date", "Flow Start", "Flow End"):
+        assert "T" not in row[column]
+        assert "+" not in row[column]
+        assert row[column].count(":") <= 1
+
+
 def test_transform_row_is_pure_field_mapping() -> None:
     row = {
-        "auction_date": "2025-01-01T09:00:00", "exit_market": "BG", "entry_market": "",
+        "auction_date": "2025-01-01", "exit_market": "BG", "entry_market": "",
         "direction": "exit", "network_point": "Point", "product_type": "Month",
-        "flow_start": "2025-02-01T00:00:00", "flow_end": "2025-03-01T00:00:00",
+        "flow_start": "2025-02-01 00:00", "flow_end": "2025-03-01 00:00",
         "booked_capacity_kwh_h": 2500.0, "runtime_hours": 672.0,
         "tariff_eur_mwh_h": 10.0, "premium_eur_mwh_h": 0.0,
     }
     assert transform_row(row) == {
-        "Auction Date": "2025-01-01T09:00:00", "Exit Market": "BG", "Entry Market": "",
+        "Auction Date": "2025-01-01", "Exit Market": "BG", "Entry Market": "",
         "Capacity Type": "exit", "Network Point Name": "Point", "Product Type": "Month",
-        "Flow Start": "2025-02-01T00:00:00", "Flow End": "2025-03-01T00:00:00",
+        "Flow Start": "2025-02-01 00:00", "Flow End": "2025-03-01 00:00",
         "Booked Capacity": "2500.0", "Flow Duration Hours": "672.0",
         "Tariff Price": "10.0", "Premium Price": "0.0",
     }

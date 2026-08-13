@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import math
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -11,6 +10,16 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from csv_contracts import CsvFormat, PRISMA_EXPORT_COLUMNS, require_csv_format
+from prisma_datetime import (
+    PrismaLocalTimestampAmbiguousError,
+    PrismaLocalTimestampFormatError,
+    PrismaLocalTimestampNonexistentError,
+    elapsed_hours,
+    format_auction_date,
+    format_flow_timestamp,
+    local_wall_clock_hours,
+    parse_prisma_local_timestamp,
+)
 from prisma_references import (
     DEFAULT_PRISMA_REFERENCES,
     PrismaReferenceCatalog,
@@ -19,8 +28,6 @@ from prisma_references import (
 )
 
 MIN_MARKETED_CAPACITY_KWH_H = 1000.0
-DATE_FORMAT = "%d.%m.%Y %H:%M"
-_DATE_PATTERN = re.compile(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\Z")
 
 
 class PrismaImportStatus(str, Enum):
@@ -137,18 +144,15 @@ def _number(value: Any, *, label: str) -> float:
 
 def _parse_date(value: Any, *, label: str) -> datetime:
     text = _text(value)
-    if not _DATE_PATTERN.fullmatch(text):
-        raise _RowRejected(
-            f"invalid_{label}",
-            f"{label.replace('_', ' ').title()} is not in DD.MM.YYYY HH:MM format.",
-        )
+    title = label.replace("_", " ").title()
     try:
-        return datetime.strptime(text, DATE_FORMAT)
-    except ValueError as exc:
-        raise _RowRejected(
-            f"invalid_{label}",
-            f"{label.replace('_', ' ').title()} is not a valid date.",
-        ) from exc
+        return parse_prisma_local_timestamp(text)
+    except PrismaLocalTimestampNonexistentError as exc:
+        raise _RowRejected(f"nonexistent_{label}", f"{title} {exc}") from exc
+    except PrismaLocalTimestampAmbiguousError as exc:
+        raise _RowRejected(f"ambiguous_{label}", f"{title} {exc}") from exc
+    except PrismaLocalTimestampFormatError as exc:
+        raise _RowRejected(f"invalid_{label}", f"{title} {exc}") from exc
 
 
 def _capacity(row: dict[str, Any]) -> float:
@@ -202,12 +206,17 @@ def _direction_and_network(row: dict[str, Any]) -> tuple[str, str, str]:
     return direction, name, point_id
 
 
-def _product_type(auction_date: datetime, start: datetime, runtime_hours: float) -> str:
-    if runtime_hours <= 24:
+def _product_type(auction_date: datetime, start: datetime, wall_clock_hours: float) -> str:
+    # Classification thresholds are, and always have been, defined in local
+    # Europe/Berlin wall-clock hours (see `prisma_datetime.local_wall_clock_hours`),
+    # deliberately independent of `runtime_hours`/`Flow Duration Hours`'s real
+    # DST-aware elapsed time, so a boundary case does not silently shift
+    # buckets merely because its interval happens to cross a DST transition.
+    if wall_clock_hours <= 24:
         return "WD" if start.date() == auction_date.date() else "Day Ahead"
-    if runtime_hours <= 31 * 24:
+    if wall_clock_hours <= 31 * 24:
         return "Month"
-    if runtime_hours <= 93 * 24:
+    if wall_clock_hours <= 93 * 24:
         return "Quarter"
     return "Year"
 
@@ -256,9 +265,10 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
             "flow_before_auction_date",
             "Product flow starts on a calendar date before the auction date.",
         )
-    runtime_hours = (flow_end - flow_start).total_seconds() / 3600
+    runtime_hours = elapsed_hours(flow_start, flow_end)
     if not math.isfinite(runtime_hours) or runtime_hours <= 0:
         raise _RowRejected("non_positive_runtime", "Product runtime must be positive and finite.")
+    wall_clock_hours = local_wall_clock_hours(flow_start, flow_end)
     tariff = _price(
         source,
         "Regulated Tariff Exit TSO",
@@ -274,7 +284,7 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
     premium = _price(source, "Surcharge", "Unit Surcharge", label="surcharge")
     return {
         "auction_id": auction_id,
-        "auction_date": auction_date.isoformat(),
+        "auction_date": format_auction_date(auction_date),
         "exit_market": "",
         "entry_market": "",
         "direction": direction,
@@ -282,9 +292,9 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
         "network_point_id": network_point_id,
         "tso_exit": _text(source.get("TSO Exit")),
         "tso_entry": _text(source.get("TSO Entry")),
-        "product_type": _product_type(auction_date, flow_start, runtime_hours),
-        "flow_start": flow_start.isoformat(),
-        "flow_end": flow_end.isoformat(),
+        "product_type": _product_type(auction_date, flow_start, wall_clock_hours),
+        "flow_start": format_flow_timestamp(flow_start),
+        "flow_end": format_flow_timestamp(flow_end),
         "booked_capacity_kwh_h": marketed,
         "runtime_hours": runtime_hours,
         "tariff_eur_mwh_h": tariff,
