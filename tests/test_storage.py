@@ -131,6 +131,27 @@ def historical_row(**changes):
     return row
 
 
+def test_storage_accepts_corrected_output_datetime_representations(tmp_path):
+    """P.36 output date/time contract correction: `auction_date` is now
+    `YYYY-MM-DD` and `flow_start`/`flow_end` are `YYYY-MM-DD HH:mm` (no `T`,
+    seconds, or offset). `_valid_historical_row`'s `datetime.fromisoformat`
+    based validation is intentionally generic and accepts this representation
+    without any storage-layer change (see the comment on
+    `AuctionStorage._valid_historical_row`)."""
+    storage = AuctionStorage(tmp_path / "test.db")
+    row = historical_row(
+        auction_date="2026-07-10",
+        flow_start="2026-07-10 06:00",
+        flow_end="2026-07-11 06:00",
+    )
+
+    result = storage.upsert([row])
+    assert result == {"processed": 1, "inserted": 1, "updated": 0, "unchanged": 0}
+
+    summary = storage.backfill_historical_market_storage()
+    assert summary.invalid == 0
+
+
 def test_identical_rows_in_one_batch_preserve_idempotent_counts(tmp_path):
     storage = AuctionStorage(tmp_path / "test.db")
     row = historical_row()

@@ -64,6 +64,14 @@ The output CSV/table must contain the following fields:
 
 - All processing actions on downloaded files must be performed only within
   the Prisma Function application — no manual editing outside the app.
+- The `DD.MM.YYYY HH:MM` PRISMA local date/time values in the source export
+  are interpreted as explicit Europe/Berlin local time (CET during standard
+  time, CEST during daylight saving; resolved via the IANA `Europe/Berlin`
+  zone, never a fixed UTC+1/UTC+2 offset). A local time that does not exist
+  (the spring-forward gap) or is ambiguous (the autumn-back overlap) is
+  rejected as a typed row error rather than guessed. Auction Date, Flow
+  Start, and Flow End are serialized exactly as `YYYY-MM-DD` /
+  `YYYY-MM-DD HH:mm` — no `T` separator, seconds, or UTC-offset suffix.
 - This document is derived from the original specification
   (`Prisma Function.odt`). For updated business rules, packaging notes, and
   implementation increments, see the project's implementation log.

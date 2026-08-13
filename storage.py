@@ -503,6 +503,11 @@ class AuctionStorage:
 
     @staticmethod
     def _valid_historical_row(row: sqlite3.Row) -> bool:
+        # `fromisoformat` intentionally stays generic here (not narrowed to
+        # `prisma_datetime.py`'s exact `YYYY-MM-DD[ HH:mm]` output contract):
+        # it already accepts both that corrected representation and the
+        # previous `T`-separated, seconds-carrying one, so rows persisted
+        # before this correction remain valid without a migration.
         text_fields = ("auction_id", "network_point", "network_point_id", "auction_date",
                        "flow_start", "flow_end", "product_type")
         if row["direction"] not in {"exit", "entry", "bundle"} or any(

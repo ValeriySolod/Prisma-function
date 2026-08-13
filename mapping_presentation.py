@@ -19,12 +19,15 @@ fields from one already-completed `processor.PrismaImportResult` into the
 presentation; it introduces no matching or inference of its own.
 
 Per P.36.18, the presentation orders rows by `Flow Start` descending (latest
-first), parsed from each row's already-parsed `flow_start` value (an ISO
-datetime string produced by `processor._parse_row`/`_parse_date` from the
+first), parsed from each row's already-formatted `flow_start` value (a
+`YYYY-MM-DD HH:mm` Europe/Berlin local string produced by
+`processor._import_row`/`_parse_date` via `prisma_datetime.py` from the
 authoritative `DD.MM.YYYY HH:MM` PRISMA export contract), never by lexical
-comparison of a formatted string. This affects only the order rows are
-displayed in; `import_result.rows` itself, the 12-column output CSV, and
-publication order are untouched.
+comparison of a formatted string. `datetime.fromisoformat` accepts this exact
+format (space-separated date/time, no seconds) as well as the previous
+`T`-separated ISO representation, so both remain sortable. This affects only
+the order rows are displayed in; `import_result.rows` itself, the 12-column
+output CSV, and publication order are untouched.
 
 Per P.36.19, the presentation is additionally extended with three
 Mapping-only columns — `Currency`, `Rate to EUR`, `Rate Date` — built from

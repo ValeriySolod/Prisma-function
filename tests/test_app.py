@@ -437,10 +437,10 @@ def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
     # ("1000"/"kWh/h"), so both display the same authoritative Auction Date
     # and Booked Capacity.
     assert (cell(0, 0), cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4), cell(0, 5), cell(0, 6)) == (
-        "2025-01-01T09:00:00", "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD", "1000.0",
+        "2025-01-01", "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD", "1000.0",
     )
     assert (cell(1, 0), cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4), cell(1, 5), cell(1, 6)) == (
-        "2025-01-01T09:00:00", "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "", "1000.0",
+        "2025-01-01", "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "", "1000.0",
     )
     # P.36.19: neither source row has an explicit State of "Finished" (both
     # default to blank), so both are ineligible for rate resolution and must
