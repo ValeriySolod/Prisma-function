@@ -14,11 +14,15 @@ from prisma_download import (
     PrismaAuthenticationRequiredError,
     PrismaDownloadOrchestrator,
 )
+from prisma_auction_lookup import PrismaAuctionDetailTransportError
 from prisma_lifecycle import (
     PRISMA_OFFICIAL_URL,
+    ManagedPrismaAuctionDetailFetcher,
     PrismaLifecycleController,
     PrismaLifecycleEvent,
+    PrismaLifecycleNoActivePageError,
     PrismaLifecycleState,
+    _PageTask,
 )
 
 
@@ -2366,6 +2370,173 @@ def test_windowed_runtime_supplies_output_handles_before_playwright_start(monkey
 
     assert len(streams_at_start) == 1
     assert all(stream is not None for stream in streams_at_start[0])
+
+    controller.close()
+    join_worker(controller)
+
+
+# --- P.36.19 defect fix: run_on_page() / ManagedPrismaAuctionDetailFetcher --
+#
+# Playwright's sync API may only be driven from the thread that started it
+# (this controller's own `_run()` worker thread). `run_on_page()` marshals a
+# callable onto that thread instead of ever handing the raw page object to a
+# caller on a different thread (typically the Qt UI thread); these tests
+# prove that marshalling, its safe-failure modes, and the
+# `ManagedPrismaAuctionDetailFetcher` adapter that bridges it to
+# `prisma_auction_lookup.AuctionDetailFetcher`.
+
+
+def test_run_on_page_raises_when_no_session_is_open():
+    controller = PrismaLifecycleController()
+
+    with pytest.raises(PrismaLifecycleNoActivePageError, match="No managed PRISMA session"):
+        controller.run_on_page(lambda page: "unused")
+
+
+def test_run_on_page_executes_on_the_owner_thread_with_the_real_managed_page(monkeypatch):
+    browser = FakeBrowser()
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+    calling_thread = threading.current_thread()
+
+    seen: list[tuple[object, threading.Thread]] = []
+
+    def record(page):
+        seen.append((page, threading.current_thread()))
+        return "result-value"
+
+    result = controller.run_on_page(record, timeout=2)
+
+    assert result == "result-value"
+    assert len(seen) == 1
+    seen_page, executed_on = seen[0]
+    assert seen_page is browser.page
+    assert executed_on is controller._thread
+    assert executed_on is not calling_thread
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_run_on_page_reraises_the_callables_own_exception(monkeypatch):
+    browser = FakeBrowser()
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    def boom(page):
+        raise ValueError("kaboom")
+
+    with pytest.raises(ValueError, match="kaboom"):
+        controller.run_on_page(boom, timeout=2)
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_run_on_page_times_out_when_nothing_drains_the_queue():
+    # No worker thread was ever started (open() was never called), so a task
+    # forced into the queue below is never drained; the bounded timeout must
+    # still resolve deterministically rather than hang.
+    controller = PrismaLifecycleController()
+    controller._state = PrismaLifecycleState.OPEN
+
+    with pytest.raises(PrismaLifecycleNoActivePageError, match="Timed out"):
+        controller.run_on_page(lambda page: "unused", timeout=0.05)
+
+
+def test_pending_page_task_fails_safely_if_still_queued_when_the_session_closes(monkeypatch):
+    """The finally-block drain (`_drain_page_tasks(None)`) must resolve a
+    task that was queued but never reached by the worker thread's own
+    polling loop before teardown, so its caller is never left hanging until
+    its own timeout."""
+    browser = FakeBrowser()
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    event = threading.Event()
+    box: dict = {}
+    controller._task_queue.put(_PageTask(lambda page: "unused", event, box))
+
+    controller.close()
+    join_worker(controller)
+
+    assert event.wait(2)
+    assert isinstance(box.get("error"), PrismaLifecycleNoActivePageError)
+
+
+class RecordingAuctionDetailFetcher:
+    def __init__(self, *, result=None, error: Exception | None = None):
+        self.calls: list[tuple[object, str, int]] = []
+        self._result = result
+        self._error = error
+
+    def fetch(self, page, auction_id, *, timeout_ms):
+        self.calls.append((page, auction_id, timeout_ms))
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+def test_managed_fetcher_delegates_through_run_on_page_with_the_real_page(monkeypatch):
+    browser = FakeBrowser()
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    delegate = RecordingAuctionDetailFetcher(result={"Auction ID": "1", "State": "Finished"})
+    fetcher = ManagedPrismaAuctionDetailFetcher(controller, delegate=delegate)
+
+    result = fetcher.fetch(None, "1", timeout_ms=5_000)
+
+    assert result == {"Auction ID": "1", "State": "Finished"}
+    assert delegate.calls == [(browser.page, "1", 5_000)]
+
+    controller.close()
+    join_worker(controller)
+
+
+def test_managed_fetcher_reports_a_typed_transport_error_when_no_session_is_open():
+    controller = PrismaLifecycleController()
+    delegate = RecordingAuctionDetailFetcher(result={"unused": True})
+    fetcher = ManagedPrismaAuctionDetailFetcher(controller, delegate=delegate)
+
+    with pytest.raises(PrismaAuctionDetailTransportError, match="No managed PRISMA session"):
+        fetcher.fetch(None, "1")
+
+    assert delegate.calls == []
+
+
+def test_managed_fetcher_propagates_the_delegates_own_transport_error(monkeypatch):
+    browser = FakeBrowser()
+    controller = PrismaLifecycleController()
+    controller._events = SignallingQueue()
+    install_fake_playwright(monkeypatch, lambda **kwargs: browser)
+
+    controller.open()
+    assert controller._events.ready.wait(2)
+
+    delegate = RecordingAuctionDetailFetcher(
+        error=PrismaAuctionDetailTransportError("official request failed")
+    )
+    fetcher = ManagedPrismaAuctionDetailFetcher(controller, delegate=delegate)
+
+    with pytest.raises(PrismaAuctionDetailTransportError, match="official request failed"):
+        fetcher.fetch(None, "1")
 
     controller.close()
     join_worker(controller)

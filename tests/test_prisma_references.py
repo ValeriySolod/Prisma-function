@@ -469,6 +469,117 @@ def test_original_source_value_and_physical_line_are_preserved_in_issue(tmp_path
     assert issue.source_value == original
 
 
+def test_currency_defaults_to_none_for_every_current_catalog_entry_except_vgs_storage_hub() -> None:
+    """P.36.19: no approved ISO 4217 currency evidence exists for any
+    market/storage entry except `VGS Storage Hub`, whose EUR metadata is
+    exact live PRISMA evidence (Auction ID 62756895; see ROADMAP.md's
+    P.36.19 entry). This locks in the documented outstanding-evidence gap
+    for every other entry so a future evidenced addition must update this
+    test deliberately."""
+    without_currency = [
+        entry for entry in DEFAULT_PRISMA_REFERENCES.entries
+        if entry.canonical_name != "VGS Storage Hub"
+    ]
+    assert without_currency
+    assert all(
+        entry.exit_currency is None and entry.entry_currency is None
+        for entry in without_currency
+    )
+
+
+def test_vgs_storage_hub_resolves_to_evidenced_eur_currency() -> None:
+    """Live Windows/PRISMA DevTools evidence (Auction ID 62756895, direction
+    EXIT, identifier 4290, TSO ONTRAS Gastransport GmbH) ties exactly this
+    catalog entry to ISO currency EUR, on the EXIT side only. No other entry
+    may receive this currency by inference."""
+    assert DEFAULT_PRISMA_REFERENCES.currency_for("VGS Storage Hub", ReferenceSide.EXIT) == "EUR"
+
+
+def test_vgs_storage_hub_entry_side_has_no_currency_evidence() -> None:
+    """Defect fix (2026-08-13): the live evidence proves only `direction:
+    EXIT`. The shared canonical `VGS Storage Hub` entry (aliased on both
+    EXIT and ENTRY for this one physical storage facility) must not leak
+    that EXIT-only evidence onto an ENTRY-side lookup of the same name."""
+    assert DEFAULT_PRISMA_REFERENCES.currency_for("VGS Storage Hub", ReferenceSide.ENTRY) is None
+    hub = next(
+        entry for entry in DEFAULT_PRISMA_REFERENCES.entries
+        if entry.canonical_name == "VGS Storage Hub"
+    )
+    assert hub.exit_currency == "EUR"
+    assert hub.entry_currency is None
+
+
+def test_currency_for_unknown_canonical_name_is_none() -> None:
+    assert DEFAULT_PRISMA_REFERENCES.currency_for("Not A Real Market", ReferenceSide.EXIT) is None
+    assert DEFAULT_PRISMA_REFERENCES.currency_for("Not A Real Market", ReferenceSide.ENTRY) is None
+
+
+def test_currency_for_known_market_without_evidence_is_none() -> None:
+    assert DEFAULT_PRISMA_REFERENCES.currency_for("CEGH", ReferenceSide.EXIT) is None
+
+
+def test_currency_for_evidenced_market_returns_approved_code() -> None:
+    catalog = PrismaReferenceCatalog((
+        PrismaReference(
+            "TEST", ReferenceClassification.MARKET,
+            (ReferenceAlias("Test Alias", ReferenceSide.EXIT),), exit_currency="USD",
+        ),
+    ))
+    assert catalog.currency_for("TEST", ReferenceSide.EXIT) == "USD"
+
+
+def test_currency_for_eur_market_returns_identity_currency() -> None:
+    catalog = PrismaReferenceCatalog((
+        PrismaReference(
+            "TEST-EUR", ReferenceClassification.MARKET,
+            (ReferenceAlias("Test Alias", ReferenceSide.EXIT),), exit_currency="EUR",
+        ),
+    ))
+    assert catalog.currency_for("TEST-EUR", ReferenceSide.EXIT) == "EUR"
+
+
+def test_currency_evidenced_only_on_exit_does_not_leak_to_entry() -> None:
+    """Regression guard for the EXIT/ENTRY currency-leak defect: a canonical
+    entry aliased on both sides with EXIT-only currency evidence must resolve
+    `None` for the ENTRY side of the very same canonical name."""
+    catalog = PrismaReferenceCatalog((
+        PrismaReference(
+            "BOTH-SIDES", ReferenceClassification.STORAGE,
+            (
+                ReferenceAlias("Both Sides Facility", ReferenceSide.EXIT),
+                ReferenceAlias("Both Sides Facility", ReferenceSide.ENTRY),
+            ),
+            exit_currency="USD",
+        ),
+    ))
+    assert catalog.currency_for("BOTH-SIDES", ReferenceSide.EXIT) == "USD"
+    assert catalog.currency_for("BOTH-SIDES", ReferenceSide.ENTRY) is None
+
+
+@pytest.mark.parametrize("invalid_currency", ["usd", "US", "USDD", "", "1SD", "US$", " USD"])
+def test_invalid_currency_shape_is_rejected(invalid_currency: str) -> None:
+    with pytest.raises(ValueError, match="ISO 4217"):
+        PrismaReferenceCatalog((
+            PrismaReference(
+                "TEST", ReferenceClassification.MARKET,
+                (ReferenceAlias("Test Alias", ReferenceSide.EXIT),),
+                exit_currency=invalid_currency,
+            ),
+        ))
+
+
+@pytest.mark.parametrize("invalid_currency", ["usd", "US", "USDD", "", "1SD", "US$", " USD"])
+def test_invalid_entry_currency_shape_is_rejected(invalid_currency: str) -> None:
+    with pytest.raises(ValueError, match="ISO 4217"):
+        PrismaReferenceCatalog((
+            PrismaReference(
+                "TEST", ReferenceClassification.MARKET,
+                (ReferenceAlias("Test Alias", ReferenceSide.ENTRY),),
+                entry_currency=invalid_currency,
+            ),
+        ))
+
+
 def test_rows_and_issues_remain_in_source_order_deterministically(tmp_path: Path) -> None:
     rows = [
         BASE,

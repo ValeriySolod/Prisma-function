@@ -4,13 +4,21 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from browser import PRISMA_AUCTIONS_URL as PRISMA_OFFICIAL_URL
 from browser import DefaultBrowserDetector, _ensure_subprocess_output_streams
 from date_range_selection import DateRange
+from prisma_auction_lookup import (
+    AuctionDetailFetcher,
+    DEFAULT_TIMEOUT_MS,
+    PlaywrightAuctionDetailFetcher,
+    PrismaAuctionDetailTransportError,
+)
 from prisma_download import (
     PrismaDownloadOrchestrator,
     describe_download_failure,
@@ -21,7 +29,9 @@ __all__ = [
     "PRISMA_OFFICIAL_URL",
     "PrismaLifecycleState",
     "PrismaLifecycleEvent",
+    "PrismaLifecycleNoActivePageError",
     "PrismaLifecycleController",
+    "ManagedPrismaAuctionDetailFetcher",
 ]
 
 
@@ -40,6 +50,27 @@ class PrismaLifecycleEvent:
     error: str | None = None
     kind: str = "open"
     csv_path: Path | None = None
+
+
+class PrismaLifecycleNoActivePageError(RuntimeError):
+    """No managed PRISMA session/page is currently available to service a
+    `PrismaLifecycleController.run_on_page()` request: no session is open,
+    the session closed before the request could run, or the request timed
+    out waiting for the owner thread. Never raised for a reason other than
+    page unavailability."""
+
+
+@dataclass
+class _PageTask:
+    """One `run_on_page()` request, drained and executed only by
+    `PrismaLifecycleController`'s own worker thread (see
+    `_drain_page_tasks`), since Playwright's sync API is not safe to call
+    from any other thread. `box` carries back exactly one of `"result"` or
+    `"error"`, set immediately before `event` is set."""
+
+    func: Callable[[object], Any]
+    event: threading.Event
+    box: dict
 
 
 class PrismaLifecycleController:
@@ -70,6 +101,7 @@ class PrismaLifecycleController:
         self._browser = None
         self._thread: threading.Thread | None = None
         self._events: queue.SimpleQueue[PrismaLifecycleEvent] = queue.SimpleQueue()
+        self._task_queue: "queue.SimpleQueue[_PageTask]" = queue.SimpleQueue()
 
     def _log(self, level: int, message: str, *args, **kwargs) -> None:
         safe_log(self._logger, level, message, *args, **kwargs)
@@ -200,6 +232,67 @@ class PrismaLifecycleController:
             return True
         thread.join(timeout=timeout)
         return not thread.is_alive()
+
+    def run_on_page(
+        self, func: Callable[[object], Any], *, timeout: float = 20.0
+    ) -> Any:
+        """Execute ``func(page)`` on this controller's own owner thread, using
+        the currently open managed Playwright page.
+
+        Playwright's sync API may only be driven from the thread that started
+        it — this controller's dedicated `_run()` worker thread — so calling
+        page methods directly from another thread (e.g. the Qt UI thread) is
+        unsafe. This marshals `func` onto that thread instead of ever
+        exposing the raw page object to the caller, and blocks the calling
+        thread (bounded by `timeout`) for the result.
+
+        Raises `PrismaLifecycleNoActivePageError` if no session is currently
+        open, if the session closes before `func` can run, or if `timeout`
+        elapses first. Otherwise returns `func`'s own return value, or
+        re-raises whatever exception `func` itself raised.
+        """
+        with self._lock:
+            if self._state is not PrismaLifecycleState.OPEN:
+                raise PrismaLifecycleNoActivePageError(
+                    "No managed PRISMA session is open."
+                )
+        task = _PageTask(func, threading.Event(), {})
+        self._task_queue.put(task)
+        if not task.event.wait(timeout):
+            raise PrismaLifecycleNoActivePageError(
+                "Timed out waiting for the managed PRISMA session to "
+                "process the request."
+            )
+        if "error" in task.box:
+            raise task.box["error"]
+        return task.box["result"]
+
+    def _drain_page_tasks(self, page: object | None) -> None:
+        """Execute every currently queued `run_on_page()` task using `page`.
+
+        Called only from `_run()`'s own worker thread: once while the loop
+        is polling (with the live `page`), and once more during teardown
+        with `page=None`, which fails every remaining queued task explicitly
+        instead of leaving its caller to hang until its own timeout.
+        """
+        while True:
+            try:
+                task = self._task_queue.get_nowait()
+            except queue.Empty:
+                return
+            if page is None:
+                task.box["error"] = PrismaLifecycleNoActivePageError(
+                    "The managed PRISMA session closed before this request "
+                    "could run."
+                )
+                task.event.set()
+                continue
+            try:
+                task.box["result"] = task.func(page)
+            except Exception as exc:
+                task.box["error"] = exc
+            finally:
+                task.event.set()
 
     def _run(
         self,
@@ -404,6 +497,7 @@ class PrismaLifecycleController:
                 return
 
             while not cancel_event.wait(0.1):
+                self._drain_page_tasks(page)
                 if managed_download and not download_finalized:
                     result = self._download_orchestrator.await_and_finalize(
                         download_waiter, date_range, download_directory,
@@ -440,6 +534,10 @@ class PrismaLifecycleController:
             # unconditionally is always safe.
             if download_waiter is not None:
                 download_waiter.detach()
+            # Fail (rather than silently drop) any run_on_page() request that
+            # arrived exactly as teardown began: it can no longer be safely
+            # executed against a page about to be closed.
+            self._drain_page_tasks(None)
             cleanup_failed = False
             if browser is not None:
                 try:
@@ -506,3 +604,56 @@ class PrismaLifecycleController:
                 "cleanup_failed=%s",
                 generation, self.state.value, cleanup_reason, cleanup_failed,
             )
+
+
+class ManagedPrismaAuctionDetailFetcher:
+    """P.36.19 `AuctionDetailFetcher` adapter that reuses this application's
+    single already-open managed PRISMA session instead of opening a second,
+    uncontrolled browser or session.
+
+    This is the one piece of Playwright-transport code that bridges
+    `PrismaLifecycleController`'s owned page to `prisma_auction_lookup`'s
+    existing `AuctionDetailFetcher` protocol, keeping Playwright transport
+    logic out of the P.36.19 business/presentation layers
+    (`rate_resolution.py`, `mapping_presentation.py`, `app.py`). The real
+    request is delegated to the already-tested `PlaywrightAuctionDetailFetcher`,
+    but always executed via `PrismaLifecycleController.run_on_page()` so it
+    runs on the controller's own owner thread — never on the caller's thread
+    (typically the Qt UI thread), where Playwright's sync API is unsafe to
+    use (see `run_on_page`'s docstring).
+
+    The `page` parameter `fetch()` receives (required to satisfy the
+    `AuctionDetailFetcher` protocol) is intentionally unused: the real page
+    is supplied internally, from the owning controller's own worker thread,
+    never from the caller.
+    """
+
+    def __init__(
+        self,
+        lifecycle: PrismaLifecycleController,
+        *,
+        delegate: AuctionDetailFetcher | None = None,
+        thread_margin_seconds: float = 5.0,
+    ) -> None:
+        self._lifecycle = lifecycle
+        self._delegate = (
+            delegate if delegate is not None else PlaywrightAuctionDetailFetcher()
+        )
+        self._thread_margin_seconds = thread_margin_seconds
+
+    def fetch(
+        self, page: object, auction_id: str, *, timeout_ms: int = DEFAULT_TIMEOUT_MS
+    ) -> dict:
+        def _fetch_on_owner_thread(managed_page: object):
+            return self._delegate.fetch(managed_page, auction_id, timeout_ms=timeout_ms)
+
+        try:
+            return self._lifecycle.run_on_page(
+                _fetch_on_owner_thread,
+                timeout=(timeout_ms / 1000.0) + self._thread_margin_seconds,
+            )
+        except PrismaLifecycleNoActivePageError as exc:
+            raise PrismaAuctionDetailTransportError(
+                "No managed PRISMA session is available to look up Auction "
+                f"ID {auction_id}."
+            ) from exc

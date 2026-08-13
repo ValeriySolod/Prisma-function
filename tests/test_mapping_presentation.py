@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +14,7 @@ from mapping_presentation import (
     build_mapping_rows,
 )
 from processor import PrismaImportIssue, PrismaImportResult, PrismaImportStatus, import_prisma_export
+from rate_resolution import RateResolutionOutcome, RateResolutionResult
 
 BASE = {
     "Auction ID": "1", "Start of Auction": "01.01.2025 09:00",
@@ -21,6 +24,8 @@ BASE = {
     "Regulated Tariff Entry TSO": "0.75", "Unit Regulated Entry Capacity Tariff": "cent/kWh/h/Runtime",
     "Surcharge": "0,5", "Unit Surcharge": "cent/kWh/h/Runtime",
 }
+
+UNRESOLVED = ("Unresolved", "Unresolved", "Unresolved")
 
 
 def write_csv(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.csv") -> Path:
@@ -35,17 +40,24 @@ def write_csv(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.cs
 
 def test_mapping_display_fields_exact_order_and_spelling() -> None:
     assert MAPPING_DISPLAY_FIELDS == (
-        "Exit Market", "Entry Market", "Network Point Name",
-        "TSO Name Exit", "TSO Name Entry",
+        "Auction Date", "Exit Market", "Entry Market", "Network Point Name",
+        "TSO Name Exit", "TSO Name Entry", "Booked Capacity",
+        "Currency", "Rate to EUR", "Rate Date",
     )
 
 
 # --- pure field mapping and ordering (no processor/catalog involved) --------
 
+_AUCTION_DATE = "2025-01-01T09:00:00"
+_BOOKED_CAPACITY = "1000.0"
+
+
 def _row(**overrides) -> dict:
     row = {
         "exit_market": "", "entry_market": "", "network_point": "",
         "tso_exit": "", "tso_entry": "", "flow_start": "2025-01-01T00:00:00",
+        "auction_id": "1", "auction_date": _AUCTION_DATE,
+        "booked_capacity_kwh_h": 1000.0,
     }
     row.update(overrides)
     return row
@@ -67,13 +79,29 @@ def test_build_mapping_rows_maps_fields_in_exact_order() -> None:
     ])
     rows = build_mapping_rows(result)
     assert rows == (
-        MappingDisplayRow("CEGH", "PSV", "Point A", "TSO-A", "TSO-B"),
+        MappingDisplayRow(
+            _AUCTION_DATE, "CEGH", "PSV", "Point A", "TSO-A", "TSO-B",
+            _BOOKED_CAPACITY, *UNRESOLVED,
+        ),
     )
+
+
+def test_build_mapping_rows_populates_auction_date_and_booked_capacity_from_row_fields() -> None:
+    # Distinct values from every other test's defaults, so this cannot pass
+    # by coincidentally matching a hardcoded/default value.
+    result = _result([
+        _row(auction_date="2026-03-04T12:30:00", booked_capacity_kwh_h=2500.5),
+    ])
+    row = build_mapping_rows(result)[0]
+    assert row.auction_date == "2026-03-04T12:30:00"
+    assert row.booked_capacity == "2500.5"
 
 
 def test_build_mapping_rows_preserves_row_order_across_multiple_rows() -> None:
     result = _result([
-        _row(exit_market="A"), _row(exit_market="B"), _row(exit_market="C"),
+        _row(exit_market="A", auction_id="1"),
+        _row(exit_market="B", auction_id="2"),
+        _row(exit_market="C", auction_id="3"),
     ])
     rows = build_mapping_rows(result)
     assert [row.exit_market for row in rows] == ["A", "B", "C"]
@@ -116,9 +144,9 @@ def test_build_mapping_rows_does_not_swap_or_infer_across_sides() -> None:
 
 def test_build_mapping_rows_orders_by_flow_start_descending() -> None:
     result = _result([
-        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00"),
-        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00"),
-        _row(exit_market="Feb", flow_start="2025-02-01T00:00:00"),
+        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00", auction_id="1"),
+        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00", auction_id="2"),
+        _row(exit_market="Feb", flow_start="2025-02-01T00:00:00", auction_id="3"),
     ])
     rows = build_mapping_rows(result)
     assert [row.exit_market for row in rows] == ["Mar", "Feb", "Jan"]
@@ -126,9 +154,9 @@ def test_build_mapping_rows_orders_by_flow_start_descending() -> None:
 
 def test_build_mapping_rows_equal_flow_start_preserves_original_order() -> None:
     result = _result([
-        _row(exit_market="A", flow_start="2025-06-01T00:00:00"),
-        _row(exit_market="B", flow_start="2025-06-01T00:00:00"),
-        _row(exit_market="C", flow_start="2025-06-01T00:00:00"),
+        _row(exit_market="A", flow_start="2025-06-01T00:00:00", auction_id="1"),
+        _row(exit_market="B", flow_start="2025-06-01T00:00:00", auction_id="2"),
+        _row(exit_market="C", flow_start="2025-06-01T00:00:00", auction_id="3"),
     ])
     rows = build_mapping_rows(result)
     assert [row.exit_market for row in rows] == ["A", "B", "C"]
@@ -139,16 +167,24 @@ def test_build_mapping_rows_sorting_keeps_complete_row_data_together() -> None:
         _row(
             exit_market="Early", entry_market="Early-Entry", network_point="Early-Point",
             tso_exit="Early-TSO-X", tso_entry="Early-TSO-Y", flow_start="2025-01-01T00:00:00",
+            auction_id="1",
         ),
         _row(
             exit_market="Late", entry_market="Late-Entry", network_point="Late-Point",
             tso_exit="Late-TSO-X", tso_entry="Late-TSO-Y", flow_start="2025-12-01T00:00:00",
+            auction_id="2",
         ),
     ])
     rows = build_mapping_rows(result)
     assert rows == (
-        MappingDisplayRow("Late", "Late-Entry", "Late-Point", "Late-TSO-X", "Late-TSO-Y"),
-        MappingDisplayRow("Early", "Early-Entry", "Early-Point", "Early-TSO-X", "Early-TSO-Y"),
+        MappingDisplayRow(
+            _AUCTION_DATE, "Late", "Late-Entry", "Late-Point", "Late-TSO-X", "Late-TSO-Y",
+            _BOOKED_CAPACITY, *UNRESOLVED,
+        ),
+        MappingDisplayRow(
+            _AUCTION_DATE, "Early", "Early-Entry", "Early-Point", "Early-TSO-X", "Early-TSO-Y",
+            _BOOKED_CAPACITY, *UNRESOLVED,
+        ),
     )
 
 
@@ -160,12 +196,106 @@ def test_build_mapping_rows_single_row_input_is_valid() -> None:
 
 def test_build_mapping_rows_does_not_mutate_import_result_rows_order() -> None:
     imported_rows = [
-        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00"),
-        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00"),
+        _row(exit_market="Jan", flow_start="2025-01-01T00:00:00", auction_id="1"),
+        _row(exit_market="Mar", flow_start="2025-03-01T00:00:00", auction_id="2"),
     ]
     result = _result(imported_rows)
     build_mapping_rows(result)
     assert [row["exit_market"] for row in result.imported_rows] == ["Jan", "Mar"]
+
+
+# --- P.36.19: Currency / Rate to EUR / Rate Date columns ---------------------
+
+def test_row_without_a_supplied_resolution_shows_unresolved_placeholder() -> None:
+    result = _result([_row(auction_id="1")])
+    row = build_mapping_rows(result)[0]
+    assert (row.currency, row.rate_to_eur, row.rate_date) == UNRESOLVED
+
+
+def test_row_with_no_resolutions_argument_shows_unresolved_placeholder() -> None:
+    result = _result([_row(auction_id="1")])
+    row = build_mapping_rows(result, None)[0]
+    assert (row.currency, row.rate_to_eur, row.rate_date) == UNRESOLVED
+
+
+def test_resolved_row_displays_currency_rate_and_date() -> None:
+    result = _result([_row(auction_id="1")])
+    resolutions = {
+        "1": RateResolutionResult(
+            RateResolutionOutcome.RESOLVED,
+            currency="USD", rate_to_eur=Decimal("0.9156670635"), rate_date=date(2026, 8, 3),
+        ),
+    }
+    row = build_mapping_rows(result, resolutions)[0]
+    assert (row.currency, row.rate_to_eur, row.rate_date) == (
+        "USD", "0.9156670635", "2026-08-03",
+    )
+
+
+def test_eur_row_displays_identity_rate_and_auction_end_date() -> None:
+    result = _result([_row(auction_id="1")])
+    resolutions = {
+        "1": RateResolutionResult(
+            RateResolutionOutcome.RESOLVED,
+            currency="EUR", rate_to_eur=Decimal(1), rate_date=date(2026, 8, 3),
+        ),
+    }
+    row = build_mapping_rows(result, resolutions)[0]
+    assert (row.currency, row.rate_to_eur, row.rate_date) == ("EUR", "1", "2026-08-03")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_text"),
+    [
+        (RateResolutionOutcome.NOT_FINISHED, "Not finished"),
+        (RateResolutionOutcome.AUCTION_END_UNAVAILABLE, "Unavailable"),
+        (RateResolutionOutcome.CURRENCY_UNKNOWN, "Unknown"),
+        (RateResolutionOutcome.ECB_RATE_UNAVAILABLE, "Unavailable"),
+        (RateResolutionOutcome.CONFLICT, "Unresolved"),
+    ],
+)
+def test_unresolved_outcomes_never_display_a_fabricated_rate(outcome, expected_text) -> None:
+    result = _result([_row(auction_id="1")])
+    resolutions = {"1": RateResolutionResult(outcome, message="technical detail")}
+    row = build_mapping_rows(result, resolutions)[0]
+    assert (row.currency, row.rate_to_eur, row.rate_date) == (
+        expected_text, expected_text, expected_text,
+    )
+    # Technical diagnostic detail never leaks into the Mapping display text.
+    assert "technical detail" not in (row.currency, row.rate_to_eur, row.rate_date)
+
+
+def test_multiple_rows_sharing_one_auction_id_share_one_resolution() -> None:
+    result = _result([
+        _row(auction_id="1", network_point="A", flow_start="2025-01-01T00:00:00"),
+        _row(auction_id="1", network_point="B", flow_start="2025-02-01T00:00:00"),
+    ])
+    resolutions = {
+        "1": RateResolutionResult(
+            RateResolutionOutcome.RESOLVED,
+            currency="USD", rate_to_eur=Decimal("1.1"), rate_date=date(2026, 8, 3),
+        ),
+    }
+    rows = build_mapping_rows(result, resolutions)
+    assert all(row.currency == "USD" for row in rows)
+
+
+def test_two_auctions_show_independently_resolved_rates() -> None:
+    result = _result([
+        _row(auction_id="1", network_point="A", flow_start="2025-01-01T00:00:00"),
+        _row(auction_id="2", network_point="B", flow_start="2025-02-01T00:00:00"),
+    ])
+    resolutions = {
+        "1": RateResolutionResult(
+            RateResolutionOutcome.RESOLVED,
+            currency="USD", rate_to_eur=Decimal("1.1"), rate_date=date(2026, 8, 3),
+        ),
+        "2": RateResolutionResult(RateResolutionOutcome.NOT_FINISHED),
+    }
+    rows = build_mapping_rows(result, resolutions)
+    by_point = {row.network_point_name: row for row in rows}
+    assert by_point["A"].currency == "USD"
+    assert by_point["B"].currency == "Not finished"
 
 
 # --- integration through the real P.36.15 import/enrichment boundary --------
@@ -181,7 +311,10 @@ def test_exit_only_row_resolves_market_through_exit_market_field(tmp_path: Path)
     assert imported.rejected_count == 0 and imported.filtered_count == 0
     display = build_mapping_rows(imported)
     assert display == (
-        MappingDisplayRow("THE", "", "VIP DK-THE (H646) (H646)", "GTE", ""),
+        MappingDisplayRow(
+            _AUCTION_DATE, "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "",
+            _BOOKED_CAPACITY, *UNRESOLVED,
+        ),
     )
 
 
@@ -196,7 +329,10 @@ def test_entry_only_row_resolves_storage_through_entry_market_field(tmp_path: Pa
     assert imported.rejected_count == 0 and imported.filtered_count == 0
     display = build_mapping_rows(imported)
     assert display == (
-        MappingDisplayRow("", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD"),
+        MappingDisplayRow(
+            _AUCTION_DATE, "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD",
+            _BOOKED_CAPACITY, *UNRESOLVED,
+        ),
     )
 
 
@@ -221,7 +357,8 @@ def test_bundle_row_resolves_each_side_independently_with_no_cross_side_leakage(
     display = build_mapping_rows(imported)
     assert display == (
         MappingDisplayRow(
-            "CEGH", "PSV", "Arnoldstein Bundle Point", "TSO-A", "TSO-B",
+            _AUCTION_DATE, "CEGH", "PSV", "Arnoldstein Bundle Point", "TSO-A", "TSO-B",
+            _BOOKED_CAPACITY, *UNRESOLVED,
         ),
     )
 

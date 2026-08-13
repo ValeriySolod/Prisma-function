@@ -59,12 +59,14 @@ QLabel#primaryStatus { color: #314157; font-weight: 600; }
 
 
 class MappingTableModel(QAbstractTableModel):
-    """P.36.8 Qt presentation of already-resolved mapping evidence.
+    """P.36.8/P.36.19 Qt presentation of already-resolved mapping evidence.
 
     Consumes only `mapping_presentation.MappingDisplayRow` values built from
-    one already-completed P.36.15 import result; this model performs no
+    one already-completed P.36.15 import result (and, for the P.36.19
+    Currency/Rate to EUR/Rate Date columns, already-computed
+    `rate_resolution.RateResolutionResult` values); this model performs no
     parsing, resolution, or business logic of its own, and never adds,
-    removes, renames, or reorders the five presentation fields.
+    removes, renames, or reorders the 10-column presentation fields.
     """
 
     HEADERS = MAPPING_DISPLAY_FIELDS
@@ -91,8 +93,9 @@ class MappingTableModel(QAbstractTableModel):
             return None
         row = self.rows[index.row()]
         values = (
-            row.exit_market, row.entry_market, row.network_point_name,
-            row.tso_name_exit, row.tso_name_entry,
+            row.auction_date, row.exit_market, row.entry_market, row.network_point_name,
+            row.tso_name_exit, row.tso_name_entry, row.booked_capacity,
+            row.currency, row.rate_to_eur, row.rate_date,
         )
         return values[index.column()]
 
