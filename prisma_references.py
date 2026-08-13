@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Iterable, Mapping
+
+_ISO_4217_PATTERN = re.compile(r"^[A-Z]{3}\Z")
 
 
 class ReferenceClassification(str, Enum):
@@ -27,6 +30,20 @@ class PrismaReference:
     canonical_name: str
     classification: ReferenceClassification
     aliases: tuple[ReferenceAlias, ...]
+    # ISO 4217 currency code for this canonical market/storage, only when
+    # explicitly evidenced/approved (see ROADMAP.md's P.36.19 outstanding
+    # evidence item). `None` means no approved currency decision exists yet;
+    # callers must never guess one, per the P.36.19 currency-resolution rules.
+    #
+    # Side-specific, never a single shared field: a canonical entry (e.g. a
+    # physical storage facility such as VGS Storage Hub) can carry aliases on
+    # both EXIT and ENTRY, and evidence gathered for one side (a specific
+    # `direction` in the live PRISMA auction-detail response) must never leak
+    # onto the other side, per CLAUDE.md's "Entry and Exit evidence are
+    # side-specific" rule. A currency evidenced only for EXIT keeps
+    # `entry_currency=None` on the very same entry, and vice versa.
+    exit_currency: str | None = None
+    entry_currency: str | None = None
 
 
 def normalize_reference_alias(value: str) -> str:
@@ -41,6 +58,7 @@ class PrismaReferenceCatalog:
         immutable_entries = tuple(entries)
         index: dict[tuple[ReferenceSide, str], PrismaReference] = {}
         canonical_names: set[str] = set()
+        by_canonical_name: dict[str, PrismaReference] = {}
         for entry in immutable_entries:
             if not entry.canonical_name.strip():
                 raise ValueError("Reference canonical names must not be blank.")
@@ -48,12 +66,23 @@ class PrismaReferenceCatalog:
                 raise ValueError(
                     "Reference canonical names must not have surrounding whitespace."
                 )
+            for side_label, side_currency in (
+                ("exit_currency", entry.exit_currency),
+                ("entry_currency", entry.entry_currency),
+            ):
+                if side_currency is not None and not _ISO_4217_PATTERN.match(side_currency):
+                    raise ValueError(
+                        f"Reference currency must be an exact three-letter uppercase "
+                        f"ISO 4217 code or None: {entry.canonical_name} has "
+                        f"{side_label}={side_currency!r}."
+                    )
             canonical_key = entry.canonical_name.strip().casefold()
             if canonical_key in canonical_names:
                 raise ValueError(
                     f"Duplicate reference canonical name: {entry.canonical_name}."
                 )
             canonical_names.add(canonical_key)
+            by_canonical_name[entry.canonical_name] = entry
             for alias in entry.aliases:
                 normalized = normalize_reference_alias(alias.source_value)
                 if not normalized:
@@ -69,6 +98,9 @@ class PrismaReferenceCatalog:
         self._index: Mapping[tuple[ReferenceSide, str], PrismaReference] = (
             MappingProxyType(index)
         )
+        self._by_canonical_name: Mapping[str, PrismaReference] = MappingProxyType(
+            by_canonical_name
+        )
 
     @property
     def entries(self) -> tuple[PrismaReference, ...]:
@@ -77,13 +109,38 @@ class PrismaReferenceCatalog:
     def lookup(self, source_value: str, side: ReferenceSide) -> PrismaReference | None:
         return self._index.get((side, normalize_reference_alias(source_value)))
 
+    def currency_for(self, canonical_name: str, side: ReferenceSide) -> str | None:
+        """Return the approved ISO 4217 currency for an already-resolved canonical
+        market/storage name on the given side, or `None` when no approved
+        currency decision exists for that exact side.
+
+        This never guesses: an unknown canonical name and a known one with no
+        approved currency metadata for the requested side both return `None`;
+        callers must treat both as a missing-currency resolution failure,
+        never as EUR or any other fabricated default. Evidence approved only
+        for one side (e.g. EXIT) never leaks into the other (ENTRY), even
+        when both sides share the same canonical entry.
+        """
+        entry = self._by_canonical_name.get(canonical_name)
+        if entry is None:
+            return None
+        return entry.exit_currency if side is ReferenceSide.EXIT else entry.entry_currency
+
 
 def _market(
-    canonical_name: str, *, exit_aliases: tuple[str, ...] = (), entry_aliases: tuple[str, ...] = ()
+    canonical_name: str,
+    *,
+    exit_aliases: tuple[str, ...] = (),
+    entry_aliases: tuple[str, ...] = (),
+    exit_currency: str | None = None,
+    entry_currency: str | None = None,
 ) -> PrismaReference:
     aliases = tuple(ReferenceAlias(value, ReferenceSide.EXIT) for value in exit_aliases)
     aliases += tuple(ReferenceAlias(value, ReferenceSide.ENTRY) for value in entry_aliases)
-    return PrismaReference(canonical_name, ReferenceClassification.MARKET, aliases)
+    return PrismaReference(
+        canonical_name, ReferenceClassification.MARKET, aliases,
+        exit_currency, entry_currency,
+    )
 
 
 def _storage(
@@ -91,6 +148,8 @@ def _storage(
     *,
     exit_aliases: tuple[str, ...] = (),
     entry_aliases: tuple[str, ...] = (),
+    exit_currency: str | None = None,
+    entry_currency: str | None = None,
 ) -> PrismaReference:
     side_aliases = tuple(
         ReferenceAlias(value, ReferenceSide.EXIT) for value in exit_aliases
@@ -99,7 +158,8 @@ def _storage(
         ReferenceAlias(value, ReferenceSide.ENTRY) for value in entry_aliases
     )
     return PrismaReference(
-        canonical_name, ReferenceClassification.STORAGE, side_aliases
+        canonical_name, ReferenceClassification.STORAGE, side_aliases,
+        exit_currency, entry_currency,
     )
 
 
@@ -210,12 +270,28 @@ def _storage_catalog_entries() -> tuple[PrismaReference, ...]:
         "Zone UGS EWE H-Gas (37Z000000007514V)",
         "Zone UGS EWE L-Gas (21W0000000000176)",
     )
+    # Live Windows/PRISMA DevTools evidence (Auction ID 62756895, 2026-08-13;
+    # see ROADMAP.md's P.36.19 entry): the official auction-detail API tied
+    # this exact catalog identity — VGS Storage Hub, identifier 4290,
+    # direction EXIT, TSO ONTRAS Gastransport GmbH — to ISO currency EUR.
+    # This is the only catalog entry with approved currency evidence, and the
+    # evidence is EXIT-only: the source value is aliased on both EXIT and
+    # ENTRY for this one physical storage facility (see below), but only
+    # `exit_currency` is set here — `entry_currency` stays `None` since no
+    # ENTRY-side evidence exists, so the EXIT evidence can never leak onto an
+    # ENTRY-side auction for the same canonical name (2026-08-13 defect fix;
+    # see ROADMAP.md's P.36.19 entry). Every other entry below intentionally
+    # keeps both currencies `None` until its own exact, evidenced decision
+    # exists (never inferred from this one).
+    _VGS_STORAGE_HUB_SOURCE_VALUE = "VGS Storage Hub (4290)"
     source_values = tuple(dict.fromkeys(exit_aliases + entry_aliases))
     return tuple(
         _storage(
-            "VGS Storage Hub" if source_value == "VGS Storage Hub (4290)" else source_value,
+            "VGS Storage Hub" if source_value == _VGS_STORAGE_HUB_SOURCE_VALUE else source_value,
             exit_aliases=(source_value,) if source_value in exit_aliases else (),
             entry_aliases=(source_value,) if source_value in entry_aliases else (),
+            exit_currency="EUR" if source_value == _VGS_STORAGE_HUB_SOURCE_VALUE else None,
+            entry_currency=None,
         )
         for source_value in source_values
     )

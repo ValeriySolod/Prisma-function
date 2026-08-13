@@ -7,7 +7,13 @@ import pytest
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from storage import AuctionStorage, AuctionStorageError, HistoricalBackfillStatus
+from storage import (
+    AuctionStorage,
+    AuctionStorageError,
+    HistoricalBackfillStatus,
+    RateResolutionConflictError,
+    RateResolutionRecord,
+)
 
 
 APPROVED_EXCEL_COLUMN_WIDTHS = {
@@ -828,3 +834,87 @@ def test_migration_failure_remains_primary_when_close_fails(tmp_path, monkeypatc
             "SELECT count(*) FROM sqlite_master WHERE type='table' "
             "AND name='historical_market_storage_runs'"
         ).fetchone()[0] == 0
+
+
+def _rate_resolution(**overrides) -> RateResolutionRecord:
+    fields = dict(
+        auction_id="62333921",
+        auction_state="Finished",
+        auction_end_at="2026-08-03T14:30:00+02:00",
+        currency="USD",
+        ecb_publication_date="2026-08-03",
+        rate_to_eur="0.9156670635",
+        resolved_at_utc="2026-08-04T09:00:00+00:00",
+        source_version="prisma_auction_lookup=1;ecb_rates=1",
+    )
+    fields.update(overrides)
+    return RateResolutionRecord(**fields)
+
+
+def test_get_rate_resolution_returns_none_when_unresolved(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    assert storage.get_rate_resolution("62333921") is None
+
+
+def test_save_and_get_rate_resolution_round_trips(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    record = _rate_resolution()
+    saved = storage.save_rate_resolution(record)
+    assert saved == record
+    assert storage.get_rate_resolution("62333921") == record
+
+
+def test_save_rate_resolution_is_idempotent_for_identical_data(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_rate_resolution(_rate_resolution())
+    second = storage.save_rate_resolution(_rate_resolution(resolved_at_utc="2099-01-01T00:00:00+00:00"))
+    # resolved_at_utc is excluded from the equality check: reuse is a no-op
+    # and returns the originally fixed record, never overwritten by a later
+    # resolution timestamp alone.
+    assert second == first
+    assert storage.get_rate_resolution("62333921").resolved_at_utc == first.resolved_at_utc
+
+
+def test_save_rate_resolution_rejects_contradicting_currency(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_rate_resolution(_rate_resolution())
+    with pytest.raises(RateResolutionConflictError):
+        storage.save_rate_resolution(_rate_resolution(currency="GBP"))
+    # The previously fixed record is untouched by the rejected attempt.
+    assert storage.get_rate_resolution("62333921").currency == "USD"
+
+
+def test_save_rate_resolution_rejects_contradicting_rate(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_rate_resolution(_rate_resolution())
+    with pytest.raises(RateResolutionConflictError):
+        storage.save_rate_resolution(_rate_resolution(rate_to_eur="0.5"))
+
+
+def test_save_rate_resolution_rejects_contradicting_auction_end(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_rate_resolution(_rate_resolution())
+    with pytest.raises(RateResolutionConflictError):
+        storage.save_rate_resolution(
+            _rate_resolution(auction_end_at="2026-08-04T14:30:00+02:00")
+        )
+
+
+def test_two_distinct_auction_ids_are_resolved_independently(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_rate_resolution(_rate_resolution(auction_id="1", ecb_publication_date="2026-08-01"))
+    second = storage.save_rate_resolution(
+        _rate_resolution(auction_id="2", ecb_publication_date="2026-08-05", rate_to_eur="1.0")
+    )
+    assert storage.get_rate_resolution("1") == first
+    assert storage.get_rate_resolution("2") == second
+    assert first.ecb_publication_date != second.ecb_publication_date
+
+
+def test_rate_resolution_table_created_idempotently(tmp_path) -> None:
+    path = tmp_path / "test.db"
+    AuctionStorage(path)
+    AuctionStorage(path)  # second construction must not fail or reset data
+    storage = AuctionStorage(path)
+    storage.save_rate_resolution(_rate_resolution())
+    assert storage.get_rate_resolution("62333921") is not None

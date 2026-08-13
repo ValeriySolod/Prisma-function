@@ -68,6 +68,28 @@ class HistoricalBackfillSummary:
     audit: tuple[HistoricalBackfillAudit, ...]
 
 
+class RateResolutionConflictError(AuctionStorageError):
+    """A previously fixed P.36.19 rate resolution contradicts newly retrieved
+    authoritative data. The previously fixed result is never silently
+    overwritten."""
+
+
+@dataclass(frozen=True)
+class RateResolutionRecord:
+    """One deterministically fixed P.36.19 auction-end/currency/ECB-rate
+    resolution, keyed by Auction ID, sufficient to audit the resolution
+    safely without repeating the PRISMA/ECB lookups it required."""
+
+    auction_id: str
+    auction_state: str
+    auction_end_at: str
+    currency: str
+    ecb_publication_date: str
+    rate_to_eur: str
+    resolved_at_utc: str
+    source_version: str
+
+
 class AuctionStorage:
     AUCTION_IDENTITY_FIELDS = (
         "auction_id", "network_point_id", "direction", "flow_start", "flow_end",
@@ -140,6 +162,21 @@ class AuctionStorage:
         "Status": 14,
     }
     EXCEL_WIDTH_TOLERANCE = 1e-6
+    RATE_RESOLUTION_FIELDS = (
+        "auction_id", "auction_state", "auction_end_at", "currency",
+        "ecb_publication_date", "rate_to_eur", "resolved_at_utc", "source_version",
+    )
+    RATE_RESOLUTIONS_SQL = """CREATE TABLE IF NOT EXISTS auction_rate_resolutions (
+        auction_id TEXT PRIMARY KEY,
+        auction_state TEXT NOT NULL,
+        auction_end_at TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        ecb_publication_date TEXT NOT NULL,
+        rate_to_eur TEXT NOT NULL,
+        resolved_at_utc TEXT NOT NULL,
+        source_version TEXT NOT NULL
+    )"""
+
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self.database_path = database_path
@@ -240,6 +277,7 @@ class AuctionStorage:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(source_date)
                 )""",
+                    self.RATE_RESOLUTIONS_SQL,
             ):
                 connection.execute(statement)
             self._ensure_historical_schema(connection)
@@ -655,6 +693,66 @@ class AuctionStorage:
             ).rowcount
             if changed != 1:
                 raise AuctionStorageError("The PRISMA operation could not be finalized safely.")
+
+    def get_rate_resolution(self, auction_id: str) -> RateResolutionRecord | None:
+        """Return the previously fixed P.36.19 rate resolution for `auction_id`,
+        or `None` when no resolution has been fixed yet."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM auction_rate_resolutions WHERE auction_id = ?",
+                (auction_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return RateResolutionRecord(**{
+            field: row[field] for field in self.RATE_RESOLUTION_FIELDS
+        })
+
+    def save_rate_resolution(self, record: RateResolutionRecord) -> RateResolutionRecord:
+        """Atomically fix one new P.36.19 rate resolution.
+
+        Reusing an identical previously fixed resolution is a no-op that
+        returns the existing record unchanged (`resolved_at_utc` is excluded
+        from the equality check, since reuse must not fail merely because
+        time has passed). Any other difference from a previously fixed
+        record for the same Auction ID is a contradiction between cached
+        data and newly retrieved authoritative data, and raises
+        `RateResolutionConflictError` with both records for diagnostics
+        instead of silently overwriting the previously fixed result.
+        """
+        with self._connection() as connection, self._transaction(connection):
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                "SELECT * FROM auction_rate_resolutions WHERE auction_id = ?",
+                (record.auction_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = RateResolutionRecord(**{
+                    field: existing_row[field] for field in self.RATE_RESOLUTION_FIELDS
+                })
+                comparable = [
+                    field for field in self.RATE_RESOLUTION_FIELDS
+                    if field != "resolved_at_utc"
+                ]
+                if all(getattr(existing, field) == getattr(record, field) for field in comparable):
+                    return existing
+                raise RateResolutionConflictError(
+                    "A previously fixed rate resolution for Auction ID "
+                    f"{record.auction_id} contradicts newly retrieved data: "
+                    f"existing={existing!r} new={record!r}."
+                )
+            connection.execute(
+                "INSERT INTO auction_rate_resolutions "
+                "(auction_id, auction_state, auction_end_at, currency, "
+                "ecb_publication_date, rate_to_eur, resolved_at_utc, source_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.auction_id, record.auction_state, record.auction_end_at,
+                    record.currency, record.ecb_publication_date, record.rate_to_eur,
+                    record.resolved_at_utc, record.source_version,
+                ),
+            )
+        return record
 
     @staticmethod
     def apply_excel_widths(path: Path) -> None:
