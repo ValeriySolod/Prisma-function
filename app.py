@@ -116,6 +116,11 @@ class PrismaMonitorApp(QMainWindow):
         self._active_processing_thread: threading.Thread | None = None
         self._processing_active = False
         self._processing_generation = 0
+        # The real, successful `PrismaWorkflowResult.output_path` from the
+        # most recent completed processing run, set only in
+        # `_processing_succeeded()`. `None` before any success, and never
+        # overwritten by a later failed attempt — see `open_result()`.
+        self._last_output_path: Path | None = None
         self._shutdown_started = False
         self.signals = WorkerSignals(self)
         self.signals.processing_finished.connect(self._processing_finished)
@@ -636,15 +641,32 @@ class PrismaMonitorApp(QMainWindow):
         if not selected:
             return
         source = Path(selected)
+        # Snapshot the currently approved download directory now, alongside
+        # the selected source path/date and auction lookup, so the
+        # background worker always publishes into the exact directory the
+        # user had approved at the moment processing started — never
+        # `%LOCALAPPDATA%` and never a directory re-resolved later mid-run.
+        publication_directory = self._download_directory.current
         self._processing_active = True
         self.status.setText("Importing PRISMA Export CSV…")
         self._update_controls()
         selected_date = self.import_date.date().toPython()
         self._processing_generation += 1
         generation = self._processing_generation
+        # Built on this (UI) thread, but the resulting fetcher's actual
+        # Playwright access is always marshalled onto
+        # `PrismaLifecycleController`'s own owner thread via `run_on_page()`
+        # (see `ManagedPrismaAuctionDetailFetcher`) — never touched directly
+        # from the processing worker thread below, and never a second
+        # browser: it reuses the single already-open managed session.
+        auction_lookup = None
+        if self.prisma_lifecycle.is_open:
+            auction_lookup = PrismaAuctionLookup(
+                fetcher=ManagedPrismaAuctionDetailFetcher(self.prisma_lifecycle)
+            )
         thread = threading.Thread(
             target=self._process_worker,
-            args=(source, selected_date, generation),
+            args=(source, selected_date, generation, auction_lookup, publication_directory),
             daemon=False,
             name="prisma-processing",
         )
@@ -658,7 +680,11 @@ class PrismaMonitorApp(QMainWindow):
             self._update_controls()
             self._processing_finished(ProcessingOutcome(None, str(exc), generation))
 
-    def _process_worker(self, source: Path, source_date=None, generation: int = 0) -> None:
+    def _process_worker(
+        self, source: Path, source_date=None, generation: int = 0,
+        auction_lookup: PrismaAuctionLookup | None = None,
+        publication_directory: Path | None = None,
+    ) -> None:
         try:
             result = run_prisma_import_workflow(
                 source,
@@ -666,7 +692,8 @@ class PrismaMonitorApp(QMainWindow):
                 evaluated_at=datetime.now().astimezone(),
                 database_path=self._runtime_paths.database,
                 state_path=self._runtime_paths.state,
-                output_path=self._runtime_paths.result,
+                publication_directory=publication_directory,
+                auction_lookup=auction_lookup,
             )
             self.signals.processing_finished.emit(
                 ProcessingOutcome(result, None, generation)
@@ -702,6 +729,7 @@ class PrismaMonitorApp(QMainWindow):
         self, result: PrismaWorkflowResult, thread: threading.Thread | None
     ) -> None:
         if not self._is_closing and self._finish_processing(thread):
+            self._last_output_path = result.output_path
             self.status.setText(result.summary())
 
     def _processing_failed(
@@ -716,13 +744,22 @@ class PrismaMonitorApp(QMainWindow):
             self.status.setText(f"PRISMA import failed: {error}")
 
     def open_result(self) -> None:
-        result = self._runtime_paths.result
-        if not result.exists():
+        # Opens the exact `PrismaWorkflowResult.output_path` from the most
+        # recent *successful* processing run (see `_processing_succeeded()`)
+        # — the active, P.36.21-strict-EUR-confirmed cumulative 12-column CSV
+        # published into the approved download directory, never a guessed
+        # path and never the dormant, unconverted `RuntimePaths.result` Excel
+        # workbook. Before any success, or if that file has since become
+        # unavailable, this reports "not found" rather than opening a
+        # nonexistent or partially produced file; a later failed attempt
+        # never overwrites `_last_output_path`, so it keeps pointing at the
+        # last genuinely published result.
+        if self._last_output_path is None or not self._last_output_path.exists():
             QMessageBox.information(
                 self, "Result Not Found", "Process a CSV file first."
             )
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(result)))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_output_path)))
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)

@@ -258,8 +258,8 @@ def test_tariff_and_surcharge_conversions(tmp_path: Path, unit: str, factor: flo
            "Regulated Tariff Entry TSO": "2", "Unit Regulated Entry Capacity Tariff": unit,
            "Surcharge": "3", "Unit Surcharge": unit}
     result = process_csv(write_csv(tmp_path, [row]))[0]
-    assert result["tariff_eur_mwh_h"] == pytest.approx(3 * factor)
-    assert result["premium_eur_mwh_h"] == pytest.approx(3 * factor)
+    assert result["tariff_source_mwh_h"] == pytest.approx(3 * factor)
+    assert result["premium_source_mwh_h"] == pytest.approx(3 * factor)
 
 
 def test_empty_price_unit_pairs_are_zero(tmp_path: Path) -> None:
@@ -267,7 +267,7 @@ def test_empty_price_unit_pairs_are_zero(tmp_path: Path) -> None:
            "Regulated Tariff Entry TSO": "", "Unit Regulated Entry Capacity Tariff": "",
            "Surcharge": "", "Unit Surcharge": ""}
     result = process_csv(write_csv(tmp_path, [row]))[0]
-    assert (result["tariff_eur_mwh_h"], result["premium_eur_mwh_h"]) == (0, 0)
+    assert (result["tariff_source_mwh_h"], result["premium_source_mwh_h"]) == (0, 0)
 
 
 def test_empty_price_with_present_unit_has_auditable_rejection(tmp_path: Path) -> None:
@@ -394,7 +394,7 @@ def test_wrong_csv_contract_is_rejected(tmp_path: Path) -> None:
 def test_process_csv_compatibility_and_output_keys(tmp_path: Path) -> None:
     result = process_csv(write_csv(tmp_path, [BASE]))
     assert isinstance(result, list) and isinstance(result[0], dict)
-    assert set(result[0]) == {"auction_id", "auction_date", "exit_market", "entry_market", "direction", "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type", "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours", "tariff_eur_mwh_h", "premium_eur_mwh_h", "state"}
+    assert set(result[0]) == {"auction_id", "auction_date", "exit_market", "entry_market", "direction", "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type", "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours", "tariff_source_mwh_h", "premium_source_mwh_h", "state"}
 
 
 def test_cp1252_text_and_numeric_prices_are_preserved(tmp_path: Path) -> None:
@@ -412,10 +412,10 @@ def test_cp1252_text_and_numeric_prices_are_preserved(tmp_path: Path) -> None:
         "2025-01-02 00:00",
         "2025-01-03 00:00",
     )
-    assert row["tariff_eur_mwh_h"] == 20.0
-    assert row["premium_eur_mwh_h"] == 5.0
-    assert isinstance(row["tariff_eur_mwh_h"], float)
-    assert isinstance(row["premium_eur_mwh_h"], float)
+    assert row["tariff_source_mwh_h"] == 20.0
+    assert row["premium_source_mwh_h"] == 5.0
+    assert isinstance(row["tariff_source_mwh_h"], float)
+    assert isinstance(row["premium_source_mwh_h"], float)
 
 
 # --- P.36 output date/time contract (Europe/Berlin, YYYY-MM-DD / YYYY-MM-DD HH:mm) ---

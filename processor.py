@@ -297,8 +297,12 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
         "flow_end": format_flow_timestamp(flow_end),
         "booked_capacity_kwh_h": marketed,
         "runtime_hours": runtime_hours,
-        "tariff_eur_mwh_h": tariff,
-        "premium_eur_mwh_h": premium,
+        # Physical-unit-normalized (cent/kWh/h[/d] -> MWh/h) source-currency
+        # price. Not EUR: no currency conversion has happened yet. See
+        # `price_normalization.py` (P.36.21) for the single place that
+        # converts this to EUR/MWh/h using the resolved historical rate.
+        "tariff_source_mwh_h": tariff,
+        "premium_source_mwh_h": premium,
         "state": _text(source.get("State")),
     }
 

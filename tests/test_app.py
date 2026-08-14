@@ -1,3 +1,4 @@
+import csv
 import gc
 import os
 import threading
@@ -26,7 +27,7 @@ from mapping_presentation import MAPPING_DISPLAY_FIELDS
 from processor import PrismaImportError
 from prisma_auction_lookup import PrismaAuctionDetailTransportError
 from prisma_download import PrismaDownloadOutcome, describe_download_failure
-from prisma_import_workflow import PrismaWorkflowResult
+from prisma_import_workflow import PrismaPriceNormalizationError, PrismaWorkflowResult
 from prisma_lifecycle import PrismaLifecycleEvent, PrismaLifecycleNoActivePageError, PrismaLifecycleState
 from prisma_source_updates import SourceUpdateStatus
 from storage import AuctionStorage, RateResolutionRecord
@@ -1803,3 +1804,303 @@ def test_startup_does_not_migrate_when_required_logging_fails(tmp_path, monkeypa
 
     migration.assert_not_called()
     assert "required user-data log file could not be created" in message.call_args.args[2]
+
+
+# --- P.36.21 correction: the real, unmocked active processing call graph ----
+#
+# These tests never mock `run_prisma_import_workflow` itself: they drive the
+# real `PrismaMonitorApp.start_processing()` -> `_process_worker()` ->
+# `prisma_import_workflow.run_prisma_import_workflow()` ->
+# `price_normalization.normalize_prices_for_output()` ->
+# `prisma_publication.publish_cumulative_output()` call graph end-to-end, the
+# exact path a blocking review found could previously present a completed
+# result without a confirmed EUR/MWh/h price. Only the Playwright transport
+# at the very bottom (`PlaywrightAuctionDetailFetcher`) is faked, via the
+# same `FakeManagedLifecycle`/`RecordingAuctionDetailFetcher` pair the
+# existing P.36.19 Mapping-wiring tests above already use, so no real
+# network/PRISMA/ECB access ever happens. `VGS Storage Hub`'s real,
+# evidenced EXIT-side EUR currency (`DEFAULT_PRISMA_REFERENCES`, unchanged)
+# is used directly — no test-only reference catalog is needed for the
+# resolvable-row scenarios below.
+
+
+def _run_processing_and_wait(widget, monkeypatch, csv_path, *, timeout_s: float = 10.0):
+    """Drive `start_processing()` end-to-end and return the resulting
+    `ProcessingOutcome`.
+
+    `QSignalSpy(...).wait()` (the pattern the existing mocked-workflow tests
+    above use) proved unreliable here for a *real*, unmocked
+    `run_prisma_import_workflow()` call: the worker thread's
+    `processing_finished.emit()` is a genuine cross-thread queued signal, and
+    only an explicit `QApplication.processEvents()` poll loop was observed to
+    reliably dispatch it in this offscreen test environment. A plain Python
+    slot appended to `captured` avoids depending on `QSignalSpy`'s own
+    (apparently unreliable, here) internal event-loop handling.
+    """
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(csv_path), "CSV"))
+    )
+    captured: list = []
+    widget.signals.processing_finished.connect(captured.append)
+    widget.start_processing()
+    deadline = time.monotonic() + timeout_s
+    while not captured and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.02)
+    assert captured, "processing_finished was not received within the timeout"
+    return captured[0]
+
+
+class _MultiAuctionFetcher:
+    """Returns a distinct Finished auction-end record per requested Auction
+    ID, unlike `RecordingAuctionDetailFetcher` (which always returns one
+    fixed payload) — needed for a genuinely mixed resolved/unresolved batch
+    spanning two different Auction IDs."""
+
+    def __init__(self, auction_ids: set[str]):
+        self.calls: list[tuple[object, str, int]] = []
+        self._auction_ids = auction_ids
+
+    def fetch(self, page, auction_id, *, timeout_ms):
+        self.calls.append((page, auction_id, timeout_ms))
+        if auction_id not in self._auction_ids:
+            raise PrismaAuctionDetailTransportError(f"unexpected auction id {auction_id}")
+        return {"Auction ID": auction_id, "State": "Finished", "End of Auction": "2026-08-01T15:00:00Z"}
+
+
+_RESOLVABLE_EXIT_ROW = {
+    "Auction ID": "1", "Direction": "Exit",
+    "Network Point Name Exit": "VGS Storage Hub (4290)", "Network Point Name Entry": "",
+    "Network Point ID Exit": "EXIT-1", "Network Point ID Entry": "", "State": "Finished",
+    "Regulated Tariff Exit TSO": "2", "Unit Regulated Exit Capacity Tariff": "cent/kWh/h/Runtime",
+}
+_UNRESOLVED_ENTRY_ROW = {
+    "Auction ID": "1", "Direction": "Entry",
+    "Network Point Name Entry": "VGS Storage Hub (4290)", "Network Point ID Entry": "ENTRY-1",
+    "State": "Finished",
+}
+
+
+def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
+    window, monkeypatch, tmp_path,
+):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+
+    assert outcome.error is None
+    assert outcome.result is not None
+    # The managed page was reached exactly once, through
+    # `PrismaLifecycleController.run_on_page()` — proving strict EUR
+    # normalization (P.36.19/P.36.21) genuinely ran on this real call path,
+    # not a bypassed/mocked one.
+    assert widget.prisma_lifecycle.run_on_page_calls == 1
+    assert len(fetcher.calls) == 1
+
+    # Published into the approved download directory (`P.36.3`), never
+    # `%LOCALAPPDATA%`.
+    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    assert published.exists()
+    with published.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle, delimiter=";"))
+    header, record = rows[0], rows[1]
+    assert tuple(header) == prisma_output.OUTPUT_CSV_COLUMNS
+    # 2 cent/kWh/h/Runtime -> 20 EUR/MWh/h source price; VGS Storage Hub's
+    # EXIT-side evidence is EUR, so the identity rate (1) applies unchanged.
+    assert record[header.index("Tariff Price")] == "20.000000"
+    opened = []
+    with monkeypatch.context() as m:
+        m.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+        widget.open_result()
+    assert Path(opened[0]) == published
+
+
+def test_unresolved_currency_produces_no_output_and_no_ui_success(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview.csv"
+    # ENTRY-side VGS Storage Hub has no approved currency evidence in the
+    # real, unmodified `DEFAULT_PRISMA_REFERENCES` catalog.
+    _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
+
+    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+
+    assert outcome.result is None
+    assert outcome.error is not None
+    assert "EUR" in outcome.error
+    assert not (widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
+    assert not widget._processing_active
+    assert widget.process_button.isEnabled()
+    # No successful processing run has ever completed, so Open Result must
+    # keep reporting "process first" rather than pointing at anything.
+    assert widget._last_output_path is None
+    info = Mock()
+    with monkeypatch.context() as m:
+        m.setattr(QMessageBox, "information", info)
+        widget.open_result()
+    info.assert_called_once()
+
+
+def test_mixed_batch_publishes_nothing_through_the_real_app_workflow(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _MultiAuctionFetcher({"1", "2"})
+    monkeypatch.setattr(prisma_lifecycle, "PlaywrightAuctionDetailFetcher", lambda: fetcher)
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [
+        _RESOLVABLE_EXIT_ROW,
+        {**_UNRESOLVED_ENTRY_ROW, "Auction ID": "2", "Network Point ID Entry": "ENTRY-2"},
+    ])
+
+    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+
+    assert outcome.result is None
+    assert outcome.error is not None
+    assert not (widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
+    assert {auction_id for (_page, auction_id, _timeout) in fetcher.calls} == {"1", "2"}
+
+
+def test_blocked_processing_does_not_finalize_source_operation_as_accepted(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
+
+    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    assert outcome.result is None
+
+    storage = AuctionStorage(widget._runtime_paths.database)
+    assert all(row["status"] != "accepted" for row in storage.operations())
+
+
+def test_retry_after_prisma_session_opens_succeeds(window, monkeypatch, tmp_path):
+    widget, _ = window
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    # First attempt: no managed PRISMA session is open, so no managed page
+    # is available for the uncached Finished auction's rate resolution.
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=False)
+    first = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    assert first.result is None
+    assert not (widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
+    assert widget._last_output_path is None
+
+    # Second attempt, same source/date: Prisma is now open.
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    second = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    assert second.result is not None
+    assert len(fetcher.calls) == 1
+    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    assert published.exists()
+    assert widget._last_output_path == published
+
+
+def test_failed_retry_after_a_success_does_not_clobber_open_result(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    first = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    assert first.result is not None
+    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    assert widget._last_output_path == published
+
+    # A second, different, blocked source must not make Open Result point at
+    # a nonexistent or partially produced file: `_last_output_path` must
+    # still be the previous genuinely published result.
+    blocked_csv_path = tmp_path / "Auction_overview_blocked.csv"
+    _write_prisma_export_with_rows(blocked_csv_path, [_UNRESOLVED_ENTRY_ROW])
+    second = _run_processing_and_wait(widget, monkeypatch, blocked_csv_path)
+    assert second.result is None
+    assert widget._last_output_path == published
+
+    opened = []
+    with monkeypatch.context() as m:
+        m.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+        widget.open_result()
+    assert Path(opened[0]) == published
+
+
+def test_processing_never_constructs_a_second_prisma_lifecycle_controller(window, monkeypatch, tmp_path):
+    widget, _ = window
+    construction_count_before = app.PrismaLifecycleController.call_count
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    _run_processing_and_wait(widget, monkeypatch, csv_path)
+
+    # `app.PrismaLifecycleController` is the mocked constructor `_build_app`
+    # installs; `PrismaMonitorApp.__init__` calls it exactly once. Nothing in
+    # the processing call graph may call it again — the same single managed
+    # session (here, `widget.prisma_lifecycle`, a fake standing in for it) is
+    # always reused via `run_on_page()`, never a second browser.
+    assert app.PrismaLifecycleController.call_count == construction_count_before
+
+
+def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    monkeypatch.setattr(
+        AuctionStorage, "export_excel",
+        lambda *_a, **_k: pytest.fail(
+            "The dormant legacy Excel pipeline must not be invoked by the active workflow."
+        ),
+    )
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    assert outcome.result is not None
+
+
+def test_legacy_published_csv_is_never_touched_by_the_active_workflow(window, monkeypatch, tmp_path):
+    widget, _ = window
+    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
+    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    legacy_path = (
+        widget._download_directory.current / prisma_publication.LEGACY_PUBLISHED_OUTPUT_FILENAME
+    )
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_content = b"pre-P.36.21 rows; unconverted; never proven EUR\n"
+    legacy_path.write_bytes(legacy_content)
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+
+    assert outcome.result is not None
+    assert legacy_path.read_bytes() == legacy_content
+    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    assert published != legacy_path
+    assert published.exists()
+
+
+def test_active_modules_are_reachable_from_apps_own_import_graph():
+    """PyInstaller's `Analysis(["app.py"])` bundles exactly the modules
+    reachable through Python's real import graph starting at `app.py`. This
+    file already imports `app` at module load, so if `app.py` ->
+    `prisma_import_workflow.py` -> `prisma_publication.py`/
+    `price_normalization.py` (which in turn imports `prisma_output.py`) is a
+    real, live import chain, every one of these names is already in
+    `sys.modules` by the time this test runs — proving the packaged
+    executable will include them without requiring a full PyInstaller build
+    just to check this."""
+    import sys
+
+    for name in ("prisma_import_workflow", "prisma_publication", "price_normalization", "prisma_output"):
+        assert name in sys.modules, f"{name} is not reachable from app.py's import graph"
+    assert app.run_prisma_import_workflow.__module__ == "prisma_import_workflow"

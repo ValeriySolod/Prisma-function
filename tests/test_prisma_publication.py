@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -9,14 +10,25 @@ import pytest
 
 from csv_contracts import PRISMA_EXPORT_COLUMNS
 from download_directory import DownloadDirectoryError
+from prisma_auction_lookup import AuctionEndRecord
+from prisma_references import (
+    PrismaReference,
+    PrismaReferenceCatalog,
+    ReferenceAlias,
+    ReferenceClassification,
+    ReferenceSide,
+)
+from price_normalization import normalize_prices_for_output
 from processor import PrismaImportResult, import_prisma_export
 from prisma_output import OUTPUT_CSV_COLUMNS
 from prisma_publication import (
+    LEGACY_PUBLISHED_OUTPUT_FILENAME,
     PUBLISHED_OUTPUT_FILENAME,
     PrismaPublicationOutcome,
     describe_publication_failure,
     publish_cumulative_output,
 )
+from storage import AuctionStorage
 
 BASE = {
     "Auction ID": "000123456789012345", "Start of Auction": "01.01.2025 09:00",
@@ -29,8 +41,28 @@ BASE = {
     "Unit Regulated Exit Capacity Tariff": "cent/kWh/h/Runtime",
     "Regulated Tariff Entry TSO": "0.75",
     "Unit Regulated Entry Capacity Tariff": "cent/kWh/h/Runtime", "Surcharge": "0,5",
-    "Unit Surcharge": "cent/kWh/h/Runtime",
+    "Unit Surcharge": "cent/kWh/h/Runtime", "State": "Finished",
 }
+
+_AUCTION_END = datetime(2025, 1, 3, 12, 0, tzinfo=timezone.utc)
+
+
+class FakeAuctionLookup:
+    def lookup(self, page, auction_id):
+        return AuctionEndRecord(auction_id, _AUCTION_END, "Finished")
+
+
+def eur_catalog() -> PrismaReferenceCatalog:
+    return PrismaReferenceCatalog((
+        PrismaReference(
+            "VGS Storage Hub", ReferenceClassification.STORAGE,
+            (
+                ReferenceAlias("VGS Storage Hub (4290)", ReferenceSide.EXIT),
+                ReferenceAlias("VGS Storage Hub (4290)", ReferenceSide.ENTRY),
+            ),
+            exit_currency="EUR", entry_currency="EUR",
+        ),
+    ))
 
 
 def write_csv(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.csv") -> Path:
@@ -43,7 +75,17 @@ def write_csv(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.cs
 
 def import_result_for(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.csv") -> PrismaImportResult:
     source = write_csv(tmp_path, rows, name=name)
-    return import_prisma_export(source)
+    return import_prisma_export(source, reference_catalog=eur_catalog())
+
+
+def _publish(import_result, out_dir, tmp_path: Path, **overrides):
+    kwargs = dict(
+        storage=AuctionStorage(tmp_path / "auctions.db"),
+        reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    kwargs.update(overrides)
+    return publish_cumulative_output(import_result, out_dir, **kwargs)
 
 
 def _read_published(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -59,11 +101,16 @@ def _import_row(**overrides) -> dict:
     """A minimal already-enriched row shape (see `prisma_output.transform_row`),
     used to exercise `publish_cumulative_output` directly without routing
     through the full CSV-import pipeline, for tests that only care about the
-    cumulative-file read/merge/write behavior itself."""
+    cumulative-file read/merge/write behavior itself. `auction_id`/`state`
+    are eligible-and-EUR by default so P.36.21's strict EUR gate does not
+    block these otherwise-unrelated P.36.16 merge/dedup tests; see
+    `tests/test_price_normalization.py` for EUR-conversion-specific coverage."""
     base = {
+        "auction_id": BASE["Auction ID"],
+        "state": "Finished",
         "auction_date": "2025-01-01T09:00:00",
         "exit_market": "",
-        "entry_market": "Entry Market",
+        "entry_market": "VGS Storage Hub",
         "direction": "entry",
         "network_point": "Network Point",
         "product_type": "Day Ahead",
@@ -71,8 +118,8 @@ def _import_row(**overrides) -> dict:
         "flow_end": "2025-01-03T00:00:00",
         "booked_capacity_kwh_h": 1000.0,
         "runtime_hours": 24.0,
-        "tariff_eur_mwh_h": 20.0,
-        "premium_eur_mwh_h": 5.0,
+        "tariff_source_mwh_h": 20.0,
+        "premium_source_mwh_h": 5.0,
     }
     base.update(overrides)
     return base
@@ -92,7 +139,7 @@ def make_import_result(rows: list[dict]) -> PrismaImportResult:
 _SAMPLE_DATA_LINE = ";".join([
     "2025-01-01T09:00:00", "", "Entry Market", "entry", "Network Point",
     "Day Ahead", "2025-01-02T00:00:00", "2025-01-03T00:00:00",
-    "1000.0", "24.0", "20.0", "5.0",
+    "1000.0", "24.0", "20.000000", "5.000000",
 ])
 
 
@@ -101,7 +148,7 @@ _SAMPLE_DATA_LINE = ";".join([
 def test_first_publication_creates_file_from_current_import(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.succeeded
     assert result.output_path == out_dir / PUBLISHED_OUTPUT_FILENAME
     header, records = _read_published(result.output_path)
@@ -114,7 +161,7 @@ def test_first_publication_creates_file_from_current_import(tmp_path: Path) -> N
 def test_published_output_uses_corrected_datetime_representation(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.succeeded
     _, records = _read_published(result.output_path)
     row = records[0]
@@ -130,12 +177,14 @@ def test_published_output_uses_corrected_datetime_representation(tmp_path: Path)
 def test_appending_new_unique_rows_to_existing_valid_file(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
 
     other = {**BASE, "Marketed Capacity": "2000"}
-    second = publish_cumulative_output(
-        import_result_for(tmp_path, [other], name="Auction_overview_2.csv"), out_dir
+    second = _publish(
+        import_result_for(tmp_path, [other], name="Auction_overview_2.csv"), out_dir, tmp_path,
+        storage=storage,
     )
     assert second.succeeded
     assert second.appended_row_count == 1
@@ -151,11 +200,13 @@ def test_appending_new_unique_rows_to_existing_valid_file(tmp_path: Path) -> Non
 def test_duplicate_against_existing_rows_is_not_appended(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
 
-    second = publish_cumulative_output(
-        import_result_for(tmp_path, [BASE], name="Auction_overview_repeat.csv"), out_dir
+    second = _publish(
+        import_result_for(tmp_path, [BASE], name="Auction_overview_repeat.csv"), out_dir, tmp_path,
+        storage=storage,
     )
     assert second.succeeded
     assert second.appended_row_count == 0
@@ -167,7 +218,7 @@ def test_duplicate_against_existing_rows_is_not_appended(tmp_path: Path) -> None
 def test_duplicates_within_one_import_are_written_once(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE, BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE, BASE]), out_dir, tmp_path)
     assert result.succeeded
     assert result.appended_row_count == 1
     assert result.total_row_count == 1
@@ -178,17 +229,33 @@ def test_duplicates_within_one_import_are_written_once(tmp_path: Path) -> None:
 def test_row_differing_in_any_single_field_remains_distinct(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
 
     almost_identical = {**BASE, "Marketed Capacity": "1000.5"}
-    second = publish_cumulative_output(
+    second = _publish(
         import_result_for(tmp_path, [almost_identical], name="Auction_overview_variant.csv"),
-        out_dir,
+        out_dir, tmp_path, storage=storage,
     )
     assert second.succeeded
     assert second.appended_row_count == 1
     assert second.total_row_count == 2
+
+
+def test_cumulative_deduplication_operates_on_final_normalized_price_values(tmp_path: Path) -> None:
+    """Deduplication compares the complete, exact 12-field *normalized* EUR
+    row, not the pre-conversion source price."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    row_a = _import_row(tariff_source_mwh_h=20.0)
+    row_b = _import_row(tariff_source_mwh_h=20.0)
+    result = _publish(make_import_result([row_a, row_b]), out_dir, tmp_path, storage=storage)
+    assert result.succeeded
+    assert result.appended_row_count == 1
+    _, records = _read_published(result.output_path)
+    assert records[0]["Tariff Price"] == "20.000000"
 
 
 # --- ordering --------------------------------------------------------------
@@ -196,15 +263,17 @@ def test_row_differing_in_any_single_field_remains_distinct(tmp_path: Path) -> N
 def test_existing_and_new_row_order_is_preserved(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
     row_a = {**BASE, "Marketed Capacity": "1000"}
     row_b = {**BASE, "Marketed Capacity": "1100"}
     row_c = {**BASE, "Marketed Capacity": "1200"}
     row_d = {**BASE, "Marketed Capacity": "1300"}
 
-    first = publish_cumulative_output(import_result_for(tmp_path, [row_a, row_b]), out_dir)
+    first = _publish(import_result_for(tmp_path, [row_a, row_b]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
-    second = publish_cumulative_output(
-        import_result_for(tmp_path, [row_c, row_d], name="second.csv"), out_dir
+    second = _publish(
+        import_result_for(tmp_path, [row_c, row_d], name="second.csv"), out_dir, tmp_path,
+        storage=storage,
     )
     assert second.succeeded
     _, records = _read_published(second.output_path)
@@ -218,10 +287,12 @@ def test_existing_and_new_row_order_is_preserved(tmp_path: Path) -> None:
 def test_only_one_header_present_after_repeated_runs(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
     for index in range(3):
         row = {**BASE, "Marketed Capacity": str(1000 + index)}
-        result = publish_cumulative_output(
-            import_result_for(tmp_path, [row], name=f"run_{index}.csv"), out_dir
+        result = _publish(
+            import_result_for(tmp_path, [row], name=f"run_{index}.csv"), out_dir, tmp_path,
+            storage=storage,
         )
         assert result.succeeded
     lines = result.output_path.read_text(encoding="utf-8").splitlines()
@@ -235,14 +306,15 @@ def test_only_one_header_present_after_repeated_runs(tmp_path: Path) -> None:
 def test_empty_accepted_input_preserves_valid_existing_file(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_mtime = first.output_path.stat().st_mtime_ns
     before_content = first.output_path.read_bytes()
 
     empty_import = import_result_for(tmp_path, [{**BASE, "Marketed Capacity": "1"}], name="empty.csv")
     assert empty_import.imported_count == 0
-    result = publish_cumulative_output(empty_import, out_dir)
+    result = _publish(empty_import, out_dir, tmp_path, storage=storage)
     assert result.succeeded
     assert result.appended_row_count == 0
     assert result.total_row_count == 1
@@ -258,7 +330,7 @@ def test_empty_existing_file_fails_without_modification(tmp_path: Path) -> None:
     target = out_dir / PUBLISHED_OUTPUT_FILENAME
     target.write_bytes(b"")
 
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_bytes() == b""
     assert result.import_result is not None
@@ -272,7 +344,7 @@ def test_wrong_delimiter_existing_file_fails_without_modification(tmp_path: Path
     original = ",".join(OUTPUT_CSV_COLUMNS) + "\n"
     target.write_text(original, encoding="utf-8")
 
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_text(encoding="utf-8") == original
 
@@ -284,7 +356,7 @@ def test_undecodable_existing_file_fails_without_modification(tmp_path: Path) ->
     original = b"\xff\xfe\x00\x01not-utf8"
     target.write_bytes(original)
 
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_bytes() == original
 
@@ -296,7 +368,7 @@ def test_wrong_header_existing_file_fails_without_modification(tmp_path: Path) -
     original = "Auction Date;Exit Market;Wrong Column\n2025-01-01;;X\n"
     target.write_text(original, encoding="utf-8")
 
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_text(encoding="utf-8") == original
 
@@ -306,9 +378,10 @@ def test_wrong_header_existing_file_fails_without_modification(tmp_path: Path) -
 def test_embedded_newline_in_quoted_field_round_trips_without_corruption(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
     multiline_row = _import_row(network_point="Line1\nLine2")
 
-    first = publish_cumulative_output(make_import_result([multiline_row]), out_dir)
+    first = _publish(make_import_result([multiline_row]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     assert first.appended_row_count == 1
     _, records = _read_published(first.output_path)
@@ -318,7 +391,7 @@ def test_embedded_newline_in_quoted_field_round_trips_without_corruption(tmp_pat
     # duplicate: if the embedded newline had been mis-split on read, this
     # row would either fail to match (falsely appended again) or corrupt
     # the comparison in some other way.
-    second = publish_cumulative_output(make_import_result([multiline_row]), out_dir)
+    second = _publish(make_import_result([multiline_row]), out_dir, tmp_path, storage=storage)
     assert second.succeeded
     assert second.appended_row_count == 0
     assert second.total_row_count == 1
@@ -327,7 +400,7 @@ def test_embedded_newline_in_quoted_field_round_trips_without_corruption(tmp_pat
     # still be recognized as distinct, proving the comparison is not
     # accidentally truncated at the embedded newline either.
     distinct_row = _import_row(network_point="Line1\nLine2-different")
-    third = publish_cumulative_output(make_import_result([distinct_row]), out_dir)
+    third = _publish(make_import_result([distinct_row]), out_dir, tmp_path, storage=storage)
     assert third.succeeded
     assert third.appended_row_count == 1
     assert third.total_row_count == 2
@@ -343,7 +416,7 @@ def test_malformed_quoting_in_existing_file_fails_without_modification(tmp_path:
     original = ";".join(OUTPUT_CSV_COLUMNS) + "\n" + '"2025-01-01"bad;x;y\n'
     target.write_text(original, encoding="utf-8")
 
-    result = publish_cumulative_output(make_import_result([_import_row()]), out_dir)
+    result = _publish(make_import_result([_import_row()]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_text(encoding="utf-8") == original
 
@@ -356,7 +429,7 @@ def test_repeated_header_among_data_rows_fails_without_modification(tmp_path: Pa
     original = f"{header_line}\n{_SAMPLE_DATA_LINE}\n{header_line}\n"
     target.write_text(original, encoding="utf-8")
 
-    result = publish_cumulative_output(make_import_result([_import_row()]), out_dir)
+    result = _publish(make_import_result([_import_row()]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_text(encoding="utf-8") == original
 
@@ -369,7 +442,7 @@ def test_blank_data_row_in_existing_file_fails_without_modification(tmp_path: Pa
     original = f"{header_line}\n{_SAMPLE_DATA_LINE}\n\n"
     target.write_text(original, encoding="utf-8")
 
-    result = publish_cumulative_output(make_import_result([_import_row()]), out_dir)
+    result = _publish(make_import_result([_import_row()]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert target.read_text(encoding="utf-8") == original
 
@@ -391,7 +464,7 @@ def test_target_symlink_outside_publication_directory_is_rejected(tmp_path: Path
     except (OSError, NotImplementedError):
         pytest.skip("Symlink creation is not available on this platform/user.")
 
-    result = publish_cumulative_output(make_import_result([_import_row()]), out_dir)
+    result = _publish(make_import_result([_import_row()]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_EXISTING_FILE
     assert external_target.read_bytes() == external_content
     assert link.is_symlink()
@@ -421,7 +494,8 @@ def test_reservation_or_staging_failure_preserves_prior_file_and_import_result(
 ) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_content = first.output_path.read_bytes()
 
@@ -430,7 +504,7 @@ def test_reservation_or_staging_failure_preserves_prior_file_and_import_result(
 
     monkeypatch.setattr("prisma_publication.tempfile.mkstemp", failing_mkstemp)
     mixed_import = import_result_for(tmp_path, _MIXED_OUTCOME_ROWS, name="other.csv")
-    result = publish_cumulative_output(mixed_import, out_dir)
+    result = _publish(mixed_import, out_dir, tmp_path, storage=storage)
 
     assert result.outcome is PrismaPublicationOutcome.WRITE_FAILED
     assert result.import_result is not None
@@ -454,7 +528,8 @@ def test_replace_failure_preserves_prior_file_and_cleans_staging_artifact(
 ) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_content = first.output_path.read_bytes()
 
@@ -463,8 +538,8 @@ def test_replace_failure_preserves_prior_file_and_cleans_staging_artifact(
 
     monkeypatch.setattr("prisma_publication.os.replace", failing_replace)
     other = {**BASE, "Marketed Capacity": "5000"}
-    result = publish_cumulative_output(
-        import_result_for(tmp_path, [other], name="other.csv"), out_dir
+    result = _publish(
+        import_result_for(tmp_path, [other], name="other.csv"), out_dir, tmp_path, storage=storage,
     )
 
     assert result.outcome is PrismaPublicationOutcome.WRITE_FAILED
@@ -480,7 +555,8 @@ def test_write_failure_mid_stream_cleans_staged_file_and_preserves_prior_file(
 ) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_content = first.output_path.read_bytes()
 
@@ -506,7 +582,7 @@ def test_write_failure_mid_stream_cleans_staged_file_and_preserves_prior_file(
         return _FailingWriter(original_writer(*args, **kwargs))
 
     monkeypatch.setattr("prisma_publication.csv.writer", failing_writer_factory)
-    result = publish_cumulative_output(other_import, out_dir)
+    result = _publish(other_import, out_dir, tmp_path, storage=storage)
 
     assert result.outcome is PrismaPublicationOutcome.WRITE_FAILED
     assert first.output_path.read_bytes() == before_content
@@ -524,7 +600,7 @@ def test_first_publication_write_failure_leaves_no_file_at_all(
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr("prisma_publication.os.replace", failing_replace)
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
 
     assert result.outcome is PrismaPublicationOutcome.WRITE_FAILED
     assert list(out_dir.iterdir()) == []
@@ -535,14 +611,15 @@ def test_first_publication_write_failure_leaves_no_file_at_all(
 def test_target_never_shows_partial_content_during_publication(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
-    first = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     _, initial_records = _read_published(first.output_path)
     assert len(initial_records) == 1
 
     other = {**BASE, "Marketed Capacity": "9000"}
-    second = publish_cumulative_output(
-        import_result_for(tmp_path, [other], name="other.csv"), out_dir
+    second = _publish(
+        import_result_for(tmp_path, [other], name="other.csv"), out_dir, tmp_path, storage=storage,
     )
     assert second.succeeded
     header, records = _read_published(second.output_path)
@@ -563,7 +640,7 @@ def test_no_reads_or_writes_escape_the_publication_directory(tmp_path: Path) -> 
     decoy = sibling / PUBLISHED_OUTPUT_FILENAME
     decoy.write_bytes(b"untouched")
 
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.succeeded
     assert decoy.read_bytes() == b"untouched"
     assert [entry.name for entry in sibling.iterdir()] == [PUBLISHED_OUTPUT_FILENAME]
@@ -574,7 +651,7 @@ def test_no_reads_or_writes_escape_the_publication_directory(tmp_path: Path) -> 
 
 def test_nonexistent_publication_directory_is_rejected_without_writing(tmp_path: Path) -> None:
     missing_dir = tmp_path / "does_not_exist"
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), missing_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), missing_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_PUBLICATION_DIRECTORY
     assert not missing_dir.exists()
 
@@ -591,7 +668,7 @@ def test_invalid_publication_directory_preserves_the_exact_completed_import_resu
     missing_dir = tmp_path / "does_not_exist"
     mixed_import = import_result_for(tmp_path, _MIXED_OUTCOME_ROWS)
 
-    result = publish_cumulative_output(mixed_import, missing_dir)
+    result = _publish(mixed_import, missing_dir, tmp_path)
 
     assert result.outcome is PrismaPublicationOutcome.INVALID_PUBLICATION_DIRECTORY
     assert result.import_result is mixed_import
@@ -611,7 +688,7 @@ def test_invalid_publication_directory_preserves_the_exact_completed_import_resu
 def test_file_as_publication_directory_is_rejected(tmp_path: Path) -> None:
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("x", encoding="utf-8")
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), not_a_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), not_a_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_PUBLICATION_DIRECTORY
 
 
@@ -628,7 +705,7 @@ def test_non_writable_publication_directory_is_rejected(
         return real_access(path, mode)
 
     monkeypatch.setattr("prisma_publication.os.access", fake_access)
-    result = publish_cumulative_output(import_result_for(tmp_path, [BASE]), out_dir)
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_PUBLICATION_DIRECTORY
     assert list(out_dir.iterdir()) == []
 
@@ -639,3 +716,339 @@ def test_describe_publication_failure_returns_stable_messages() -> None:
     for outcome in PrismaPublicationOutcome:
         message = describe_publication_failure(outcome)
         assert isinstance(message, str) and message
+
+
+# --- P.36.21 strict EUR gate and legacy-file compatibility --------------------
+
+def test_unresolved_currency_blocks_publication_and_leaves_existing_file_untouched(
+    tmp_path: Path,
+) -> None:
+    from prisma_references import DEFAULT_PRISMA_REFERENCES
+
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
+    assert first.succeeded
+    before_content = first.output_path.read_bytes()
+
+    other = {**BASE, "Marketed Capacity": "9000"}
+    # Import with the real, unevidenced catalog so this specific
+    # Auction ID's row is never cached as RESOLVED first.
+    blocked_import_result = import_prisma_export(
+        write_csv(tmp_path, [other], name="unresolved.csv"),
+        reference_catalog=DEFAULT_PRISMA_REFERENCES,
+    )
+    result = _publish(
+        blocked_import_result, out_dir, tmp_path,
+        storage=AuctionStorage(tmp_path / "other_auctions.db"),
+        reference_catalog=DEFAULT_PRISMA_REFERENCES,
+    )
+    assert result.outcome is PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED
+    assert result.price_normalization is not None
+    assert not result.price_normalization.succeeded
+    assert first.output_path.read_bytes() == before_content
+    remaining = [entry.name for entry in out_dir.iterdir()]
+    assert remaining == [PUBLISHED_OUTPUT_FILENAME]
+
+
+def test_legacy_filename_is_never_read_written_or_touched(tmp_path: Path) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    legacy_path = out_dir / LEGACY_PUBLISHED_OUTPUT_FILENAME
+    legacy_content = b"pre-P.36.21 rows;not proven EUR\n"
+    legacy_path.write_bytes(legacy_content)
+
+    result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
+    assert result.succeeded
+    assert result.output_path == out_dir / PUBLISHED_OUTPUT_FILENAME
+    assert result.output_path != legacy_path
+    assert legacy_path.read_bytes() == legacy_content
+    names = sorted(entry.name for entry in out_dir.iterdir())
+    assert names == sorted([LEGACY_PUBLISHED_OUTPUT_FILENAME, PUBLISHED_OUTPUT_FILENAME])
+
+
+def test_published_output_filename_differs_from_legacy_filename() -> None:
+    assert PUBLISHED_OUTPUT_FILENAME != LEGACY_PUBLISHED_OUTPUT_FILENAME
+    assert LEGACY_PUBLISHED_OUTPUT_FILENAME == "Prisma_Output_Published.csv"
+
+
+# --- P.36.21 correction: precomputed_normalization boundary -----------------
+
+def test_precomputed_normalization_is_reused_without_a_second_normalization_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    import_result = import_result_for(tmp_path, [BASE])
+    normalization = normalize_prices_for_output(
+        import_result.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert normalization.succeeded
+
+    def fail_if_called(*_a, **_k):
+        pytest.fail(
+            "normalize_prices_for_output must not run again when a valid "
+            "precomputed result is supplied."
+        )
+
+    monkeypatch.setattr("prisma_publication.normalize_prices_for_output", fail_if_called)
+    result = publish_cumulative_output(
+        import_result, out_dir, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(), precomputed_normalization=normalization,
+    )
+    assert result.succeeded
+    _, records = _read_published(result.output_path)
+    assert len(records) == 1
+
+
+def test_mismatched_precomputed_normalization_is_rejected(tmp_path: Path) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    import_result = import_result_for(
+        tmp_path, [BASE, {**BASE, "Marketed Capacity": "2000"}]
+    )
+    # Computed for a different (single-row) batch, not the two-row
+    # `import_result` above — must never be silently accepted as if it
+    # covered the actual batch being published.
+    mismatched = normalize_prices_for_output(
+        import_result.rows[:1], storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert mismatched.succeeded
+
+    with pytest.raises(ValueError):
+        publish_cumulative_output(
+            import_result, out_dir, storage=storage, reference_catalog=eur_catalog(),
+            auction_lookup=FakeAuctionLookup(), precomputed_normalization=mismatched,
+        )
+    assert list(out_dir.iterdir()) == []
+
+
+def test_blocked_precomputed_normalization_is_honored_without_a_second_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from prisma_references import DEFAULT_PRISMA_REFERENCES
+
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    blocked_import_result = import_prisma_export(
+        write_csv(tmp_path, [BASE], name="unresolved.csv"),
+        reference_catalog=DEFAULT_PRISMA_REFERENCES,
+    )
+    blocked = normalize_prices_for_output(
+        blocked_import_result.rows, storage=storage,
+        reference_catalog=DEFAULT_PRISMA_REFERENCES, auction_lookup=FakeAuctionLookup(),
+    )
+    assert not blocked.succeeded
+
+    def fail_if_called(*_a, **_k):
+        pytest.fail("normalize_prices_for_output must not run again for a precomputed BLOCKED result.")
+
+    monkeypatch.setattr("prisma_publication.normalize_prices_for_output", fail_if_called)
+    result = publish_cumulative_output(
+        blocked_import_result, out_dir, storage=storage,
+        reference_catalog=DEFAULT_PRISMA_REFERENCES, auction_lookup=FakeAuctionLookup(),
+        precomputed_normalization=blocked,
+    )
+    assert result.outcome is PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED
+    assert list(out_dir.iterdir()) == []
+
+
+# --- P.36.21 review correction: exact-batch binding, not just row count -----
+
+def test_precomputed_normalization_for_a_different_batch_of_the_same_length_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """The original defect: a successful `PriceNormalizationResult` computed
+    for a *different* single-row batch has the same `prices_by_row_index`
+    index set (`{0}`) as the real one-row `import_result` below, so an
+    index-set-only check would wrongly accept it and misattribute its price."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    import_result = make_import_result([_import_row(auction_id="AAA000000000000001")])
+
+    other_batch_result = make_import_result([
+        _import_row(
+            auction_id="ZZZ999999999999999", tariff_source_mwh_h=99.0, premium_source_mwh_h=42.0,
+        )
+    ])
+    foreign_normalization = normalize_prices_for_output(
+        other_batch_result.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert foreign_normalization.succeeded
+    assert set(foreign_normalization.prices_by_row_index) == set(range(len(import_result.rows)))
+
+    with pytest.raises(ValueError):
+        publish_cumulative_output(
+            import_result, out_dir, storage=storage, reference_catalog=eur_catalog(),
+            auction_lookup=FakeAuctionLookup(), precomputed_normalization=foreign_normalization,
+        )
+    assert list(out_dir.iterdir()) == []
+
+
+def test_precomputed_normalization_for_reordered_rows_is_rejected(tmp_path: Path) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    row_a = _import_row(auction_id="AAA000000000000001", tariff_source_mwh_h=20.0)
+    row_b = _import_row(auction_id="BBB000000000000002", tariff_source_mwh_h=40.0)
+
+    forward = make_import_result([row_a, row_b])
+    reversed_order = make_import_result([row_b, row_a])
+    normalization_for_reversed = normalize_prices_for_output(
+        reversed_order.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert normalization_for_reversed.succeeded
+
+    with pytest.raises(ValueError):
+        publish_cumulative_output(
+            forward, out_dir, storage=storage, reference_catalog=eur_catalog(),
+            auction_lookup=FakeAuctionLookup(),
+            precomputed_normalization=normalization_for_reversed,
+        )
+    assert list(out_dir.iterdir()) == []
+
+
+def test_precomputed_normalization_with_only_auction_id_changed_is_rejected(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    original = make_import_result([_import_row(auction_id="AAA000000000000001")])
+    normalization = normalize_prices_for_output(
+        original.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert normalization.succeeded
+
+    # Only the Auction ID differs; every other binding field (state, exit/entry
+    # market, source tariff/premium) is identical.
+    renamed_auction = make_import_result([_import_row(auction_id="ZZZ999999999999999")])
+
+    with pytest.raises(ValueError):
+        publish_cumulative_output(
+            renamed_auction, out_dir, storage=storage, reference_catalog=eur_catalog(),
+            auction_lookup=FakeAuctionLookup(), precomputed_normalization=normalization,
+        )
+    assert list(out_dir.iterdir()) == []
+
+
+def test_precomputed_normalization_with_only_source_tariff_price_changed_is_rejected(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    original = make_import_result([_import_row(tariff_source_mwh_h=20.0)])
+    normalization = normalize_prices_for_output(
+        original.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert normalization.succeeded
+
+    repriced = make_import_result([_import_row(tariff_source_mwh_h=999.0)])
+
+    with pytest.raises(ValueError):
+        publish_cumulative_output(
+            repriced, out_dir, storage=storage, reference_catalog=eur_catalog(),
+            auction_lookup=FakeAuctionLookup(), precomputed_normalization=normalization,
+        )
+    assert list(out_dir.iterdir()) == []
+
+
+def test_precomputed_normalization_with_only_source_premium_price_changed_is_rejected(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    original = make_import_result([_import_row(premium_source_mwh_h=5.0)])
+    normalization = normalize_prices_for_output(
+        original.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert normalization.succeeded
+
+    repriced = make_import_result([_import_row(premium_source_mwh_h=999.0)])
+
+    with pytest.raises(ValueError):
+        publish_cumulative_output(
+            repriced, out_dir, storage=storage, reference_catalog=eur_catalog(),
+            auction_lookup=FakeAuctionLookup(), precomputed_normalization=normalization,
+        )
+    assert list(out_dir.iterdir()) == []
+
+
+def test_precomputed_normalization_for_the_exact_original_batch_is_still_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-batch binding check must not reject the legitimate reuse
+    case: the identical batch it was computed for still passes and still
+    triggers no second `normalize_prices_for_output()` call."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    import_result = make_import_result([
+        _import_row(auction_id="AAA000000000000001", tariff_source_mwh_h=20.0),
+        _import_row(auction_id="BBB000000000000002", tariff_source_mwh_h=40.0),
+    ])
+    normalization = normalize_prices_for_output(
+        import_result.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert normalization.succeeded
+
+    def fail_if_called(*_a, **_k):
+        pytest.fail(
+            "normalize_prices_for_output must not run again for the exact "
+            "original batch."
+        )
+
+    monkeypatch.setattr("prisma_publication.normalize_prices_for_output", fail_if_called)
+    result = publish_cumulative_output(
+        import_result, out_dir, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(), precomputed_normalization=normalization,
+    )
+    assert result.succeeded
+    _, records = _read_published(result.output_path)
+    assert len(records) == 2
+
+
+def test_invalid_source_price_in_a_precomputed_batch_leaves_existing_output_byte_for_byte_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A blocked batch (here, one row with a NaN source Tariff Price) must
+    never touch an already-published cumulative file, whether the block
+    happens inside `publish_cumulative_output`'s own normalization pass or
+    via a precomputed `BLOCKED` result."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
+    assert first.succeeded
+    existing_bytes = first.output_path.read_bytes()
+
+    bad_row = _import_row(auction_id="ZZZ999999999999999", tariff_source_mwh_h=float("nan"))
+    blocked_import_result = make_import_result([bad_row])
+    blocked = normalize_prices_for_output(
+        blocked_import_result.rows, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    assert not blocked.succeeded
+    assert blocked.prices_by_row_index == {}
+
+    result = publish_cumulative_output(
+        blocked_import_result, out_dir, storage=storage, reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(), precomputed_normalization=blocked,
+    )
+    assert result.outcome is PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED
+    assert first.output_path.read_bytes() == existing_bytes

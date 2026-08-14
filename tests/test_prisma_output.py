@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +10,7 @@ import pytest
 
 from csv_contracts import PRISMA_EXPORT_COLUMNS
 from download_directory import DownloadDirectoryError
+from prisma_auction_lookup import AuctionEndRecord
 from prisma_output import (
     OUTPUT_CSV_COLUMNS,
     PrismaOutputOutcome,
@@ -24,6 +26,8 @@ from prisma_references import (
     ReferenceClassification,
     ReferenceSide,
 )
+from price_normalization import NormalizedPrice
+from storage import AuctionStorage
 
 BASE = {
     "Auction ID": "000123456789012345", "Start of Auction": "01.01.2025 09:00",
@@ -36,8 +40,41 @@ BASE = {
     "Unit Regulated Exit Capacity Tariff": "cent/kWh/h/Runtime",
     "Regulated Tariff Entry TSO": "0.75",
     "Unit Regulated Entry Capacity Tariff": "cent/kWh/h/Runtime", "Surcharge": "0,5",
-    "Unit Surcharge": "cent/kWh/h/Runtime",
+    "Unit Surcharge": "cent/kWh/h/Runtime", "State": "Finished",
 }
+
+# A fixed, deterministic auction-end instant for `FakeAuctionLookup`, used by
+# every test below that reaches P.36.21's strict EUR normalization step
+# (`BASE["State"] == "Finished"` makes every row eligible for P.36.19
+# resolution). `eur_catalog()` grants EUR currency evidence for the exact
+# source values `BASE` and its variants use, so these P.36.15 mapping/
+# transform tests are not blocked by the strict EUR gate; the EUR-conversion
+# behavior itself (non-EUR currencies, ECB rates, blocking, Decimal
+# formatting) is covered in `tests/test_price_normalization.py`.
+_AUCTION_END = datetime(2025, 1, 3, 12, 0, tzinfo=timezone.utc)
+
+
+class FakeAuctionLookup:
+    def lookup(self, page, auction_id):
+        return AuctionEndRecord(auction_id, _AUCTION_END, "Finished")
+
+
+def eur_catalog() -> PrismaReferenceCatalog:
+    return PrismaReferenceCatalog((
+        PrismaReference(
+            "VGS Storage Hub", ReferenceClassification.STORAGE,
+            (
+                ReferenceAlias("VGS Storage Hub (4290)", ReferenceSide.EXIT),
+                ReferenceAlias("VGS Storage Hub (4290)", ReferenceSide.ENTRY),
+            ),
+            exit_currency="EUR", entry_currency="EUR",
+        ),
+        PrismaReference(
+            "BG", ReferenceClassification.MARKET,
+            (ReferenceAlias("Kulata (BG)/Sidirokastron (GR)", ReferenceSide.EXIT),),
+            exit_currency="EUR",
+        ),
+    ))
 
 
 def write_csv(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.csv") -> Path:
@@ -46,6 +83,16 @@ def write_csv(tmp_path: Path, rows: list[dict], name: str = "Auction_overview.cs
         path, sep=";", encoding="cp1252", index=False
     )
     return path
+
+
+def _output(source, out_dir, tmp_path: Path, **overrides):
+    kwargs = dict(
+        storage=AuctionStorage(tmp_path / "auctions.db"),
+        reference_catalog=eur_catalog(),
+        auction_lookup=FakeAuctionLookup(),
+    )
+    kwargs.update(overrides)
+    return write_prisma_output(source, out_dir, **kwargs)
 
 
 def _read_output(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -71,7 +118,7 @@ def test_written_header_matches_exact_contract_and_row_field_count(tmp_path: Pat
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     header, records = _read_output(result.output_path)
     assert tuple(header) == OUTPUT_CSV_COLUMNS
@@ -83,7 +130,7 @@ def test_output_is_utf8_and_semicolon_delimited(tmp_path: Path) -> None:
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     raw = result.output_path.read_bytes()
     raw.decode("utf-8")  # must not raise
     text = raw.decode("utf-8")
@@ -97,7 +144,7 @@ def test_successful_transformation_maps_fields_correctly(tmp_path: Path) -> None
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     _, records = _read_output(result.output_path)
     row = records[0]
@@ -111,15 +158,18 @@ def test_successful_transformation_maps_fields_correctly(tmp_path: Path) -> None
     assert row["Flow End"] == "2025-01-03 00:00"
     assert row["Booked Capacity"] == "1000.0"
     assert row["Flow Duration Hours"] == "24.0"
-    assert float(row["Tariff Price"]) == pytest.approx(20.0)
-    assert float(row["Premium Price"]) == pytest.approx(5.0)
+    # BASE's evidence resolves to EUR (identity conversion, rate == 1), so
+    # the converted EUR price equals the physical-unit-normalized source
+    # price; see test_price_normalization.py for non-EUR conversion.
+    assert row["Tariff Price"] == "20.000000"
+    assert row["Premium Price"] == "5.000000"
 
 
 def test_output_datetime_columns_never_contain_t_seconds_or_offset(tmp_path: Path) -> None:
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
     row = records[0]
     for column in ("Auction Date", "Flow Start", "Flow End"):
@@ -134,14 +184,17 @@ def test_transform_row_is_pure_field_mapping() -> None:
         "direction": "exit", "network_point": "Point", "product_type": "Month",
         "flow_start": "2025-02-01 00:00", "flow_end": "2025-03-01 00:00",
         "booked_capacity_kwh_h": 2500.0, "runtime_hours": 672.0,
-        "tariff_eur_mwh_h": 10.0, "premium_eur_mwh_h": 0.0,
     }
-    assert transform_row(row) == {
+    from decimal import Decimal
+    prices = NormalizedPrice(
+        tariff_price_eur_mwh_h=Decimal("10"), premium_price_eur_mwh_h=Decimal("0"),
+    )
+    assert transform_row(row, prices) == {
         "Auction Date": "2025-01-01", "Exit Market": "BG", "Entry Market": "",
         "Capacity Type": "exit", "Network Point Name": "Point", "Product Type": "Month",
         "Flow Start": "2025-02-01 00:00", "Flow End": "2025-03-01 00:00",
         "Booked Capacity": "2500.0", "Flow Duration Hours": "672.0",
-        "Tariff Price": "10.0", "Premium Price": "0.0",
+        "Tariff Price": "10.000000", "Premium Price": "0.000000",
     }
 
 
@@ -151,7 +204,7 @@ def test_entry_direction_populates_only_entry_market_with_storage_classification
     source = write_csv(tmp_path, [{**BASE, "Direction": "Entry"}])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
     assert records[0]["Exit Market"] == ""
     assert records[0]["Entry Market"] == "VGS Storage Hub"
@@ -165,7 +218,7 @@ def test_exit_direction_populates_only_exit_market_with_market_classification(tm
     }])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
     assert records[0]["Exit Market"] == "BG"
     assert records[0]["Entry Market"] == ""
@@ -181,7 +234,7 @@ def test_bundle_direction_populates_both_sides_from_side_specific_evidence(tmp_p
     }])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
     assert records[0]["Exit Market"] == "VGS Storage Hub"
     assert records[0]["Entry Market"] == "VGS Storage Hub"
@@ -196,7 +249,7 @@ def test_unresolved_alias_row_is_excluded_from_output_but_recorded_as_rejected(t
     }])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     _, records = _read_output(result.output_path)
     assert records == []
@@ -210,7 +263,7 @@ def test_missing_required_side_row_is_excluded_and_recorded(tmp_path: Path) -> N
     }])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     _, records = _read_output(result.output_path)
     assert records == []
@@ -221,7 +274,7 @@ def test_capacity_below_threshold_is_filtered_and_excluded(tmp_path: Path) -> No
     source = write_csv(tmp_path, [{**BASE, "Marketed Capacity": "999"}])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     _, records = _read_output(result.output_path)
     assert records == []
@@ -234,7 +287,7 @@ def test_mixed_accepted_and_rejected_rows_only_writes_accepted(tmp_path: Path) -
     source = write_csv(tmp_path, [good, bad])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
     assert len(records) == 1
     assert result.import_result.rejected_count == 1
@@ -244,7 +297,7 @@ def test_zero_accepted_rows_still_produces_header_only_output(tmp_path: Path) ->
     source = write_csv(tmp_path, [{**BASE, "Marketed Capacity": "1"}])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     header, records = _read_output(result.output_path)
     assert tuple(header) == OUTPUT_CSV_COLUMNS
@@ -258,7 +311,7 @@ def test_malformed_source_csv_fails_transformation_and_writes_nothing(tmp_path: 
     bad_source.write_text("just,a,random,csv\n1,2,3,4\n", encoding="utf-8")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(bad_source, out_dir)
+    result = _output(bad_source, out_dir, tmp_path)
     assert result.outcome is PrismaOutputOutcome.SOURCE_IMPORT_FAILED
     assert result.output_path is None
     assert list(out_dir.iterdir()) == []
@@ -270,12 +323,45 @@ def test_describe_output_failure_returns_stable_messages() -> None:
         assert isinstance(message, str) and message
 
 
+# --- P.36.21 strict EUR gate ----------------------------------------------
+
+def test_unresolved_currency_blocks_output_and_writes_nothing(tmp_path: Path) -> None:
+    """A row with no approved currency evidence (the real, unmodified
+    `DEFAULT_PRISMA_REFERENCES` catalog has no ENTRY-side evidence for VGS
+    Storage Hub) must block the whole operation and create no file."""
+    from prisma_references import DEFAULT_PRISMA_REFERENCES
+
+    source = write_csv(tmp_path, [BASE])
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = _output(
+        source, out_dir, tmp_path, reference_catalog=DEFAULT_PRISMA_REFERENCES,
+    )
+    assert result.outcome is PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED
+    assert result.output_path is None
+    assert list(out_dir.iterdir()) == []
+    assert result.price_normalization is not None
+    assert not result.price_normalization.succeeded
+    assert result.price_normalization.failures[0].reason_code == "currency_unknown"
+
+
+def test_not_finished_auction_blocks_output_and_writes_nothing(tmp_path: Path) -> None:
+    source = write_csv(tmp_path, [{**BASE, "State": "Cancelled"}])
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = _output(source, out_dir, tmp_path)
+    assert result.outcome is PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED
+    assert result.output_path is None
+    assert list(out_dir.iterdir()) == []
+    assert result.price_normalization.failures[0].reason_code == "not_finished"
+
+
 # --- destination validation ------------------------------------------------
 
 def test_nonexistent_output_directory_is_rejected_without_writing(tmp_path: Path) -> None:
     source = write_csv(tmp_path, [BASE])
     missing_dir = tmp_path / "does_not_exist"
-    result = write_prisma_output(source, missing_dir)
+    result = _output(source, missing_dir, tmp_path)
     assert result.outcome is PrismaOutputOutcome.INVALID_OUTPUT_DIRECTORY
     assert result.output_path is None
     assert not missing_dir.exists()
@@ -285,7 +371,7 @@ def test_file_as_output_directory_is_rejected(tmp_path: Path) -> None:
     source = write_csv(tmp_path, [BASE])
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("x", encoding="utf-8")
-    result = write_prisma_output(source, not_a_dir)
+    result = _output(source, not_a_dir, tmp_path)
     assert result.outcome is PrismaOutputOutcome.INVALID_OUTPUT_DIRECTORY
 
 
@@ -302,7 +388,7 @@ def test_non_writable_output_directory_is_rejected(tmp_path: Path, monkeypatch: 
         return real_access(path, mode)
 
     monkeypatch.setattr("prisma_output.os.access", fake_access)
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.outcome is PrismaOutputOutcome.INVALID_OUTPUT_DIRECTORY
     assert list(out_dir.iterdir()) == []
 
@@ -321,7 +407,7 @@ def test_collision_never_overwrites_and_uses_incrementing_suffix(tmp_path: Path)
     existing = out_dir / "Auction_overview_transformed.csv"
     existing.write_bytes(b"pre-existing content")
 
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     assert result.succeeded
     assert result.output_path.name == "Auction_overview_transformed_2.csv"
     assert existing.read_bytes() == b"pre-existing content"
@@ -332,9 +418,10 @@ def test_two_independent_calls_never_merge_or_deduplicate_across_operations(tmp_
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
 
-    first = write_prisma_output(source, out_dir)
-    second = write_prisma_output(source, out_dir)
+    first = _output(source, out_dir, tmp_path, storage=storage)
+    second = _output(source, out_dir, tmp_path, storage=storage)
 
     assert first.output_path != second.output_path
     _, first_records = _read_output(first.output_path)
@@ -371,7 +458,7 @@ def test_reservation_failure_returns_write_failed_with_the_completed_import_resu
         raise OSError("simulated reservation failure")
 
     monkeypatch.setattr("prisma_output.reserve_unique_download_path", failing_reserve)
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
 
     assert result.outcome is PrismaOutputOutcome.WRITE_FAILED
     assert result.output_path is None
@@ -400,7 +487,7 @@ def test_write_failure_leaves_no_partial_final_output_and_cleans_temp_files(
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr("prisma_output.os.replace", failing_replace)
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
 
     assert result.outcome is PrismaOutputOutcome.WRITE_FAILED
     remaining = list(out_dir.iterdir())
@@ -436,7 +523,7 @@ def test_write_failure_during_staging_cleans_up_staged_temp_file(
 
     monkeypatch.setattr(csv.DictWriter, "writerows", failing_writerows)
     try:
-        result = write_prisma_output(source, out_dir)
+        result = _output(source, out_dir, tmp_path)
     finally:
         monkeypatch.setattr(csv.DictWriter, "writerows", real_writerows)
 
@@ -454,7 +541,7 @@ def test_successful_write_leaves_no_staging_artifacts(tmp_path: Path) -> None:
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir)
+    result = _output(source, out_dir, tmp_path)
     names = [entry.name for entry in out_dir.iterdir()]
     assert names == [result.output_path.name]
     assert not any(name.endswith(".staging") for name in names)
@@ -468,11 +555,12 @@ def test_custom_reference_catalog_is_honored(tmp_path: Path) -> None:
             "Custom Market",
             ReferenceClassification.MARKET,
             (ReferenceAlias("VGS Storage Hub (4290)", ReferenceSide.ENTRY),),
+            entry_currency="EUR",
         ),
     ))
     source = write_csv(tmp_path, [BASE])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = write_prisma_output(source, out_dir, reference_catalog=catalog)
+    result = _output(source, out_dir, tmp_path, reference_catalog=catalog)
     _, records = _read_output(result.output_path)
     assert records[0]["Entry Market"] == "Custom Market"

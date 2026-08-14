@@ -17,9 +17,19 @@ import_prisma_export` (P.33/P.36.4) already implements and tests every one
 of those authoritative rules, including the existing missing-side/unknown-
 alias rejection behavior. This module only selects, renames, and formats the
 already-enriched row shape into the approved contract, then writes it. It
-performs no PRISMA navigation, browser, download, UI, accumulation,
-deduplication, or publication-policy operation; those remain scoped to other
-increments (`P.36.16` and later).
+performs no PRISMA navigation, browser, download, UI, accumulation, or
+publication-policy operation; those remain scoped to other increments
+(`P.36.16` and later).
+
+P.36.21 strict EUR contract. `Tariff Price`/`Premium Price` must be confirmed
+EUR/MWh/h before this module ever creates an output file.
+`price_normalization.normalize_prices_for_output` (P.36.21) is called once,
+after import, using the exact-Auction-ID rate resolved by P.36.19's
+`rate_resolution.resolve_rates_for_rows`; when even one otherwise-publishable
+row lacks a confirmed, usable EUR conversion, `write_prisma_output` returns
+`PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED` and writes nothing at all —
+no reservation, no staged file, no partial output. Only a fully normalized
+batch reaches `transform_row`/`_write_rows`.
 
 No customer-approved publication naming/collision policy exists yet for this
 specific transformed output (that is explicitly deferred to the blocked
@@ -42,9 +52,19 @@ from pathlib import Path
 
 from csv_contracts import CsvFormatError
 from download_directory import DownloadDirectoryError, validate_download_directory
+from ecb_rates import EcbRateSource
+from price_normalization import (
+    NormalizedPrice,
+    PriceNormalizationResult,
+    describe_price_normalization_failure,
+    format_price,
+    normalize_prices_for_output,
+)
+from prisma_auction_lookup import PrismaAuctionLookup
 from prisma_download import reserve_unique_download_path
 from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
 from processor import PrismaImportError, PrismaImportResult, import_prisma_export
+from storage import AuctionStorage
 
 __all__ = [
     "OUTPUT_CSV_COLUMNS",
@@ -84,6 +104,7 @@ class PrismaOutputOutcome(str, Enum):
     SUCCESS = "success"
     INVALID_OUTPUT_DIRECTORY = "invalid_output_directory"
     SOURCE_IMPORT_FAILED = "source_import_failed"
+    PRICE_NORMALIZATION_FAILED = "price_normalization_failed"
     WRITE_FAILED = "write_failed"
 
 
@@ -94,6 +115,11 @@ _FAILURE_MESSAGES: dict[PrismaOutputOutcome, str] = {
     ),
     PrismaOutputOutcome.SOURCE_IMPORT_FAILED: (
         "The selected PRISMA export CSV could not be transformed."
+    ),
+    PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED: (
+        "One or more auctions could not be confirmed in EUR/MWh/h, so no "
+        "output was created. Resolve the missing currency, auction-end, or "
+        "ECB rate evidence, then retry."
     ),
     PrismaOutputOutcome.WRITE_FAILED: (
         "The transformed output could not be written to the selected folder."
@@ -115,6 +141,7 @@ class PrismaOutputResult:
     outcome: PrismaOutputOutcome
     output_path: Path | None = None
     import_result: PrismaImportResult | None = None
+    price_normalization: PriceNormalizationResult | None = None
     error: str | None = None
 
     @property
@@ -131,9 +158,10 @@ def build_output_filename(source_path: str | Path) -> str:
     return f"{Path(source_path).stem}{_OUTPUT_FILENAME_SUFFIX}.csv"
 
 
-def transform_row(row: dict) -> dict[str, str]:
-    """Map one already-enriched `processor.import_prisma_export` row into the
-    exact 12-column output contract.
+def transform_row(row: dict, prices: NormalizedPrice) -> dict[str, str]:
+    """Map one already-enriched `processor.import_prisma_export` row, plus
+    its already-normalized EUR prices, into the exact 12-column output
+    contract.
 
     ``row`` is one entry of `PrismaImportResult.rows`: parsing, unit
     normalization, capacity-threshold filtering, side-specific Market/Storage
@@ -142,8 +170,14 @@ def transform_row(row: dict) -> dict[str, str]:
     are passed through unchanged as the already-formatted `YYYY-MM-DD`/
     `YYYY-MM-DD HH:mm` strings `processor.py` (via `prisma_datetime.py`) and
     `storage.py` already treat as the authoritative timestamp representation;
-    the numeric fields use Python's own `str(float)` representation, which
-    always uses a dot decimal separator.
+    `Booked Capacity`/`Flow Duration Hours` use Python's own `str(float)`
+    representation, which always uses a dot decimal separator.
+
+    ``prices`` must already be a confirmed EUR/MWh/h conversion (P.36.21's
+    `price_normalization.normalize_prices_for_output`); this function performs
+    no currency resolution, ECB lookup, or conversion of its own — it only
+    formats `prices` via `price_normalization.format_price`, so it can never
+    perform an uncontrolled network call.
     """
     return {
         "Auction Date": row["auction_date"],
@@ -156,8 +190,8 @@ def transform_row(row: dict) -> dict[str, str]:
         "Flow End": row["flow_end"],
         "Booked Capacity": str(row["booked_capacity_kwh_h"]),
         "Flow Duration Hours": str(row["runtime_hours"]),
-        "Tariff Price": str(row["tariff_eur_mwh_h"]),
-        "Premium Price": str(row["premium_eur_mwh_h"]),
+        "Tariff Price": format_price(prices.tariff_price_eur_mwh_h),
+        "Premium Price": format_price(prices.premium_price_eur_mwh_h),
     }
 
 
@@ -211,7 +245,11 @@ def write_prisma_output(
     source_path: str | Path,
     output_directory: str | Path,
     *,
+    storage: AuctionStorage,
     reference_catalog: PrismaReferenceCatalog = DEFAULT_PRISMA_REFERENCES,
+    auction_lookup: PrismaAuctionLookup | None = None,
+    page: object = None,
+    ecb_source: EcbRateSource | None = None,
 ) -> PrismaOutputResult:
     """Transform one validated official PRISMA Export CSV into the exact
     12-column output contract and write it atomically to ``output_directory``.
@@ -224,11 +262,18 @@ def write_prisma_output(
 
     The destination boundary is validated before anything else. Exactly one
     output file is produced per successful call; none is produced if the
-    destination is invalid or the transformation itself fails (a malformed
-    source file), so a failed transformation never publishes a partial or
-    stale result. This performs no accumulation, deduplication, or
-    cross-call state tracking: every call is an independent operation over
-    its own ``source_path``, matching the excluded scope of `P.36.16`.
+    destination is invalid, the transformation itself fails (a malformed
+    source file), or — the P.36.21 strict EUR contract — at least one
+    otherwise-publishable row lacks a confirmed EUR/MWh/h conversion for its
+    Tariff Price/Premium Price (see `price_normalization.py`). This performs
+    no accumulation, deduplication, or cross-call state tracking: every call
+    is an independent operation over its own ``source_path``, matching the
+    excluded scope of `P.36.16`.
+
+    ``storage`` durably caches P.36.19 rate resolutions (reused, never
+    repeated, for an Auction ID already resolved elsewhere in the same
+    processing operation); ``auction_lookup``/``page``/``ecb_source`` are
+    forwarded unchanged to `rate_resolution.resolve_rates_for_rows`.
     """
     try:
         directory = _validate_output_directory(output_directory)
@@ -244,7 +289,26 @@ def write_prisma_output(
             PrismaOutputOutcome.SOURCE_IMPORT_FAILED, error=str(exc)
         )
 
-    rows = [transform_row(row) for row in imported.rows]
+    normalization = normalize_prices_for_output(
+        imported.rows,
+        storage=storage,
+        reference_catalog=reference_catalog,
+        auction_lookup=auction_lookup,
+        page=page,
+        ecb_source=ecb_source,
+    )
+    if not normalization.succeeded:
+        return PrismaOutputResult(
+            PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED,
+            import_result=imported,
+            price_normalization=normalization,
+            error=describe_price_normalization_failure(normalization),
+        )
+
+    rows = [
+        transform_row(row, normalization.prices_by_row_index[index])
+        for index, row in enumerate(imported.rows)
+    ]
     filename = build_output_filename(source_path)
     try:
         target = reserve_unique_download_path(directory, filename)
@@ -262,5 +326,8 @@ def write_prisma_output(
         )
 
     return PrismaOutputResult(
-        PrismaOutputOutcome.SUCCESS, output_path=target, import_result=imported
+        PrismaOutputOutcome.SUCCESS,
+        output_path=target,
+        import_result=imported,
+        price_normalization=normalization,
     )

@@ -58,6 +58,29 @@ remains available, unmodified, as an independent single-run writer for any
 existing caller; this module adds a new, separate entry point for the
 cumulative-publication use case P.36.16 approves. No UI or browser code is
 touched here.
+
+P.36.21 strict EUR contract and legacy-file compatibility decision.
+`Tariff Price`/`Premium Price` must be confirmed EUR/MWh/h before any row is
+merged into the cumulative file, using the same
+`price_normalization.normalize_prices_for_output` boundary
+`prisma_output.write_prisma_output` uses; when at least one otherwise-
+publishable row lacks a confirmed conversion, `publish_cumulative_output`
+returns `PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED` and leaves the
+existing cumulative file byte-for-byte unchanged (the normalization check
+runs before the existing file is even read).
+
+A pre-P.36.21 cumulative file may already exist at the legacy filename
+(`Prisma_Output_Published.csv`, preserved below only as
+`LEGACY_PUBLISHED_OUTPUT_FILENAME`, for documentation) with prices written
+before strict EUR normalization existed. Its 12 columns carry neither
+Auction ID nor source currency, so a legacy row's price cannot be proven or
+safely reinterpreted as EUR from the file alone. Rather than mutate,
+reinterpret, or delete that file, `PUBLISHED_OUTPUT_FILENAME` now names a
+separate, clearly distinguished cumulative target,
+`Prisma_Output_Published_EUR.csv`: every row this module ever merges into it
+has already passed strict EUR normalization, so the file's very existence is
+itself the EUR guarantee, and any legacy file at the old name is never read,
+written, renamed, or deleted by this module.
 """
 from __future__ import annotations
 
@@ -70,10 +93,21 @@ from enum import Enum
 from pathlib import Path
 
 from download_directory import DownloadDirectoryError, validate_download_directory
+from ecb_rates import EcbRateSource
+from price_normalization import (
+    PriceNormalizationResult,
+    compute_batch_binding,
+    describe_price_normalization_failure,
+    normalize_prices_for_output,
+)
+from prisma_auction_lookup import PrismaAuctionLookup
 from processor import PrismaImportResult
 from prisma_output import OUTPUT_CSV_COLUMNS, transform_row
+from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
+from storage import AuctionStorage
 
 __all__ = [
+    "LEGACY_PUBLISHED_OUTPUT_FILENAME",
     "PUBLISHED_OUTPUT_FILENAME",
     "PrismaPublicationOutcome",
     "PrismaPublicationResult",
@@ -83,15 +117,21 @@ __all__ = [
 
 _ENCODING = "utf-8"
 _DELIMITER = ";"
+# Preserved only for documentation (see the module docstring's "legacy-file
+# compatibility decision"): this module never reads, writes, renames, or
+# deletes a file at this name.
+LEGACY_PUBLISHED_OUTPUT_FILENAME = "Prisma_Output_Published.csv"
 # No literal cumulative filename is dictated by the approved P.36.16 decision
 # text itself (it approves the merge/dedup/atomic-publish *behavior*, not a
-# specific name); this fixed name is the safest available assumption,
-# documented explicitly here per the same pattern
-# `prisma_output.build_output_filename` used for its own undecided naming
-# detail. Unlike P.36.14/P.36.15's collision-avoiding reservation for
+# specific name). P.36.21 renamed this constant's value from the original
+# P.36.16 choice (`Prisma_Output_Published.csv`, see
+# `LEGACY_PUBLISHED_OUTPUT_FILENAME`) to a clearly distinguished name, since
+# every row this module writes here is now guaranteed strict-EUR-normalized
+# and must never be conflated with a pre-P.36.21 file that cannot make that
+# guarantee. Unlike P.36.14/P.36.15's collision-avoiding reservation for
 # independent per-run files, this name is intentionally fixed and stable
 # across runs, since there is exactly one cumulative file per directory.
-PUBLISHED_OUTPUT_FILENAME = "Prisma_Output_Published.csv"
+PUBLISHED_OUTPUT_FILENAME = "Prisma_Output_Published_EUR.csv"
 
 
 class PrismaPublicationOutcome(str, Enum):
@@ -100,6 +140,7 @@ class PrismaPublicationOutcome(str, Enum):
     SUCCESS = "success"
     INVALID_PUBLICATION_DIRECTORY = "invalid_publication_directory"
     INVALID_EXISTING_FILE = "invalid_existing_file"
+    PRICE_NORMALIZATION_FAILED = "price_normalization_failed"
     WRITE_FAILED = "write_failed"
 
 
@@ -111,6 +152,11 @@ _FAILURE_MESSAGES: dict[PrismaPublicationOutcome, str] = {
     PrismaPublicationOutcome.INVALID_EXISTING_FILE: (
         "The existing published output file is invalid, so nothing was "
         "published. Resolve or move the existing file, then try again."
+    ),
+    PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED: (
+        "One or more auctions could not be confirmed in EUR/MWh/h, so "
+        "nothing was published. Resolve the missing currency, auction-end, "
+        "or ECB rate evidence, then retry."
     ),
     PrismaPublicationOutcome.WRITE_FAILED: (
         "The transformed output could not be published to the selected "
@@ -133,6 +179,7 @@ class PrismaPublicationResult:
     outcome: PrismaPublicationOutcome
     output_path: Path | None = None
     import_result: PrismaImportResult | None = None
+    price_normalization: PriceNormalizationResult | None = None
     appended_row_count: int = 0
     total_row_count: int | None = None
     error: str | None = None
@@ -267,9 +314,51 @@ def _write_rows(target: Path, rows: list[tuple[str, ...]]) -> None:
             staged.unlink(missing_ok=True)
 
 
+def _validate_precomputed_normalization(
+    import_result: PrismaImportResult, normalization: PriceNormalizationResult
+) -> None:
+    """Reject a caller-supplied `PriceNormalizationResult` that does not
+    provably belong to ``import_result``'s exact ordered row batch.
+
+    A mismatched row count/index set alone is too weak a check: a result
+    successfully computed for a *different* batch of the exact same length
+    (or the same rows in a different order) would pass an index-set-only
+    check while its prices belong to the wrong rows. `price_normalization.
+    compute_batch_binding()` is re-derived here from ``import_result.rows``
+    and compared against ``normalization.batch_binding`` — the immutable
+    fingerprint (Auction ID, state, exit/entry market, source Tariff Price,
+    source Premium Price, all in row order) `normalize_prices_for_output()`
+    already attaches to every successful result — so only a result computed
+    for this exact ordered batch is accepted. Only the successful case is
+    checked here — a `BLOCKED` precomputed result is used as-is by the caller
+    regardless of row count or binding, since it never carries any price data
+    to potentially misattribute.
+    """
+    if not normalization.succeeded:
+        return
+    expected_indices = set(range(len(import_result.rows)))
+    if set(normalization.prices_by_row_index) != expected_indices:
+        raise ValueError(
+            "The supplied precomputed price normalization result does not "
+            "match this import result's row batch."
+        )
+    if normalization.batch_binding != compute_batch_binding(import_result.rows):
+        raise ValueError(
+            "The supplied precomputed price normalization result does not "
+            "match this import result's row batch."
+        )
+
+
 def publish_cumulative_output(
     import_result: PrismaImportResult,
     publication_directory: str | Path,
+    *,
+    storage: AuctionStorage,
+    reference_catalog: PrismaReferenceCatalog = DEFAULT_PRISMA_REFERENCES,
+    auction_lookup: PrismaAuctionLookup | None = None,
+    page: object = None,
+    ecb_source: EcbRateSource | None = None,
+    precomputed_normalization: PriceNormalizationResult | None = None,
 ) -> PrismaPublicationResult:
     """Merge ``import_result``'s accepted rows into the one cumulative,
     deduplicated 12-column output CSV in ``publication_directory``.
@@ -279,7 +368,28 @@ def publish_cumulative_output(
     repeated here); this function only formats accepted rows via
     `prisma_output.transform_row` and merges them into the cumulative file
     under the approved exact-full-row deduplication rule. See the module
-    docstring for the complete approved contract.
+    docstring for the complete approved contract, including the P.36.21
+    strict EUR gate and legacy-file compatibility decision.
+
+    ``storage``/``auction_lookup``/``page``/``ecb_source`` are forwarded
+    unchanged to `price_normalization.normalize_prices_for_output`, which
+    reuses P.36.19's durable per-Auction-ID cache — so republishing an
+    already-normalized import never repeats a PRISMA/ECB lookup.
+
+    ``precomputed_normalization``, when supplied, must be the exact
+    `PriceNormalizationResult` already computed for ``import_result.rows`` in
+    this same processing operation (see `prisma_import_workflow.
+    run_prisma_import_workflow`, which resolves and normalizes prices once,
+    strictly before any source-operation-state transition, then reuses that
+    exact result here instead of normalizing the same batch a second time).
+    It is validated to cover exactly ``import_result.rows``'s indices *and*
+    to carry a matching `price_normalization.compute_batch_binding()`
+    fingerprint before use (`_validate_precomputed_normalization`); a
+    mismatch — including a same-length result computed for a different or
+    reordered batch — raises `ValueError` rather than silently normalizing
+    (or skipping, or misattributing) the wrong batch. A standalone caller
+    that omits it (the default) still receives the identical fail-closed
+    normalization this function has always performed internally.
     """
     try:
         directory = _validate_publication_directory(publication_directory)
@@ -290,6 +400,26 @@ def publish_cumulative_output(
             error=str(exc),
         )
 
+    if precomputed_normalization is not None:
+        _validate_precomputed_normalization(import_result, precomputed_normalization)
+        normalization = precomputed_normalization
+    else:
+        normalization = normalize_prices_for_output(
+            import_result.rows,
+            storage=storage,
+            reference_catalog=reference_catalog,
+            auction_lookup=auction_lookup,
+            page=page,
+            ecb_source=ecb_source,
+        )
+    if not normalization.succeeded:
+        return PrismaPublicationResult(
+            PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED,
+            import_result=import_result,
+            price_normalization=normalization,
+            error=describe_price_normalization_failure(normalization),
+        )
+
     target = directory / PUBLISHED_OUTPUT_FILENAME
 
     try:
@@ -298,6 +428,7 @@ def publish_cumulative_output(
         return PrismaPublicationResult(
             PrismaPublicationOutcome.INVALID_EXISTING_FILE,
             import_result=import_result,
+            price_normalization=normalization,
             error=str(exc),
         )
 
@@ -307,8 +438,8 @@ def publish_cumulative_output(
 
     new_rows: list[tuple[str, ...]] = []
     seen_in_import: set[tuple[str, ...]] = set()
-    for row in import_result.rows:
-        formatted = transform_row(row)
+    for index, row in enumerate(import_result.rows):
+        formatted = transform_row(row, normalization.prices_by_row_index[index])
         as_tuple = tuple(formatted[column] for column in OUTPUT_CSV_COLUMNS)
         if as_tuple in existing_set or as_tuple in seen_in_import:
             continue
@@ -320,6 +451,7 @@ def publish_cumulative_output(
             PrismaPublicationOutcome.SUCCESS,
             output_path=target,
             import_result=import_result,
+            price_normalization=normalization,
             appended_row_count=0,
             total_row_count=len(existing_rows),
         )
@@ -331,6 +463,7 @@ def publish_cumulative_output(
         return PrismaPublicationResult(
             PrismaPublicationOutcome.WRITE_FAILED,
             import_result=import_result,
+            price_normalization=normalization,
             error=str(exc),
         )
 
@@ -338,6 +471,7 @@ def publish_cumulative_output(
         PrismaPublicationOutcome.SUCCESS,
         output_path=target,
         import_result=import_result,
+        price_normalization=normalization,
         appended_row_count=len(new_rows),
         total_row_count=len(all_rows),
     )
