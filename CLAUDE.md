@@ -70,6 +70,40 @@ fallback path only, not the primary workflow.
   current status recorded in `ROADMAP.md`. P.36.8 (mapping display) is
   implemented, automated-tested, and merged to `main` via PR #64 (merge
   commit `5e3f309`).
+- `app.py`'s "Import PRISMA Export" button calls
+  `prisma_import_workflow.run_prisma_import_workflow`, which itself calls
+  `prisma_publication.publish_cumulative_output` (P.36.16) to produce the
+  active, EUR-confirmed 12-column result. `prisma_output.write_prisma_output`
+  (P.36.15, the independent per-import single-file writer) is still not
+  called from `app.py` anywhere. Never assume a module is reachable from the
+  running application merely because it exists — verify the actual call
+  graph before relying on it; this exact gap (P.36.15/16 unreachable from
+  `app.py`) was found and partially corrected by P.36.21 — see `ROADMAP.md`.
+- P.36.19 (historical ECB rate to EUR in Mapping) and P.36.21 (strict EUR
+  normalization of `Tariff Price`/`Premium Price`, fail-closed, wired into
+  the real active processing path) are implemented and automated-tested; see
+  `ROADMAP.md` for exact merge status. `price_normalization.py` is the one
+  place a row's price is converted to EUR/MWh/h; never add a second
+  conversion or rate-selection implementation. The pre-P.36 Excel pipeline
+  (`storage.export_excel`/`AuctionStorage.EXCEL_COLUMNS`) is dormant,
+  intentionally unconverted, independently tested compatibility code — it is
+  never called by the active workflow.
+- The active `Prisma_Output_Published_EUR.csv` is published directly into the
+  approved download directory (`app.py`'s `DownloadDirectorySelection.current`,
+  snapshotted before the processing worker starts — the same `P.36.3`
+  Documents-directory-or-user-selected-directory contract, never
+  `%LOCALAPPDATA%`). `RuntimePaths.published_directory` was removed (P.36.21
+  third-pass correction, 2026-08-13) after this fix — it had no remaining
+  legitimate runtime-data purpose. "Open Result" opens the exact
+  `PrismaWorkflowResult.output_path` of the most recent successful processing
+  run (`PrismaMonitorApp._last_output_path`), never a guessed or reconstructed
+  path, and a later failed attempt never overwrites it. A processing operation
+  resolves and normalizes prices exactly once
+  (`price_normalization.normalize_prices_for_output`); the result is reused as
+  `precomputed_normalization` when calling
+  `prisma_publication.publish_cumulative_output`, which validates it belongs to
+  the exact row batch before trusting it — never a second normalization pass
+  for the same batch, and never a mismatched result silently accepted.
 - Later P.36 increments must follow the dependency and status recorded in
   `ROADMAP.md`.
 
@@ -96,6 +130,17 @@ resolved market or storage name for their own side; there are no separate
 additionally show `Network Point Name`, `TSO Name Exit`, and `TSO Name Entry`,
 but must never add, remove, rename, or reorder the 12 output columns. Do not
 reuse the Prisma Function Mini contract by assumption.
+
+`Tariff Price`/`Premium Price` must be confirmed EUR/MWh/h (P.36.21) in every
+active processing path, including the real "Import PRISMA Export" button. A
+processing operation must fail closed — create, replace, or append nothing,
+and never finalize as accepted — when any otherwise-publishable row lacks a
+confirmed EUR conversion; never publish a source-currency value as if it
+were EUR, and never guess a currency. The pre-P.36 `auctions` SQLite
+table/Excel export (`storage.export_excel`/`AuctionStorage.EXCEL_COLUMNS`)
+is dormant, unreachable from the active workflow, explicitly out of this
+contract's scope, and still stores/labels the unconverted source-currency
+price under its unchanged legacy names.
 
 ## Non-negotiable product rules
 

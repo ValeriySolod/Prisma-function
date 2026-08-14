@@ -100,6 +100,20 @@ class AuctionStorage:
         "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours",
         "tariff_eur_mwh_h", "premium_eur_mwh_h", "state",
     )
+    # This pre-P.36 `auctions` table/Excel export predates, and is explicitly
+    # out of scope for, the P.36.21 strict-EUR-normalization contract (see
+    # ROADMAP.md): it still persists the physical-unit-normalized
+    # source-currency price under its original historical column names,
+    # never reinterpreted as confirmed EUR. `processor.py` was corrected by
+    # P.36.21 to stop mislabeling that same value as EUR in its own row
+    # shape (`tariff_source_mwh_h`/`premium_source_mwh_h`); this mapping
+    # translates those corrected field names back to this table's unchanged
+    # legacy columns so this unrelated, unconverted persistence path keeps
+    # working unmodified.
+    _LEGACY_PRICE_FIELD_ALIASES = {
+        "tariff_source_mwh_h": "tariff_eur_mwh_h",
+        "premium_source_mwh_h": "premium_eur_mwh_h",
+    }
     AUDIT_ROW_INDEX = "idx_historical_market_storage_audit_auction_row_id"
     EXPERIMENTAL_AUDIT_COLUMNS = (
         ("auction_row_id", "INTEGER", 0, None, 1),
@@ -615,7 +629,23 @@ class AuctionStorage:
             )
         return self.operation_for_date(source_date)  # type: ignore[return-value]
 
+    @classmethod
+    def _translate_legacy_price_fields(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """See `_LEGACY_PRICE_FIELD_ALIASES` for why this translation exists."""
+        translated = []
+        for row in rows:
+            if not any(field in row for field in cls._LEGACY_PRICE_FIELD_ALIASES):
+                translated.append(row)
+                continue
+            updated = dict(row)
+            for new_name, legacy_name in cls._LEGACY_PRICE_FIELD_ALIASES.items():
+                if new_name in updated:
+                    updated[legacy_name] = updated.pop(new_name)
+            translated.append(updated)
+        return translated
+
     def apply_operation(self, operation_id: str, rows: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, int]:
+        rows = self._translate_legacy_price_fields(rows)
         with self._connection() as connection, connection:
             operation = connection.execute(
                 "SELECT status, summary_json FROM prisma_source_operations WHERE operation_id = ?",
@@ -841,5 +871,6 @@ class AuctionStorage:
 
     def upsert(self, rows: list[dict[str, Any]]) -> dict[str, int]:
         """Compatibility API for storage-only callers."""
+        rows = self._translate_legacy_price_fields(rows)
         with self._connection() as connection, connection:
             return self._upsert_rows(connection, rows)

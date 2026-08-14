@@ -2560,6 +2560,474 @@ pass; a separate Chrome-vs-Edge comparison was not performed and is not claimed 
 **Outstanding before this increment can be marked ✅ Completed:** merge `feature/minimized-prisma-browser`
 to `main`. Implementation, automated tests, and required manual Windows validation have all passed.
 
+### P.36.21 — Strict EUR normalization of Tariff Price and Premium Price
+
+**Status:** 🟡 Implemented, automated-tested; not yet merged. Branched from `main` as
+`feature/p36-21-eur-price-normalization`.
+**Dependencies:** P.36.15 (12-column transform), P.36.16 (cumulative publication), P.36.19
+(historical ECB rate resolution), all merged to `main`.
+
+**2026-08-13 blocking correction (same day, second pass).** The paragraphs immediately below
+("Architecture-inspection finding" and, further down, "PyInstaller packaging note") originally left
+the strict EUR gate wired only into `prisma_output.write_prisma_output`/
+`prisma_publication.publish_cumulative_output`, neither of which `app.py` ever called — so the
+*actual* active "Import PRISMA Export" button still ran the pre-P.36 Excel pipeline unconfirmed. A
+review correctly identified this as a violation of this increment's primary invariant ("no
+application path may present or publish a completed result whose Tariff Price or Premium Price is
+not confirmed as EUR/MWh/h") and required a correction. See the dated "Blocking correction: the
+active workflow itself is now strict-EUR-gated" entry near the end of this section for the fix,
+corrected call graph, and updated evidence; the two paragraphs immediately below are preserved as
+the historical record of the original (insufficient) implementation, not the current behavior.
+
+**Objective.** Both output price fields — `Tariff Price`, `Premium Price` — must be confirmed
+EUR/MWh/h before any output is created, never a source-currency value silently presented as EUR.
+
+**Architecture-inspection finding, as originally recorded (corrected same day — see above).**
+`prisma_output.write_prisma_output` (P.36.15) and
+`prisma_publication.publish_cumulative_output` (P.36.16) are not called from `app.py` anywhere; the
+only currently *active* application processing path that writes a completed result is the pre-P.36
+`prisma_import_workflow.run_prisma_import_workflow` → `storage.py`'s `auctions` table/`export_excel`
+Excel writer, reached from `app.py`'s "Process" button. Wiring P.36.15/P.36.16 into the UI is already
+explicitly deferred to a separate future increment (see P.36.15's own entry, "the 'Next recommended
+increment' section explicitly reserves 'wiring a UI trigger for the complete
+P.36.14→P.36.15→P.36.16 pipeline' for later"); P.36.21 does not change that — it strictly EUR-gates
+both P.36.15/P.36.16 (the in-scope 12-column contract path this increment targets) without wiring
+either into the UI, and separately keeps the unrelated, already-active legacy Excel pipeline working
+unmodified (see "Internal data correctness" below) rather than rewriting it, which would be
+out-of-scope refactoring for this bounded increment.
+
+**`price_normalization.py` (new).** A Qt-independent boundary between import/enrichment and every
+12-column output/publication writer. `normalize_prices_for_output(rows, *, storage,
+reference_catalog=..., auction_lookup=None, page=None, ecb_source=None, resolutions=None)` calls
+P.36.19's `rate_resolution.resolve_rates_for_rows` (or reuses an already-computed `resolutions`
+mapping) — resolving each unique Auction ID at most once, reusing the existing durable
+`storage.AuctionStorage` cache, performing no PRISMA/ECB network access from an already-cached
+Auction ID — then, for every row whose resolution is exactly `RateResolutionOutcome.RESOLVED` with a
+finite positive `rate_to_eur`, computes `normalized_eur_price = source_price_mwh_h * rate_to_eur`
+using `decimal.Decimal` arithmetic exclusively (`Decimal(str(value))`, never `Decimal(value)`, so the
+source `float`'s round-trip decimal text is preserved instead of its binary fraction). EUR is the
+identity conversion (`rate_to_eur == 1`, already what `ecb_rates.resolve_rate_to_eur`/
+`rate_resolution.resolve_auction_rate` return for `currency == "EUR"`, requiring no ECB lookup).
+
+Fail-closed: if even one otherwise-publishable row's resolution is `NOT_FINISHED`,
+`AUCTION_END_UNAVAILABLE`, `CURRENCY_UNKNOWN`, `ECB_RATE_UNAVAILABLE`, `CONFLICT`, missing from
+`resolutions` entirely, or carries an invalid (non-finite, zero, or negative) rate, the whole call
+returns `PriceNormalizationOutcome.BLOCKED` with an empty `prices_by_row_index` and a tuple of typed
+`PriceConversionFailure(auction_id, reason_code, message)` entries (one per distinct Auction ID, never
+raw exception text) — never a partial/resolved-subset result. `describe_price_normalization_failure()`
+returns a stable, English, technical-detail-free UI summary (affected-auction count only; full
+diagnostic detail — including each Auction ID — stays in `failures` for logs/callers, not repeated in
+the UI string).
+
+**Decimal serialization policy.** `format_price()` quantizes the converted EUR/MWh/h `Decimal` to
+exactly `PRICE_DECIMAL_PLACES` (6) decimal places using `ROUND_HALF_UP`, then renders it via
+`format(value, "f")` — always a fixed-point, dot-separated string, never scientific notation, never a
+locale-dependent separator, and never derived from a binary `float` multiplication. This one fixed
+width is the policy itself (not "unnecessary" padding): it is applied identically by every caller, so
+two rows with the same normalized value always serialize identically. Both `prisma_output.py` and
+`prisma_publication.py` call this exact function, so the per-import writer and the cumulative writer
+can never diverge on formatting.
+
+**`processor.py` (internal data correctness).** The enriched row's price fields, previously named
+`tariff_eur_mwh_h`/`premium_eur_mwh_h` even though only the physical cent/kWh/h[/d] → MWh/h unit
+conversion had happened (no currency conversion), are renamed to `tariff_source_mwh_h`/
+`premium_source_mwh_h` — the value is the source-currency price after unit normalization, never
+labeled EUR. `price_normalization.py` is the one place that converts this to EUR/MWh/h.
+`transform_row(row, prices: NormalizedPrice)` (`prisma_output.py`) no longer reads any price field
+from `row` at all; it only formats the already-normalized `prices` argument via `format_price()`, so
+it — and CSV serialization, and cumulative deduplication, and Mapping repaint (unchanged; Mapping's
+10-column contract has no price columns) — can never perform an uncontrolled network call or a second,
+independent conversion.
+
+**`storage.py` (legacy-pipeline compatibility, no schema migration).** The pre-P.36 `auctions`
+SQLite table and `export_excel()` predate, and stay explicitly out of scope for, the P.36.21 strict-EUR
+contract: they still persist the physical-unit-normalized source-currency price under their original,
+unchanged column names/Excel headers (`tariff_eur_mwh_h`/`"Tariff, EUR/MWh/h"`, etc.), never
+reinterpreted as confirmed EUR by this increment. `AuctionStorage._translate_legacy_price_fields()`
+(applied inside `apply_operation()`/`upsert()`) translates an incoming row's corrected
+`tariff_source_mwh_h`/`premium_source_mwh_h` keys back to those unchanged legacy column names, so
+`processor.py`'s field-naming correction does not break this unrelated, already-active pipeline. No
+`ALTER TABLE`/schema change was needed or made; a row already using the legacy names (as every
+existing `tests/test_storage.py` fixture does) passes through unchanged.
+
+**`prisma_output.py` (P.36.15 writer).** `write_prisma_output(source_path, output_directory, *,
+storage, reference_catalog=..., auction_lookup=None, page=None, ecb_source=None)` gained a required
+`storage` parameter and calls `normalize_prices_for_output()` immediately after
+`import_prisma_export()` succeeds — strictly before `reserve_unique_download_path()` is ever called,
+so a blocked normalization creates no reservation, no staged file, and no output at all. A new
+`PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED` outcome carries the `PriceNormalizationResult` for
+caller inspection. Every other P.36.15 behavior (destination validation order, atomic staged-then-
+`os.replace()` write, filename/collision rule, `PrismaImportResult` preservation on every outcome) is
+unchanged.
+
+**`prisma_publication.py` (P.36.16 writer) and legacy cumulative-file compatibility decision.**
+`publish_cumulative_output(import_result, publication_directory, *, storage, reference_catalog=...,
+auction_lookup=None, page=None, ecb_source=None)` gained the same required `storage` parameter and the
+same `normalize_prices_for_output()` gate, run before the existing cumulative file is even read — a
+blocked batch leaves that file byte-for-byte untouched (`PrismaPublicationOutcome.
+PRICE_NORMALIZATION_FAILED`).
+
+A pre-P.36.21 cumulative file may already exist at the original P.36.16 filename
+(`Prisma_Output_Published.csv`) with prices written before strict EUR normalization existed. Its
+12 columns carry neither Auction ID nor source currency, so a legacy row's price cannot be proven or
+safely reinterpreted as EUR from the file alone — per this increment's explicit instruction, it is
+never appended to, mutated, reinterpreted, or deleted. `PUBLISHED_OUTPUT_FILENAME`'s *value* was
+therefore changed to a new, clearly distinguished name, `Prisma_Output_Published_EUR.csv`: every row
+this module ever merges into that file has already passed strict EUR normalization, so the file's mere
+existence at that name is itself the EUR guarantee. The original name is preserved only as a
+documentation constant, `LEGACY_PUBLISHED_OUTPUT_FILENAME`, which this module never reads, writes,
+renames, or deletes. Because `publish_cumulative_output` was not reachable from `app.py` before this
+increment (see the architecture-inspection finding above), no real user-facing
+`Prisma_Output_Published.csv` is currently known to exist from production use; the compatibility
+decision is a forward-looking safety design, not a migration of live data, and is proven by
+`tests/test_prisma_publication.py`'s `test_legacy_filename_is_never_read_written_or_touched`.
+
+**Currency evidence.** No new currency catalog entries were added or fabricated; the only currently
+approved evidence remains P.36.19's single evidenced entry (`VGS Storage Hub`, EUR on its EXIT side
+only). Every other current market/storage — and `VGS Storage Hub`'s own ENTRY side — still resolves
+`CURRENCY_UNKNOWN` and is correctly blocked from strict-EUR output by this increment, exactly as
+intended: the increment is successful even though most current inputs cannot yet be published, because
+every price the strict path *does* publish is now confirmed EUR/MWh/h.
+
+**Automated evidence (2026-08-13).** New `tests/test_price_normalization.py` (26 tests): non-EUR
+conversion by the historical rate; EUR identity conversion with no ECB access; Tariff Price and
+Premium Price each converted exactly once (and not re-converted on a cached-resolution reuse); Decimal
+arithmetic (a float-drift-prone case proven exact) and the fixed six-decimal, `ROUND_HALF_UP`,
+non-scientific, non-locale serialization policy (including an exact-tie rounding case); multiple rows
+sharing one Auction ID resolving once; a cached resolution requiring no live PRISMA lookup; Mapping
+(`rate_resolution.resolve_rates_for_rows`) and output (`normalize_prices_for_output`) observing the
+identical resolved rate for the same Auction ID/storage; a caller-supplied `resolutions` mapping
+skipping a second resolve pass; every non-`RESOLVED` `RateResolutionOutcome` (including a synthetic
+EXIT-only-evidence-leaking-to-ENTRY guard) plus `missing_resolution`/`invalid_conversion_data` blocking
+output with a stable, deduplicated-per-Auction-ID reason code; one unresolved row blocking an entire
+mixed batch; retry succeeding after currency evidence and after ECB-rate evidence separately become
+available (with no partial cache commit from the failed attempt); and the UI-facing description helper
+staying technical-detail-free. `tests/test_prisma_output.py` and `tests/test_prisma_publication.py`
+were updated throughout for the new required `storage` parameter and `State: Finished`/EUR-evidenced
+test fixtures (a test-only catalog, distinct from the real EXIT-only-evidenced
+`DEFAULT_PRISMA_REFERENCES`), and gained targeted P.36.21 integration tests: an unresolved-currency row
+blocks output/publication and writes/modifies nothing; a not-finished auction blocks output; cumulative
+deduplication operates on the final normalized EUR value, not the pre-conversion source price; and the
+legacy filename is never read, written, or touched. `tests/test_processor.py` was updated for the
+renamed `tariff_source_mwh_h`/`premium_source_mwh_h` fields (no behavior change). `tests/test_storage.py`
+and `tests/test_prisma_import_workflow.py` required no changes — the legacy-field-name translation
+shim keeps both passing unmodified, proving the unrelated legacy pipeline's behavior truly did not
+change.
+
+Actually executed and passing (2026-08-13): `python -m pytest -q` → **873 passed, 1 skipped** (the one
+skip is pre-existing and unrelated); the documented compilation check, `python -m compileall -q`
+against `BUILDING.md`'s module list (now including `price_normalization.py`) → succeeded with no
+output; `git diff --check` → exit 0 (one informational CRLF-normalization notice for
+`tests/test_processor.py`, not a whitespace error); `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` → succeeded; `python validate_package.py` → `Package validation passed`. No real
+Windows, real PRISMA, or real ECB validation was performed or is claimed.
+
+**PyInstaller packaging note, as originally recorded (corrected same day — see below).**
+`price_normalization.py`, `prisma_output.py`, and `prisma_publication.py`
+are not in `app.py`'s static import graph, so — exactly
+like before this increment — they are not currently bundled into `dist/PrismaFunction`. `processor.py`
+and `storage.py`, which *are* in that graph and did change, are covered by the fresh build and
+`validate_package.py` run above.
+
+**Outstanding, as originally recorded (superseded — see the correction below):** merge to `main`. A
+manual real-Windows pass remains outstanding and must eventually prove: a known non-EUR auction
+produces a correctly converted Tariff Price/Premium Price; an EUR auction uses identity conversion;
+an unresolved auction produces no output; retry works once resolution becomes available; and the
+legacy cumulative file (if one exists on a given machine) is not modified or mixed with the
+strict-EUR file. The separate PRISMA 5000-row large-export defect (see P.36.14) was not investigated,
+fixed, or otherwise touched by this increment.
+
+**Blocking correction: the active workflow itself is now strict-EUR-gated (2026-08-13, same day,
+second pass).** A review of the implementation above correctly found that neither
+`write_prisma_output` nor `publish_cumulative_output` was reachable from `app.py`, so the one
+processing path a real user actually triggers — the "Import PRISMA Export" button →
+`prisma_import_workflow.run_prisma_import_workflow` → `storage.py`'s `auctions` table/`export_excel`
+— could still present a completed, "accepted" result whose Tariff Price/Premium Price had never been
+confirmed as EUR. This violated the increment's primary invariant. The fix reuses every piece of
+existing P.36.19/P.36.21 infrastructure unchanged (`price_normalization.py`, `rate_resolution.py`,
+the durable per-Auction-ID cache, `PrismaLifecycleController.run_on_page()`); it does not create a
+second price-normalization implementation.
+
+*Corrected active call graph.* `app.py`'s "Import PRISMA Export" button (`start_processing()` →
+`_process_worker()`) now calls the same `prisma_import_workflow.run_prisma_import_workflow()`, but
+that function itself was rewritten: it resolves and strictly normalizes every accepted row's price
+(`price_normalization.normalize_prices_for_output()`, reusing `rate_resolution.resolve_rates_for_rows()`
+and the existing `auction_rate_resolutions` durable cache) *before* any source-operation-state
+transition (`storage.AuctionStorage.begin_operation()`/`apply_operation()`/`finalize_operation()`) or
+output write, then publishes the confirmed-EUR 12-column result via
+`prisma_publication.publish_cumulative_output()` — never `storage.export_excel()`, which is no longer
+called by this module at all. A blocked normalization raises the new `PrismaPriceNormalizationError`
+(a `PrismaWorkflowError` subclass) with no operation begun/applied/finalized and no output
+created/replaced/appended; the source date remains retryable exactly as any other recoverable failure
+already was. `app.py`'s `start_processing()` builds an `auction_lookup` (`PrismaAuctionLookup(
+fetcher=ManagedPrismaAuctionDetailFetcher(self.prisma_lifecycle))`) on the UI thread whenever
+`self.prisma_lifecycle.is_open` — the exact same pattern `_refresh_mapping_display()` already used for
+Mapping — and passes it into the background processing worker thread; the fetcher's actual Playwright
+access is always marshalled onto `PrismaLifecycleController`'s own owner thread via `run_on_page()`
+(never touched directly from the worker thread, and never a second browser: the single already-open
+managed session is reused). When Prisma is not open, `auction_lookup=None` reaches
+`resolve_auction_rate()`, which fails safely per row (`AUCTION_END_UNAVAILABLE`) rather than crashing,
+so opening Prisma and retrying the same date is a normal, safe recovery path.
+
+*Active output location and legacy compatibility.* The active published result is now
+`RuntimePaths.published_directory` (`%LOCALAPPDATA%\PrismaFunction\data\published\`) →
+`prisma_publication.PUBLISHED_OUTPUT_FILENAME` (`Prisma_Output_Published_EUR.csv`) — the exact ordered
+12-column UTF-8 semicolon-delimited contract. `RuntimePaths.result` (the pre-P.36 `.xlsx` path) is
+untouched/dormant, preserved only for legacy-installation migration
+(`runtime_paths.legacy_artifacts()`); `app.py`'s "Open Result" button now opens the published EUR CSV
+instead. `storage.export_excel`/`AuctionStorage.EXCEL_COLUMNS`/`validate_excel` remain fully defined
+and independently tested (`tests/test_storage.py`, unchanged) as dormant compatibility code — option
+(a) from the required correction, not option (b): the legacy pipeline was removed from the active
+workflow rather than retrofitted with a second conversion. A new
+`tests/test_app.py::test_legacy_excel_export_is_never_invoked_by_the_active_workflow` proves
+`AuctionStorage.export_excel` is never called by a real, unmocked processing run. Any legacy
+`Prisma_Output_Published.csv` (pre-P.36.21, unconverted, `LEGACY_PUBLISHED_OUTPUT_FILENAME`) already
+present in that same directory is never read, written, renamed, or deleted by the active path,
+verified end-to-end from `app.py` by
+`tests/test_app.py::test_legacy_published_csv_is_never_touched_by_the_active_workflow`.
+
+*Atomicity.* `run_prisma_import_workflow()` now: (1) resolves/normalizes prices; (2) on success,
+begins/applies the source operation (dormant `auctions`-table bookkeeping only, unrelated to the
+presented output); (3) publishes the confirmed-EUR CSV; (4) finalizes the operation as `accepted`
+only after that publish succeeds. A publication failure (steps 1–3) never finalizes as accepted,
+proven by the existing (adapted) `test_finalization_failure_remains_recoverable_and_never_reports_success`
+and the new `test_blocked_processing_does_not_finalize_source_operation_as_accepted`. A finalize
+failure specifically (step 4, e.g. a simulated SQLite error) leaves the operation `data_committed`
+(not `accepted`) even though the CSV is already correctly, fully published — matching the pre-existing
+recoverable-finalize-failure contract this workflow already had for the Excel path, now proven for the
+CSV path instead.
+
+**Automated evidence for the blocking correction (2026-08-13).** `prisma_import_workflow.py` was
+substantially rewritten (`PrismaPriceNormalizationError`, the strict gate, `publish_cumulative_output`
+replacing `export_excel`, `publication_directory` replacing `output_path`); `runtime_paths.py` gained
+`RuntimePaths.published_directory`; `app.py`'s `start_processing()`/`_process_worker()`/`open_result()`
+were updated as described above. `tests/test_prisma_import_workflow.py` (21 tests) was rewritten for
+the CSV-based active output (dedup-aware row fixtures, a `FakeAuctionLookup`/EUR-evidenced test catalog
+matching the `tests/test_prisma_output.py`/`tests/test_prisma_publication.py` pattern, and 3 new tests:
+unresolved currency blocks the active workflow before any state change, a mixed resolved/unresolved
+batch publishes nothing, and retry succeeds once currency evidence is supplied). `tests/test_app.py`
+gained 9 new tests driving the real, unmocked `start_processing()` → `run_prisma_import_workflow()`
+call graph end-to-end (only the bottom-most Playwright transport is faked, via the same
+`FakeManagedLifecycle`/`RecordingAuctionDetailFetcher` pair the existing P.36.19 Mapping-wiring tests
+already use, and the real, evidenced `DEFAULT_PRISMA_REFERENCES` catalog — no test-only catalog
+needed): reaches strict EUR normalization and publishes correctly (EUR identity, rate 1); an
+unresolved row produces no output and no UI success; a mixed batch publishes nothing; a blocked run
+never finalizes as accepted; retry succeeds once the managed PRISMA session opens; no second
+`PrismaLifecycleController` is ever constructed; the legacy Excel export is never invoked; a
+pre-existing legacy published file is never touched; and the active modules
+(`prisma_import_workflow`/`prisma_publication`/`price_normalization`/`prisma_output`) are provably
+reachable from `app.py`'s own real import graph (`sys.modules` after importing `app`), which is the
+same graph PyInstaller's static `Analysis(["app.py"])` walks.
+
+Actually executed and passing (2026-08-13): `python -m pytest -q` → **882 passed, 1 skipped** (up from
+873; the one skip is pre-existing and unrelated); the documented compilation check, `python -m
+compileall -q` against `BUILDING.md`'s module list → succeeded with no output; `git diff --check` →
+exit 0; `python -m PyInstaller --clean --noconfirm PrismaFunction.spec` → succeeded; `python
+validate_package.py` → `Package validation passed`. No real Windows, real PRISMA, or real ECB
+validation was performed or is claimed.
+
+**PyInstaller packaging note, corrected.** `app.py` now imports `prisma_import_workflow.py`, which
+itself imports `prisma_publication.py` (and, through it, `prisma_output.py`) and `price_normalization.py`
+directly — so all four are now genuinely part of `app.py`'s real, live import graph, exactly like every
+other production module this project's `.spec` file has never needed an explicit `hiddenimports` entry
+for (`Analysis(["app.py"], ...)` performs static import discovery from the entry point, the same
+pattern P.36.14 recorded for `prisma_download.py`). No `.spec` change was needed or made; the fresh
+`PyInstaller --clean --noconfirm` build above is the evidence this graph change did not break the
+build.
+
+**Outstanding before this increment can be marked ✅ Completed (updated):** merge to `main`. A manual
+real-Windows pass remains outstanding and must eventually prove, through the real "Import PRISMA
+Export" button: a known non-EUR auction produces a correctly converted Tariff Price/Premium Price in
+the published `Prisma_Output_Published_EUR.csv`; an EUR auction uses identity conversion; an
+unresolved auction produces no output and a clear, stable error (not a silent "success"); retry works
+once the managed PRISMA session is opened; the legacy Excel path is confirmed dormant (no
+`prisma_auctions.xlsx` is written by a fresh install); and a pre-existing legacy
+`Prisma_Output_Published.csv` (if any) is not modified or mixed with the strict-EUR file. The separate
+PRISMA 5000-row large-export defect (see P.36.14) was not investigated, fixed, or otherwise touched by
+this increment or its correction.
+
+**Blocking correction: publication location and single normalization result (2026-08-13, third pass,
+same day).** A further review of the second-pass correction above found two remaining defects: (1) the
+active published `Prisma_Output_Published_EUR.csv` was still written under
+`RuntimePaths.published_directory`, i.e. `%LOCALAPPDATA%\PrismaFunction\data\published\` — a violation
+of the authoritative product contract, which requires downloaded and published user-facing P.36 files
+to live in the application-managed Documents download directory or another existing directory
+explicitly selected by the user (`P.36.3`), never `%LOCALAPPDATA%`; and (2)
+`run_prisma_import_workflow()` normalized the batch once via `price_normalization.
+normalize_prices_for_output()` and then `publish_cumulative_output()` independently normalized the
+exact same batch a second time — the durable per-Auction-ID cache (P.36.19) made this network-free in
+practice, but it still did not satisfy the requirement that a processing operation use one authoritative
+normalization result. Both are fixed without introducing a second implementation of either concern.
+
+*Publication location, corrected.* `app.py`'s `start_processing()` now snapshots
+`self._download_directory.current` (the same already-validated `DownloadDirectorySelection` the
+"Choose Download Folder"/managed-download flow already maintains — `P.36.3`/`P.36.14`) at the moment
+processing starts, alongside the selected source path, source date, and auction lookup, and passes it
+into the background worker as `publication_directory`. `run_prisma_import_workflow()` publishes
+directly into that directory; it no longer receives or reads `RuntimePaths.published_directory`, which
+is removed from `runtime_paths.RuntimePaths` entirely (it had no remaining legitimate runtime-data
+purpose — user-facing published output was its only use, and that use is now the download-directory
+contract instead). `run_prisma_import_workflow()` also no longer calls
+`publication_directory.mkdir(parents=True, exist_ok=True)` itself: the directory must already exist
+(guaranteed by `app.py`'s existing `DownloadDirectorySelection`/`ensure_directory_exists()` validation
+before processing ever starts), so this function never silently creates an arbitrary directory; if the
+directory has since become unavailable, `prisma_publication.publish_cumulative_output`'s own existing
+directory validation fails closed with a typed `PrismaWorkflowError`, exactly like any other publication
+failure. The application-managed default `<Downloads>\PrismaFunction` directory continues to be created
+only through its already-approved `default_managed_download_directory()`/`ensure_directory_exists()`
+workflow at application startup — unchanged.
+
+*Open Result, corrected.* `PrismaMonitorApp` gained `self._last_output_path: Path | None`, initialized to
+`None` and set only in `_processing_succeeded()` to the real `PrismaWorkflowResult.output_path` of that
+specific successful run — never guessed, never reconstructed from a filename constant. `open_result()`
+now opens `self._last_output_path` directly; before any successful run (`None`) or if that exact file has
+since become unavailable, it shows the same "Process a CSV file first" message as before. Because a later
+failed attempt never reaches `_processing_succeeded()`, it never overwrites `_last_output_path`, so Open
+Result keeps pointing at the last genuinely published result rather than a nonexistent or partially
+produced file from the failed retry.
+
+*Single normalization result, corrected.* `prisma_publication.publish_cumulative_output()` gained an
+optional `precomputed_normalization: PriceNormalizationResult | None = None` parameter. When supplied
+and its outcome is `SUCCESS`, a new `_validate_precomputed_normalization()` check requires its
+`prices_by_row_index` keys to exactly equal `set(range(len(import_result.rows)))` before it is trusted;
+a mismatched row count/index set — for example a result computed for a different or stale batch — raises
+`ValueError` rather than being silently accepted (which could otherwise skip normalization for a row
+about to be published) or silently recomputed. A `BLOCKED` precomputed result is honored as-is
+regardless of row count, since it never carries price data to misattribute.
+`run_prisma_import_workflow()` now passes its own already-computed, already-`succeeded`
+`PriceNormalizationResult` as `precomputed_normalization=` when it calls `publish_cumulative_output()`,
+so `normalize_prices_for_output()` — and therefore `rate_resolution.resolve_rates_for_rows()` — runs
+exactly once per processing operation, never twice. `write_prisma_output` (P.36.15) is unaffected: it
+was already, and remains, an independent single-run writer not reachable from the active workflow, so it
+never had this double-call defect. A standalone caller of `publish_cumulative_output()` that omits
+`precomputed_normalization` (every existing test in `tests/test_prisma_publication.py`, and any future
+caller) still receives the identical fail-closed normalization this function has always performed
+internally — no behavior change for that path.
+
+**Automated evidence for the third-pass correction (2026-08-13).** `runtime_paths.py`:
+`RuntimePaths.published_directory` and `PUBLISHED_DIRECTORY_NAME` removed. `prisma_publication.py`:
+`precomputed_normalization` parameter and `_validate_precomputed_normalization()` added.
+`prisma_import_workflow.py`: passes `precomputed_normalization=normalization` to
+`publish_cumulative_output()`; no longer calls `publication_directory.mkdir()`. `app.py`:
+`start_processing()` snapshots `publication_directory` before the worker thread starts;
+`_process_worker()`/`_processing_succeeded()`/`open_result()` updated as described above;
+unused `prisma_publication.PUBLISHED_OUTPUT_FILENAME` import removed. Tests updated throughout
+(`tests/test_app.py`, `tests/test_prisma_import_workflow.py`, `tests/test_prisma_publication.py`) for
+the removed field and the corrected publication location/Open Result behavior, plus new targeted
+coverage: `tests/test_prisma_import_workflow.py::test_price_normalization_runs_exactly_once_per_processing_operation`
+(proves exactly one `normalize_prices_for_output()` call across the whole workflow, by counting calls
+through both `prisma_import_workflow`'s and `prisma_publication`'s own imported references) and
+`::test_publication_directory_must_already_exist_and_is_never_silently_created`;
+`tests/test_prisma_publication.py::test_precomputed_normalization_is_reused_without_a_second_normalization_pass`,
+`::test_mismatched_precomputed_normalization_is_rejected`, and
+`::test_blocked_precomputed_normalization_is_honored_without_a_second_pass`;
+`tests/test_app.py::test_failed_retry_after_a_success_does_not_clobber_open_result` plus Open Result
+assertions added to the existing real-workflow success/failure tests (`_last_output_path`,
+`QDesktopServices.openUrl` target, and the "Process a CSV file first" dialog before any success).
+
+Actually executed and passing (2026-08-13): `python -m pytest -q` → **888 passed, 1 skipped** (up from
+882; the one skip is pre-existing and unrelated); `python -m pytest -q tests/test_packaging.py` → **10
+passed**; the documented compilation check, `python -m compileall -q` against `BUILDING.md`'s module
+list → succeeded with no output; `git diff --check` → exit 0 (the same pre-existing, informational
+CRLF-normalization notices as before, not whitespace errors); `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` → succeeded; `python validate_package.py` → `Package validation passed`. No real
+Windows, real PRISMA, or real ECB validation was performed or is claimed.
+
+**Outstanding before this increment can be marked ✅ Completed (third-pass update):** merge to `main`. A
+manual real-Windows pass remains outstanding and must eventually prove, through the real "Import PRISMA
+Export" button: the published `Prisma_Output_Published_EUR.csv` lands in the approved download
+directory (the managed `<Downloads>\PrismaFunction` default and a user-selected directory both), never
+under `%LOCALAPPDATA%`; Open Result opens that exact file after a success and correctly reports "Process
+a CSV file first" before any success; a known non-EUR auction produces a correctly converted Tariff
+Price/Premium Price; an EUR auction uses identity conversion; an unresolved auction produces no output
+and a clear, stable error; retry works once the managed PRISMA session is opened; the legacy Excel path
+is confirmed dormant; and a pre-existing legacy `Prisma_Output_Published.csv` (if any) is not modified or
+mixed with the strict-EUR file. The separate PRISMA 5000-row large-export defect (see P.36.14) was not
+investigated, fixed, or otherwise touched by this increment or any of its corrections.
+
+**Blocking correction: exact-batch binding for `precomputed_normalization` and Decimal input
+validation (2026-08-14, fourth pass).** A further review of the third-pass correction above found two
+remaining defects, both in `price_normalization.py`/`prisma_publication.py`, neither touching
+publication location, Open Result, the 12-column contract, Decimal rounding policy, browser behavior,
+the legacy-file decision, or the separate PRISMA 5000-row defect.
+
+*Defect 1 — weak precomputed-batch validation.* `prisma_publication._validate_precomputed_normalization`
+checked only that a successful `precomputed_normalization`'s `prices_by_row_index` keys equaled
+`set(range(len(import_result.rows)))` — a same-length index set, not the actual batch. A successful
+`PriceNormalizationResult` computed for a *different* batch of the same length (or the same rows in a
+different order) satisfied that check and could be published against the wrong rows.
+
+*Fix.* `price_normalization.py` gained an immutable, deterministic fingerprint,
+`compute_batch_binding(rows) -> RowBinding`, built centrally (never duplicated in
+`prisma_publication.py`) from every field that determines resolution, conversion, output-row
+association, or price: Auction ID, auction state, exit market, entry market, source Tariff Price, and
+source Premium Price, one tuple per row in row order (row order itself is therefore covered by tuple
+position — a reordered batch produces a different binding). A successful `PriceNormalizationResult` now
+carries `batch_binding = compute_batch_binding(rows)`; a `BLOCKED` result's `batch_binding` stays empty,
+matching its already-empty `prices_by_row_index` — it never carries data to misattribute either.
+`_validate_precomputed_normalization` now additionally re-derives `compute_batch_binding(import_result.
+rows)` and rejects (`ValueError`, before the existing cumulative file is even read) any supplied
+successful result whose `batch_binding` does not match exactly, on top of (not instead of) the existing
+index-set check. The exact original batch a result was computed for continues to be accepted and reused
+without a second `normalize_prices_for_output()` call — the one-normalization-pass behavior established
+by the third-pass correction is unchanged; a standalone `publish_cumulative_output()` call that omits
+`precomputed_normalization` remains fail-closed exactly as before; a `BLOCKED` result remains incapable
+of publishing anything (its `prices_by_row_index` is always empty, so the per-row formatting loop cannot
+read a price for it regardless of any binding check).
+
+*Defect 2 — unvalidated Decimal boundary.* `normalize_prices_for_output` converted
+`tariff_source_mwh_h`/`premium_source_mwh_h` via `Decimal(str(value))` but never checked the result
+finite or non-negative, and never checked the multiplied EUR value could actually be quantized under
+`format_price()`'s six-decimal-place policy. A `NaN`/`Infinity`/negative source price passed the
+conversion (`Decimal("nan")`/`Decimal("-5")` construct without raising) and could reach `transform_row`;
+an excessively large source price (or a source price multiplied by a very large but individually
+finite/positive `rate_to_eur`) could raise an uncontrolled `decimal.InvalidOperation` out of
+`format_price()`'s `quantize()` call instead of failing closed.
+
+*Fix.* Both source prices are now checked finite and non-negative immediately after conversion; both
+resulting multiplied EUR values are checked finite, non-negative, *and* safely serializable (a
+`format_price()` dry run caught via `decimal.DecimalException`, `Decimal`'s own common base for
+`InvalidOperation`/`Overflow`/etc.) before a row's price is accepted. Any failure — source or converted
+— is reported with the existing `invalid_conversion_data` reason code and blocks the entire batch exactly
+like an unresolved rate: no partial prices, and no `decimal.DecimalException` ever escapes this module.
+Zero remains a valid source or converted price, unchanged.
+
+**Automated evidence for the fourth-pass correction (2026-08-14).** `price_normalization.py`:
+`RowBinding`, `compute_batch_binding()`, `PriceNormalizationResult.batch_binding`,
+`_is_finite_nonnegative()`, `_is_safely_serializable()` added; the per-row loop in
+`normalize_prices_for_output()` gained the source-price and converted-EUR-price validation checks
+described above. `prisma_publication.py`: `_validate_precomputed_normalization()` now also compares
+`compute_batch_binding(import_result.rows)`. `tests/test_price_normalization.py` gained 16 new tests:
+NaN source Tariff Price, Infinite source Premium Price, negative source Tariff/Premium Price, an
+excessively large source price, and an individually-valid-source/individually-valid-rate pair whose
+*product* cannot be serialized are each blocked as `invalid_conversion_data` rather than raising; zero
+source prices remain valid; an invalid row in an otherwise-valid mixed batch blocks the whole batch with
+no partial prices; a successful result's `batch_binding` matches a freshly computed
+`compute_batch_binding()` and a `BLOCKED` result's stays empty; and `compute_batch_binding()` itself
+differs on row-order changes, an Auction ID change, and a source Tariff/Premium Price change.
+`tests/test_prisma_publication.py` gained 8 new tests: a precomputed result for a different batch of the
+same index-set length is rejected (the original defect's exact reproduction — same `{0}`/`{0,1}`-style
+index set, different content); reordered rows are rejected; changing only Auction ID, only source Tariff
+Price, or only source Premium Price each independently rejects a precomputed result; the exact original
+batch is still accepted and reused without a second `normalize_prices_for_output()` call; and a blocked
+batch (NaN source Tariff Price) leaves an already-published cumulative file byte-for-byte unchanged,
+whether blocked via `publish_cumulative_output`'s own normalization pass or a precomputed `BLOCKED`
+result.
+
+Actually executed and passing (2026-08-14): `python -m pytest -q` → **908 passed, 1 skipped** (up from
+888; the one skip is pre-existing and unrelated); `python -m pytest -q tests/test_packaging.py` → **10
+passed**; the documented compilation check, `python -m compileall -q` against `BUILDING.md`'s module
+list → succeeded with no output; `git diff --check` → exit 0 (the same pre-existing, informational
+CRLF-normalization notices as before, not whitespace errors); `python -m PyInstaller --clean --noconfirm
+PrismaFunction.spec` → succeeded; `python validate_package.py` → `Package validation passed`. No real
+Windows, real PRISMA, or real ECB validation was performed or is claimed.
+
+**Outstanding before this increment can be marked ✅ Completed (fourth-pass update):** merge to `main`.
+The same manual real-Windows pass recorded in the third-pass update above remains outstanding and
+unchanged in scope; this correction does not add to it. The separate PRISMA 5000-row large-export
+defect (see P.36.14) was not investigated, fixed, or otherwise touched by this increment or any of its
+corrections.
+
 ### Remaining support and finalization stages
 
 | ID | Stage | Status | Dependencies and scope |
@@ -2571,6 +3039,7 @@ to `main`. Implementation, automated tests, and required manual Windows validati
 | P.36.17 | Remove Recent activity panel and expand the Mapping workspace | 🟡 Implemented, automated-tested; not yet merged | UI-only removal, no change to the 12-column contract or any P.36 processing/publication behavior. See its own dated section above. Real-Windows validation of the released vertical space and Mapping resize behavior remains outstanding. |
 | P.36.18 | Order Mapping rows by Flow Start descending | 🟡 Implemented, automated-tested, packaging-validated; not yet merged | Presentation-only ordering in `mapping_presentation.py`; no change to `import_result.rows`, the 12-column output CSV, or publication order. See its own dated section above. Real-Windows validation remains outstanding. |
 | P.36.19 | Historical ECB exchange rate to EUR in Mapping | 🟡 Implemented, automated-tested, real-Windows Mapping display validated (2026-08-13); not yet merged | Mapping-display-only addition; no change to the 35-column input or 12-column output contract. See its own dated section above. The live auction-detail endpoint is discovered and implemented (2026-08-13); the same-day page-wiring and EXIT/ENTRY currency-leak defect fixes are implemented and automated-tested; the Mapping contract is corrected to its authoritative 10 columns (`Auction Date`/`Booked Capacity` restored, same day) and its real-Windows visual validation (run from source, not the packaged executable) is complete; outstanding: a future evidenced batch adding further approved market/storage currency metadata beyond the one evidenced `VGS Storage Hub` EXIT-side entry. |
+| P.36.21 | Strict EUR normalization of Tariff Price and Premium Price | 🟡 Implemented, automated-tested; not yet merged | Fail-closed EUR gate in `price_normalization.py`. **Corrected 2026-08-13 (same day):** the gate is now wired into `app.py`'s real, active "Import PRISMA Export" call graph itself (`prisma_import_workflow.run_prisma_import_workflow`), which publishes the confirmed-EUR 12-column CSV (`Prisma_Output_Published_EUR.csv`, via `prisma_publication.publish_cumulative_output`) and no longer calls the legacy Excel pipeline at all (kept only as dormant, independently tested compatibility code); renamed `processor.py`'s misleading pre-EUR price fields. **Corrected again 2026-08-13 (third pass, same day):** the published CSV now lands in the approved download directory (`self._download_directory.current`, `P.36.3`) instead of `%LOCALAPPDATA%` (`RuntimePaths.published_directory` removed); Open Result now opens the real `PrismaWorkflowResult.output_path` from the last success (`self._last_output_path`), never clobbered by a later failure; `publish_cumulative_output()` reuses one precomputed `PriceNormalizationResult` per processing operation instead of normalizing the batch twice. **Corrected again 2026-08-14 (fourth pass):** `precomputed_normalization` is now validated against an immutable `price_normalization.compute_batch_binding()` fingerprint (Auction ID, state, exit/entry market, source Tariff/Premium Price, row order), not just a same-length index set, so a result computed for a different or reordered same-length batch is rejected; source and converted EUR prices are now validated finite, non-negative, and safely serializable, so a NaN/Infinite/negative/unserializably-large price is blocked as `invalid_conversion_data` instead of silently passing through or raising an uncontrolled `decimal.DecimalException`. See its own dated sections above for the full corrected call graph, atomicity guarantee, and evidence. Outstanding: merge to `main`; manual real-Windows/real-PRISMA/real-ECB validation. |
 | P.36.12 | Regression and clean-Windows acceptance | ⬜ Planned | Final gate after all required P.36 implementation and packaging stages. Run the full suite and the approved real-Windows end-to-end checklist. |
 
 ## Current blockers and risks
@@ -2650,6 +3119,42 @@ to `main`. Implementation, automated tests, and required manual Windows validati
   (run from source, not the packaged executable) is complete for the current 10-column contract
   (2026-08-13; see the dated "Real-Windows Mapping validation" note above) — the remaining gap is
   the further evidenced currency batch above, not the display itself.
+- P.36.21 (strict EUR normalization of Tariff Price and Premium Price) is implemented and
+  automated-tested (2026-08-13; corrected same day, see its own dated section above) on branch
+  `feature/p36-21-eur-price-normalization`; not yet merged. `price_normalization.py` gates
+  fail-closed on a confirmed EUR/MWh/h conversion; `processor.py`'s misleading pre-EUR price field
+  names are corrected; the cumulative publication target is renamed to a new, clearly distinguished
+  filename (`Prisma_Output_Published_EUR.csv`) so a pre-P.36.21 file is never read, mutated, or
+  mixed with strict-EUR output. A same-day review found the gate was originally wired only into
+  `prisma_output.write_prisma_output`/`prisma_publication.publish_cumulative_output`, neither of
+  which `app.py` called — so the real "Import PRISMA Export" button could still present a completed
+  result with an unconfirmed price. This is fixed: `prisma_import_workflow.run_prisma_import_workflow`
+  (the function `app.py` actually calls) now runs the strict gate itself, before any source-operation
+  state change, and publishes the confirmed-EUR CSV directly; the legacy Excel pipeline
+  (`storage.py`'s `export_excel`/`auctions` table) is no longer called by the active workflow at all
+  (kept only as dormant, independently tested compatibility code, per the correction's option (a)).
+  A further same-day (third-pass) review found the published CSV still landed under
+  `%LOCALAPPDATA%` (`RuntimePaths.published_directory`) rather than the approved download directory,
+  and that `publish_cumulative_output()` independently re-normalized the same batch
+  `run_prisma_import_workflow()` had already normalized. Both are fixed: `app.py` now snapshots
+  `self._download_directory.current` and passes it as `publication_directory`;
+  `RuntimePaths.published_directory` is removed; Open Result now opens the real
+  `PrismaWorkflowResult.output_path` from `self._last_output_path`, set only on success and never
+  clobbered by a later failure; and `publish_cumulative_output()` accepts an optional, validated
+  `precomputed_normalization` so the workflow's one `PriceNormalizationResult` is reused instead of
+  recomputed. See the "Blocking correction: publication location and single normalization result
+  (2026-08-13, third pass, same day)" entry in its own dated section above for the full detail and
+  evidence. A fourth-pass review (2026-08-14) found `_validate_precomputed_normalization` accepted a
+  same-length precomputed result computed for a *different* or reordered batch, and found
+  `normalize_prices_for_output` did not validate a source/converted Decimal finite, non-negative, or
+  safely serializable — both are fixed: an immutable `price_normalization.compute_batch_binding()`
+  fingerprint now binds a result to its exact ordered rows, and every source/converted price is now
+  validated before acceptance, blocking (never raising) on a NaN/Infinite/negative/unserializable value.
+  See the "Blocking correction: exact-batch binding for `precomputed_normalization` and Decimal input
+  validation (2026-08-14, fourth pass)" entry in its own dated section above for the full detail and
+  evidence. Outstanding: merge to `main`; manual real-Windows/real-PRISMA/real-ECB validation through
+  the real UI button, including that the published file lands in the approved directory and Open
+  Result opens it. The separate PRISMA 5000-row large-export defect (P.36.14) was not touched.
 
 ## Next recommended increment
 
@@ -2705,6 +3210,16 @@ to `main`. Implementation, automated tests, and required manual Windows validati
     above). Before it can be marked ✅ Completed: obtain or record further approved, evidenced
     market/storage currency decisions (mirroring the P.35.1 process) for catalog entries — and
     sides — beyond `VGS Storage Hub`'s EXIT side; then merge before P.36.12.
+14. P.36.21 (strict EUR normalization of Tariff Price and Premium Price) is implemented,
+    automated-tested, and corrected same-day so the real "Import PRISMA Export" button itself is
+    strict-EUR-gated, then corrected again same-day (third pass) so the published CSV lands in the
+    approved download directory instead of `%LOCALAPPDATA%`, Open Result opens the real successful
+    output path, and normalization runs exactly once per processing operation (2026-08-13, see its own
+    dated sections above); corrected again (fourth pass, 2026-08-14) so a precomputed normalization
+    result is bound to its exact ordered row batch (not just a same-length index set) and every
+    source/converted Decimal price is validated finite, non-negative, and safely serializable before
+    acceptance; obtain real-Windows/real-PRISMA/real-ECB validation through the real UI, then merge
+    before P.36.12.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 

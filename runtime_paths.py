@@ -81,6 +81,10 @@ def runtime_paths(*, environ=None) -> RuntimePaths:
     return RuntimePaths(
         root=root,
         database=root / "data" / DATABASE_FILENAME,
+        # Dormant (P.36.21): the pre-P.36 Excel result is no longer written
+        # by the active workflow (see `prisma_import_workflow.py`); this
+        # field/path is preserved only so `legacy_artifacts()` can still
+        # migrate a pre-existing file from an older installation layout.
         result=root / "data" / "result" / RESULT_FILENAME,
         state=root / "state" / STATE_FILENAME,
         log=root / "logs" / LOG_FILENAME,
