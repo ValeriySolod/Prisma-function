@@ -91,7 +91,7 @@ def run(source: Path, root: Path, day: date, **overrides):
     # `run_prisma_import_workflow()` no longer creates `publication_directory`
     # itself (P.36.21 publication-location correction: it must already be an
     # approved, existing directory — `app.py` guarantees this via
-    # `DownloadDirectorySelection`/`ensure_directory_exists()` before this
+    # `download_directory.validate_download_directory()` before this
     # function is ever called). Tests own that same precondition here.
     Path(kwargs["publication_directory"]).mkdir(parents=True, exist_ok=True)
     return run_prisma_import_workflow(
@@ -466,10 +466,10 @@ def test_price_normalization_runs_exactly_once_per_processing_operation(tmp_path
 
 
 def test_publication_directory_must_already_exist_and_is_never_silently_created(tmp_path):
-    """The publication directory is the approved, user-facing download
-    directory (`app.py`'s `DownloadDirectorySelection`), never something this
-    function conjures into existence itself; a missing directory fails
-    closed instead of being silently created."""
+    """The publication directory is the approved, user-facing directory
+    `app.py` resolves via `download_directory.default_download_directory()`,
+    never something this function conjures into existence itself; a missing
+    directory fails closed instead of being silently created."""
     source = write_export(tmp_path / "source.csv", [BASE])
     missing = tmp_path / "does_not_exist"
     with pytest.raises(PrismaWorkflowError):

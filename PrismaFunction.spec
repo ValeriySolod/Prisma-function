@@ -1,15 +1,9 @@
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-
-
-playwright_hidden_imports = collect_submodules("playwright")
-playwright_data = collect_data_files("playwright")
-
 analysis = Analysis(
     ["app.py"],
     pathex=[],
     binaries=[],
-    datas=playwright_data,
-    hiddenimports=playwright_hidden_imports,
+    datas=[],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

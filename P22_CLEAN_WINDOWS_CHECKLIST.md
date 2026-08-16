@@ -1,5 +1,18 @@
 # P.22 clean-Windows package validation checklist
 
+**Superseded by P.38/P.39 (2026-08-16):** the "Browser behavior" section
+below (Open PRISMA browser detection/launch) tests a control that no longer
+exists — PrismaFunction never opens, controls, or downloads anything from
+the PRISMA website; see `ROADMAP.md`'s P.38 entry. The "CSV, processing, and
+monitoring" section's "Start Monitoring"/"Stop Monitoring" controls were
+already removed by P.36.10, and its "Process CSV"/"Open Result" controls no
+longer exist either: selecting a valid CSV now immediately processes and
+publishes it as the single action (see `ROADMAP.md`'s P.39 entry); there is
+no separate process step or result-opening control to test. P.22 was never
+marked complete (see `CLAUDE.md`); do not execute either section as written.
+The startup and shutdown sections still apply to the current local-CSV
+workflow.
+
 Use this checklist on a separate physical Windows 10 or Windows 11 computer when one is available. VirtualBox validation was discontinued because the VM setup was unreliable and repeatedly returned to Windows installation; virtual machines are no longer part of the planned validation approach. The test account must be a standard, non-administrator account, and the computer must not have Python, the project virtual environment, or developer tools installed. Test the existing complete `dist\PrismaFunction` onedir package; do not rebuild it on the clean computer.
 
 ## Test record

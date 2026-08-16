@@ -29,11 +29,11 @@ presented output) so that unrelated functionality keeps working.
 
 Publication location correction (2026-08-13, second review pass).
 ``publication_directory`` must already be an existing, approved, user-facing
-directory — the same Documents-directory-or-user-selected-directory contract
-(`P.36.3`) `app.py` already validates via `DownloadDirectorySelection`/
-`ensure_directory_exists()` before this function is ever called — never
-`%LOCALAPPDATA%`. This function does not create, mkdir, or otherwise silently
-materialize ``publication_directory`` itself; `prisma_publication.
+directory — the Documents-directory contract (`P.36.3`) `app.py` already
+validates via `download_directory.validate_download_directory()` before this
+function is ever called — never `%LOCALAPPDATA%`. This function does not
+create, mkdir, or otherwise silently materialize ``publication_directory``
+itself; `prisma_publication.
 publish_cumulative_output`'s own existing-directory validation is the single
 place that check happens, so a directory that has since become unavailable
 (deleted, unmounted, permissions revoked) fails closed with a typed
@@ -161,11 +161,15 @@ def run_prisma_import_workflow(
 
     ``auction_lookup``/``page`` are forwarded unchanged to
     `rate_resolution.resolve_rates_for_rows` for any uncached Finished
-    auction; a caller driving a managed PRISMA session must supply an
-    `auction_lookup` whose transport is already marshalled through
-    `PrismaLifecycleController.run_on_page()` (see
-    `prisma_lifecycle.ManagedPrismaAuctionDetailFetcher`) — this function
-    never touches Playwright itself and never launches a browser.
+    auction. Per the revised specification, PrismaFunction never opens,
+    controls, or downloads anything from the PRISMA website, so no caller
+    supplies either argument today: an uncached Finished auction's rate
+    resolution fails closed (`RateResolutionOutcome.AUCTION_END_UNAVAILABLE`)
+    instead of blocking on live PRISMA access, and a previously resolved
+    auction is served from `storage.AuctionStorage`'s durable cache. Both
+    parameters remain so a fake/test `PrismaAuctionLookup` can still exercise
+    this function's full call graph. This function never touches a browser
+    itself.
     """
     detection = detect_csv_format(source_path)
     if detection.format is CsvFormat.MONITORING:

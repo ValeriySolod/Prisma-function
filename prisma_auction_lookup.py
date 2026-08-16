@@ -11,34 +11,19 @@ official PRISMA auction data, looked up by the exact `Auction ID`.
 
 This module is split, per the approved scope, into a transport-independent
 business layer (`parse_auction_end_record`, fully testable with fakes) and a
-thin Playwright-facing transport seam (`AuctionDetailFetcher`,
-`PlaywrightAuctionDetailFetcher`) that keeps page/selector/navigation
-mechanics out of the business rules, mirroring `prisma_download.py`'s
-existing split between `PrismaDownloadOrchestrator` (transport) and its own
-typed, page-independent result/error types.
+thin transport seam (`AuctionDetailFetcher`) that keeps
+transport/selector/navigation mechanics out of the business rules.
 
-Real-environment evidence (2026-08-13, see ROADMAP.md P.36.19). Live
-Windows/PRISMA DevTools inspection of a real finished auction (Auction ID
-`62756895`) found that its public details page
-(`https://app.prisma-capacity.eu/reporting/auctions/details/{auction_id}`)
-itself performs `GET https://platform.prisma-capacity.eu/rest/auctions/{auction_id}`,
-returning a JSON object exposing `id`, `phase` (e.g. `"FINISHED"`), and the
-authoritative `auctionEnd` ISO-8601 UTC timestamp. The same response also
-contains `auctionStart`, `runtime.start`, and `runtime.end` — different
-fields that `PlaywrightAuctionDetailFetcher.fetch()` never reads, matching
-the approved "never substitute" list for the auction-end value.
-`PlaywrightAuctionDetailFetcher.fetch()` issues this request through the
-managed session's own `page.request` (Playwright's `APIRequestContext`,
-which automatically carries the browser context's cookies), so the lookup
-stays part of `PrismaLifecycleController`'s existing managed PRISMA session
-rather than opening an independent, unauthenticated connection. The business
-layer below (accepting already-retrieved raw detail fields) is unchanged;
-the fetcher normalizes the live JSON shape into that same
-transport-agnostic `raw_fields` contract. Live-Windows visual validation of
-the resulting Mapping display remains outstanding (see ROADMAP.md); wiring a
-real `page` object into `app.py`'s resolution call is a separate, not-yet-
-scheduled follow-up (`PrismaLifecycleController` does not currently expose
-its managed page outside its own worker thread).
+Per the revised specification, PrismaFunction no longer opens, controls, or
+downloads anything from the PRISMA website: there is no managed browser
+session, so no `AuctionDetailFetcher` implementation is ever supplied in
+practice. `PrismaAuctionLookup` therefore fails closed (a typed
+`PrismaAuctionDetailTransportError`, the same "Unavailable" outcome this
+module always produced when no live PRISMA surface was reachable) whenever
+no explicit `fetcher` is given. A previously resolved auction's rate remains
+available indefinitely from `storage.AuctionStorage`'s durable per-Auction-ID
+cache (see `rate_resolution.py`), so this only affects an auction that has
+never been resolved before.
 """
 from __future__ import annotations
 
@@ -46,7 +31,6 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Mapping, Protocol
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 __all__ = [
@@ -55,7 +39,6 @@ __all__ = [
     "FIELD_AUCTION_END",
     "FINISHED_STATE",
     "DEFAULT_TIMEOUT_MS",
-    "AUCTION_DETAIL_URL_TEMPLATE",
     "PrismaAuctionLookupError",
     "PrismaAuctionRecordMismatchError",
     "PrismaAuctionNotFinishedError",
@@ -64,7 +47,6 @@ __all__ = [
     "PrismaAuctionDetailTransportError",
     "AuctionEndRecord",
     "AuctionDetailFetcher",
-    "PlaywrightAuctionDetailFetcher",
     "PrismaAuctionLookup",
     "parse_auction_end_record",
     "authoritative_end_date",
@@ -73,29 +55,16 @@ __all__ = [
 FIELD_AUCTION_ID = "Auction ID"
 FIELD_STATE = "State"
 # This module's own transport-agnostic `raw_fields` key, not a live PRISMA
-# field name: `PlaywrightAuctionDetailFetcher.fetch()` normalizes the live
-# JSON response's `auctionEnd` field (see the module docstring) into this key
-# before handing it to `parse_auction_end_record`.
+# field name: an `AuctionDetailFetcher` implementation normalizes its own raw
+# response shape into this key before handing it to `parse_auction_end_record`.
 FIELD_AUCTION_END = "End of Auction"
 FINISHED_STATE = "Finished"
 DEFAULT_TIMEOUT_MS = 10_000
 
-# Live Windows/PRISMA DevTools evidence (Auction ID 62756895, 2026-08-13; see
-# ROADMAP.md's P.36.19 entry): the public auction-details page performs this
-# exact request against the platform host (distinct from the public
-# `app.prisma-capacity.eu` host `PrismaSessionValidator` validates the
-# managed session against).
-AUCTION_DETAIL_URL_TEMPLATE = "https://platform.prisma-capacity.eu/rest/auctions/{auction_id}"
-_RESPONSE_FIELD_ID = "id"
-_RESPONSE_FIELD_PHASE = "phase"
-_RESPONSE_FIELD_AUCTION_END = "auctionEnd"
-_RESPONSE_FINISHED_PHASE = "FINISHED"
-
 # Europe/Berlin is this project's already-established, live-verified
-# authoritative timezone for PRISMA date interpretation (see
-# `prisma_download.py`'s date-filter fill, verified across the CET/CEST DST
-# boundary). The authoritative calendar date used for ECB rate selection is
-# always this timezone's local date, never a UTC-shifted one.
+# authoritative timezone for PRISMA date interpretation. The authoritative
+# calendar date used for ECB rate selection is always this timezone's local
+# date, never a UTC-shifted one.
 _SOURCE_ZONE = ZoneInfo("Europe/Berlin")
 _LOCAL_TIMESTAMP_PATTERN = re.compile(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\Z")
 
@@ -147,106 +116,6 @@ class AuctionDetailFetcher(Protocol):
         Raises `PrismaAuctionDetailTransportError` (or a subclass) on any
         transport-level failure; never returns fabricated field values."""
         ...
-
-
-class PlaywrightAuctionDetailFetcher:
-    """Production transport seam, backed by the live-evidenced official
-    PRISMA auction-detail endpoint (see the module docstring):
-    `GET {AUCTION_DETAIL_URL_TEMPLATE}`.
-
-    The request is issued through the managed session's own `page.request`
-    (Playwright's `APIRequestContext`), so it automatically reuses the
-    managed browser context's cookies instead of opening an independent,
-    unauthenticated connection — the same "stay inside the managed session"
-    property `PrismaDownloadOrchestrator` already relies on for its own page
-    interactions. Only `id`, `phase`, and `auctionEnd` are ever read from the
-    response; `auctionStart`, `runtime.start`, `runtime.end`, and every other
-    response field are never consulted (see the module docstring's
-    prohibited-substitution list).
-    """
-
-    def fetch(
-        self, page: object, auction_id: str, *, timeout_ms: int = DEFAULT_TIMEOUT_MS
-    ) -> Mapping[str, str]:
-        url = AUCTION_DETAIL_URL_TEMPLATE.format(
-            auction_id=quote(str(auction_id), safe="")
-        )
-        try:
-            response = page.request.get(url, timeout=timeout_ms)
-        except Exception as exc:
-            raise PrismaAuctionDetailTransportError(
-                f"The official PRISMA auction-detail request for Auction ID "
-                f"{auction_id} failed: {type(exc).__name__}."
-            ) from exc
-
-        if not self._response_ok(response):
-            status = getattr(response, "status", None)
-            raise PrismaAuctionDetailTransportError(
-                f"The official PRISMA auction-detail request for Auction ID "
-                f"{auction_id} returned an unsuccessful HTTP status "
-                f"({status if status is not None else 'unknown'})."
-            )
-
-        payload = self._parse_json_object(response, auction_id)
-
-        raw_id = payload.get(_RESPONSE_FIELD_ID)
-        if raw_id is None or not str(raw_id).strip():
-            raise PrismaAuctionRecordMismatchError(
-                f"The auction detail response for Auction ID {auction_id} did "
-                "not include its own id."
-            )
-        # System-boundary normalization (explicitly permitted here, never
-        # inside the transport-independent business layer below): the live
-        # API returns `id` as a JSON number, while `auction_id` is this
-        # module's own string identity; both sides are compared as stripped
-        # strings so a numeric/string type difference is never itself a
-        # mismatch, but any other difference is rejected.
-        if str(raw_id).strip() != str(auction_id).strip():
-            raise PrismaAuctionRecordMismatchError(
-                f"The auction detail response id {str(raw_id).strip()!r} does "
-                f"not match the requested Auction ID {auction_id!r}."
-            )
-
-        raw_phase = payload.get(_RESPONSE_FIELD_PHASE)
-        phase_text = str(raw_phase).strip() if raw_phase is not None else ""
-        if phase_text != _RESPONSE_FINISHED_PHASE:
-            raise PrismaAuctionNotFinishedError(
-                f"Auction ID {auction_id} official phase is "
-                f"{(phase_text or 'missing')!r}, not {_RESPONSE_FINISHED_PHASE!r}."
-            )
-
-        raw_fields: dict[str, str] = {
-            FIELD_AUCTION_ID: str(raw_id).strip(),
-            FIELD_STATE: FINISHED_STATE,
-        }
-        raw_end = payload.get(_RESPONSE_FIELD_AUCTION_END)
-        if raw_end is not None and str(raw_end).strip():
-            raw_fields[FIELD_AUCTION_END] = str(raw_end).strip()
-        return raw_fields
-
-    @staticmethod
-    def _response_ok(response: object) -> bool:
-        ok = getattr(response, "ok", None)
-        if isinstance(ok, bool):
-            return ok
-        status = getattr(response, "status", None)
-        return isinstance(status, int) and 200 <= status < 300
-
-    @staticmethod
-    def _parse_json_object(response: object, auction_id: str) -> dict:
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise PrismaAuctionDetailTransportError(
-                f"The official PRISMA auction-detail response for Auction ID "
-                f"{auction_id} was not valid JSON."
-            ) from exc
-        if not isinstance(payload, dict):
-            raise PrismaAuctionDetailTransportError(
-                f"The official PRISMA auction-detail response for Auction ID "
-                f"{auction_id} was not a JSON object."
-            )
-        return payload
 
 
 def _parse_end_timestamp(raw_value: str, auction_id: str) -> datetime:
@@ -330,7 +199,19 @@ def authoritative_end_date(record: AuctionEndRecord) -> date:
 
 
 class PrismaAuctionLookup:
-    """Accepts an exact Auction ID and returns a validated `AuctionEndRecord`."""
+    """Accepts an exact Auction ID and returns a validated `AuctionEndRecord`.
+
+    ``fetcher`` has no default implementation: per the revised specification,
+    PrismaFunction never opens, controls, or downloads anything from the
+    PRISMA website, so there is no live transport to fall back to. Omitting
+    ``fetcher`` (the normal case for every real caller today) makes `lookup()`
+    fail closed with `PrismaAuctionDetailTransportError` — the same typed,
+    safe "Unavailable" outcome this module always produced for an
+    unreachable live PRISMA surface — instead of raising an unrelated
+    `AttributeError`. A previously resolved auction's rate is unaffected: it
+    is served from `storage.AuctionStorage`'s durable cache and never reaches
+    this fetch path again (see `rate_resolution.py`).
+    """
 
     def __init__(
         self,
@@ -338,11 +219,16 @@ class PrismaAuctionLookup:
         *,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ) -> None:
-        self._fetcher = fetcher if fetcher is not None else PlaywrightAuctionDetailFetcher()
+        self._fetcher = fetcher
         self._timeout_ms = timeout_ms
 
     def lookup(self, page: object, auction_id: str) -> AuctionEndRecord:
         if not isinstance(auction_id, str) or not auction_id.strip():
             raise PrismaAuctionLookupError("Auction ID must be a non-blank string.")
+        if self._fetcher is None:
+            raise PrismaAuctionDetailTransportError(
+                "No official PRISMA auction-detail transport is available to "
+                f"resolve Auction ID {auction_id}."
+            )
         raw_fields = self._fetcher.fetch(page, auction_id, timeout_ms=self._timeout_ms)
         return parse_auction_end_record(auction_id, raw_fields)

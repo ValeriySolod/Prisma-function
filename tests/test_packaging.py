@@ -20,8 +20,6 @@ def test_spec_configures_windows_gui_application():
     assert '["app.py"]' in content
     assert 'name="PrismaFunction"' in content
     assert "console=False" in content
-    assert 'collect_submodules("playwright")' in content
-    assert 'collect_data_files("playwright")' in content
     assert "COLLECT(" in content
     assert 'version="PrismaFunction.version"' in content
     assert 'excludes=["pytest", "_pytest", "setuptools"]' in content

@@ -3,32 +3,21 @@ import gc
 import os
 import threading
 import time
-from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QDate, Qt
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QWidget
 
 import app
-import prisma_lifecycle
 import prisma_output
 import prisma_publication
 from csv_contracts import PRISMA_EXPORT_COLUMNS
-from date_range_selection import DateRange
-from download_directory import DownloadDirectoryError
-from manual_csv_selection import ManualCsvOutcome
-from manual_csv_selection import describe_rejection as describe_manual_csv_rejection
 from mapping_presentation import MAPPING_DISPLAY_FIELDS
 from processor import PrismaImportError
-from prisma_auction_lookup import PrismaAuctionDetailTransportError
-from prisma_download import PrismaDownloadOutcome, describe_download_failure
-from prisma_import_workflow import PrismaPriceNormalizationError, PrismaWorkflowResult
-from prisma_lifecycle import PrismaLifecycleEvent, PrismaLifecycleNoActivePageError, PrismaLifecycleState
 from prisma_source_updates import SourceUpdateStatus
 from storage import AuctionStorage, RateResolutionRecord
 from version import APP_DISPLAY_NAME, __version__
@@ -41,16 +30,15 @@ def qt_app() -> QApplication:
 
 
 def _build_app(monkeypatch, tmp_path):
-    monkeypatch.setattr(app, "PrismaLifecycleController", Mock(return_value=Mock()))
     root = tmp_path / "runtime"
     paths = app.RuntimePaths(
         root=root, database=root / "data/test.db",
         result=root / "data/result/test.xlsx",
         state=root / "state/test.json", log=root / "logs/test.log",
     )
-    download_directory = tmp_path / "Documents"
-    download_directory.mkdir()
-    widget = app.PrismaMonitorApp(paths, download_directory)
+    publication_directory = tmp_path / "Documents"
+    publication_directory.mkdir()
+    widget = app.PrismaMonitorApp(paths, publication_directory)
     return widget, None
 
 
@@ -67,23 +55,70 @@ def window(qt_app, monkeypatch, tmp_path):
     widget, browser = _build_app(monkeypatch, tmp_path)
     yield widget, browser
     _close_app(widget)
-    # Each PrismaMonitorApp instance holds self-referencing QTimer/slot cycles
-    # (e.g. self._prisma_timer -> self._poll_prisma_lifecycle -> self); plain
-    # refcounting never reclaims those, only Python's cyclic GC does. Forcing
-    # collection after every test keeps unreachable Qt object graphs from
-    # piling up across the whole session and being torn down in one large,
-    # unordered batch at interpreter shutdown.
+    # Each PrismaMonitorApp instance holds self-referencing Qt signal/slot
+    # cycles; plain refcounting never reclaims those, only Python's cyclic GC
+    # does. Forcing collection after every test keeps unreachable Qt object
+    # graphs from piling up across the whole session and being torn down in
+    # one large, unordered batch at interpreter shutdown.
     del widget, browser
     gc.collect()
 
 
-def accept_date_range(
-    widget: app.PrismaMonitorApp, start: date = date(2026, 3, 1), end: date = date(2026, 3, 5)
-) -> DateRange:
-    widget.start_date_edit.setDate(QDate(start.year, start.month, start.day))
-    widget.end_date_edit.setDate(QDate(end.year, end.month, end.day))
-    widget._validate_date_range()
-    return widget._date_range_selection.current
+@pytest.fixture(autouse=True)
+def _default_critical_dialog_mock(monkeypatch):
+    """Selecting an accepted CSV now always triggers real background
+    processing (see `app._select_manual_csv`/`_process_selected_csv`), which
+    fails closed for most of this file's fixture rows (no confirmed EUR
+    rate). Settling that processing via `_settle_processing()` below would
+    otherwise be free to pop a real blocking `QMessageBox.critical` dialog.
+    Mocking it here by default keeps every test safe; a test that wants to
+    inspect the actual dialog calls installs its own mock afterward — the
+    same `monkeypatch` fixture instance lets a later `setattr` in the test
+    body override this default for the rest of that test.
+    """
+    monkeypatch.setattr(QMessageBox, "critical", Mock())
+
+
+def _settle_processing(widget, *, timeout_s: float = 5.0) -> None:
+    """Pump the Qt event loop until background processing triggered by
+    `_select_manual_csv()` has settled (bounded).
+
+    A real user's separate clicks naturally allow this event-loop time to
+    pass between selections; calling `_select_manual_csv()` twice
+    back-to-back in a test does not. Without settling first, the still-
+    "active" first selection makes `_select_manual_csv()`'s own guard treat
+    a second, immediate selection as ignorable.
+    """
+    deadline = time.monotonic() + timeout_s
+    while widget._processing_active and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert not widget._processing_active, "processing did not settle within the timeout"
+
+
+def _seed_resolved_rate(
+    widget, auction_id: str, *, currency: str = "EUR", rate_to_eur: str = "1",
+    ecb_publication_date: str = "2026-08-01",
+    auction_end_at: str = "2026-08-01T15:00:00+00:00",
+) -> None:
+    """Directly populate `AuctionStorage`'s durable per-Auction-ID rate cache.
+
+    Per the revised specification, PrismaFunction never opens, controls, or
+    downloads anything from the PRISMA website, so there is no live PRISMA
+    transport left in the application to resolve an uncached Finished
+    auction's rate. A previously fixed resolution is the only way a Finished
+    auction's rate becomes (and stays) resolved; seeding it directly here
+    mirrors that reality instead of faking a live fetch that no longer
+    exists in production.
+    """
+    AuctionStorage(widget._runtime_paths.database).save_rate_resolution(
+        RateResolutionRecord(
+            auction_id=auction_id, auction_state="Finished",
+            auction_end_at=auction_end_at, currency=currency,
+            ecb_publication_date=ecb_publication_date, rate_to_eur=rate_to_eur,
+            resolved_at_utc="2026-08-01T15:05:00+00:00", source_version="test",
+        )
+    )
 
 
 def test_initial_dashboard_state_and_accessibility(window):
@@ -91,18 +126,6 @@ def test_initial_dashboard_state_and_accessibility(window):
     assert widget.windowTitle() == f"{APP_DISPLAY_NAME} v{__version__}"
     assert widget.minimumWidth() >= 1080
     assert widget.status.text() == "Ready"
-    assert widget.prisma_badge.text() == "Prisma closed"
-
-
-def test_p36_2_prisma_controls_exist_and_start_in_a_closed_retryable_state(window):
-    widget, _ = window
-    assert widget.open_prisma_button.text() == "Open Prisma"
-    assert widget.close_prisma_button.text() == "Close Prisma"
-    assert not widget.open_prisma_button.isHidden()
-    assert not widget.close_prisma_button.isHidden()
-    assert widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-    assert widget.prisma_badge.text() == "Prisma closed"
 
 
 def test_light_workspace_widgets_use_explicit_contrast_styles(window):
@@ -127,7 +150,6 @@ def test_light_workspace_widgets_use_explicit_contrast_styles(window):
         assert rule in APP_STYLE
 
     assert "QFrame#sidebar QLabel { color: #d8e1ee; }" in APP_STYLE
-    assert "QLabel#browserBadge {" in APP_STYLE
 
 
 def test_recent_activity_section_is_completely_removed(window):
@@ -146,6 +168,36 @@ def test_recent_activity_section_is_completely_removed(window):
         assert not hasattr(widget, method_name)
 
 
+def test_managed_prisma_browser_and_download_controls_are_completely_removed(window):
+    # The revised specification removes the entire managed PRISMA browser/
+    # download workflow: PrismaFunction never opens, controls, or downloads
+    # anything from the PRISMA website. Only local CSV selection (which
+    # immediately processes the file) and the Mapping table remain.
+    widget, _ = window
+    button_texts = {button.text() for button in widget.findChildren(QPushButton)}
+    for removed_text in (
+        "Open Prisma", "Close Prisma", "Choose Download Folder",
+        "Validate Date Range", "Import PRISMA Export", "Open Result",
+    ):
+        assert removed_text not in button_texts
+    for attribute in (
+        "open_prisma_button", "close_prisma_button", "prisma_badge",
+        "choose_download_directory_button", "download_directory_label",
+        "start_date_edit", "end_date_edit", "validate_date_range_button",
+        "date_range_label", "prisma_lifecycle", "_download_directory",
+        "_date_range_selection", "process_button", "open_result_button",
+        "import_date", "import_date_label", "_last_output_path",
+    ):
+        assert not hasattr(widget, attribute)
+    for method_name in (
+        "_open_prisma_session", "_close_prisma_session",
+        "_poll_prisma_lifecycle", "_handle_download_event",
+        "_select_download_directory", "_validate_date_range",
+        "start_processing", "open_result",
+    ):
+        assert not hasattr(widget, method_name)
+
+
 def test_mapping_panel_receives_positive_vertical_stretch(window):
     widget, _ = window
     content = widget.findChild(QWidget, "contentArea")
@@ -154,61 +206,6 @@ def test_mapping_panel_receives_positive_vertical_stretch(window):
     index = main_layout.indexOf(mapping_panel)
     assert index >= 0
     assert main_layout.stretch(index) > 0
-
-
-def test_download_directory_defaults_to_provided_documents_folder(window):
-    widget, _ = window
-    assert widget.download_directory_label.text() == str(widget._download_directory.current)
-    assert widget.download_directory_label.text().endswith("Documents")
-
-
-def test_choosing_a_valid_download_directory_updates_state_and_label(window, monkeypatch, tmp_path):
-    widget, _ = window
-    chosen = tmp_path / "Chosen Downloads"
-    chosen.mkdir()
-    monkeypatch.setattr(
-        app.QFileDialog, "getExistingDirectory", Mock(return_value=str(chosen))
-    )
-
-    widget._select_download_directory()
-
-    assert widget._download_directory.current == chosen.resolve()
-    assert widget.download_directory_label.text() == str(chosen.resolve())
-
-
-def test_cancelling_download_directory_dialog_preserves_current_directory(window, monkeypatch):
-    widget, _ = window
-    previous = widget._download_directory.current
-    monkeypatch.setattr(
-        app.QFileDialog, "getExistingDirectory", Mock(return_value="")
-    )
-
-    widget._select_download_directory()
-
-    assert widget._download_directory.current == previous
-    assert widget.download_directory_label.text() == str(previous)
-
-
-def test_invalid_download_directory_selection_shows_generic_error_and_preserves_state(
-    window, monkeypatch, tmp_path
-):
-    widget, _ = window
-    previous = widget._download_directory.current
-    missing = tmp_path / "does-not-exist"
-    monkeypatch.setattr(
-        app.QFileDialog, "getExistingDirectory", Mock(return_value=str(missing))
-    )
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._select_download_directory()
-
-    assert widget._download_directory.current == previous
-    assert widget.download_directory_label.text() == str(previous)
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "Download Folder"
-    assert str(missing) not in message
 
 
 def _write_valid_prisma_export(path):
@@ -244,14 +241,29 @@ def _write_prisma_export_with_rows(path, rows: list[dict]) -> None:
             writer.writerow(full_row)
 
 
-def test_manual_csv_dialog_starts_in_current_download_directory(window, monkeypatch):
+# Every accepted CSV selection below immediately triggers real background
+# processing (see `app._select_manual_csv`/`_process_selected_csv`): none of
+# these tests mock `run_prisma_import_workflow`. This is safe and
+# deterministic even though most of the fixture rows here are not eligible
+# for a confirmed EUR rate (no `State: Finished`, or a never-cached Finished
+# auction) and so block publication: the background thread's outcome is only
+# ever observed through the queued `processing_finished` Qt signal, which
+# nothing here pumps via `QApplication.processEvents()`, so a blocked or
+# failed processing attempt never reaches `_processing_failed()`/
+# `QMessageBox.critical` during the test itself — only the synchronous
+# mapping-preview state (set before the background thread starts) is
+# asserted. `window`'s teardown joins any still-running thread before the
+# next test starts, so nothing leaks across tests.
+
+
+def test_manual_csv_dialog_starts_in_the_publication_directory(window, monkeypatch):
     widget, _ = window
     dialog = Mock(return_value=("", ""))
     monkeypatch.setattr(app.QFileDialog, "getOpenFileName", dialog)
 
     widget._select_manual_csv()
 
-    assert dialog.call_args.args[2] == str(widget._download_directory.current)
+    assert dialog.call_args.args[2] == str(widget._publication_directory)
 
 
 def test_cancelling_manual_csv_dialog_is_a_no_op(window, monkeypatch):
@@ -278,6 +290,7 @@ def test_cancelling_manual_csv_dialog_after_a_valid_selection_preserves_mapping_
     )
     widget._select_manual_csv()
     assert widget.mapping_table_model.rowCount() == 1
+    _settle_processing(widget)
 
     monkeypatch.setattr(app.QFileDialog, "getOpenFileName", Mock(return_value=("", "")))
     critical = Mock()
@@ -292,7 +305,9 @@ def test_cancelling_manual_csv_dialog_after_a_valid_selection_preserves_mapping_
     assert not widget.mapping_table.isHidden()
 
 
-def test_choosing_a_valid_manual_csv_updates_state_and_label(window, monkeypatch, tmp_path):
+def test_choosing_a_valid_manual_csv_selects_it_and_starts_processing(
+    window, monkeypatch, tmp_path
+):
     widget, _ = window
     target = tmp_path / "PRISMA_Export.csv"
     _write_valid_prisma_export(target)
@@ -304,7 +319,12 @@ def test_choosing_a_valid_manual_csv_updates_state_and_label(window, monkeypatch
 
     assert widget._manual_csv_selection.current == target.resolve()
     assert widget.manual_csv_label.text() == "PRISMA_Export.csv"
-    assert widget.status.text() == "PRISMA Export CSV selected."
+    # Select CSV is the single user action: selecting a valid file
+    # immediately starts processing (see `app._process_selected_csv`),
+    # synchronously reflected before the background thread completes.
+    assert widget.status.text() == "Importing PRISMA Export CSV…"
+    assert widget._processing_active
+    assert not widget.choose_manual_csv_button.isEnabled()
 
 
 def test_invalid_manual_csv_selection_shows_generic_error_and_preserves_state(
@@ -319,6 +339,7 @@ def test_invalid_manual_csv_selection_shows_generic_error_and_preserves_state(
     widget._select_manual_csv()
     previous = widget._manual_csv_selection.current
     assert previous == valid.resolve()
+    _settle_processing(widget)
 
     missing = tmp_path / "does-not-exist.csv"
     monkeypatch.setattr(
@@ -347,6 +368,7 @@ def test_rejected_manual_csv_header_mismatch_preserves_previous_selection(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(valid), "CSV"))
     )
     widget._select_manual_csv()
+    _settle_processing(widget)
 
     bad = tmp_path / "wrong-header.csv"
     bad.write_bytes(b"a;b;c\r\n")
@@ -450,14 +472,15 @@ def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
     assert (cell(1, 7), cell(1, 8), cell(1, 9)) == ("Not finished",) * 3
 
 
-def test_finished_auction_shows_unavailable_rate_pending_live_prisma_surface(
+def test_finished_auction_with_no_cached_resolution_shows_unavailable_and_no_partial_cache(
     window, monkeypatch, tmp_path
 ):
-    # P.36.19: a Finished auction is eligible for rate resolution, but no
-    # live official PRISMA auction-detail surface has been discovered yet
-    # (see ROADMAP.md's P.36.19 entry) — this must surface as a safe
-    # "Unavailable" placeholder end-to-end through the real app wiring,
-    # never a fabricated date/currency/rate.
+    # Per the revised specification, PrismaFunction never opens, controls, or
+    # downloads anything from the PRISMA website, so a Finished auction that
+    # has never been resolved before has no way to reach a live PRISMA
+    # surface. This must surface as a safe "Unavailable" placeholder end-to-
+    # end through the real app wiring, never a fabricated date/currency/rate,
+    # and must never persist a partial or misleading cache entry.
     widget, _ = window
     target = tmp_path / "PRISMA_Export.csv"
     _write_prisma_export_with_rows(target, [
@@ -475,280 +498,57 @@ def test_finished_auction_shows_unavailable_rate_pending_live_prisma_surface(
         return model.data(model.index(row, column))
 
     assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
-
-
-# --- P.36.19 defect fix: real managed-page wiring for rate resolution ---
-#
-# `_build_app` replaces `PrismaLifecycleController` with a bare Mock, which is
-# unsuitable for proving the real page-wiring behavior (a Mock's methods
-# never actually invoke the callables passed to them). These tests instead
-# substitute `widget.prisma_lifecycle` with `FakeManagedLifecycle`, a small
-# hand-written double that models exactly the two members `app.py`'s wiring
-# actually uses (`is_open`, `run_on_page`), and monkeypatch
-# `prisma_lifecycle.PlaywrightAuctionDetailFetcher` (the real transport
-# `ManagedPrismaAuctionDetailFetcher` delegates to by default) with
-# `RecordingAuctionDetailFetcher` so the real `ManagedPrismaAuctionDetailFetcher`
-# and `PrismaAuctionLookup` classes run unmodified end-to-end.
-
-_MARKER_PAGE = object()
-
-
-class FakeManagedLifecycle:
-    """Models the two `PrismaLifecycleController` members `app.py`'s P.36.19
-    wiring uses. `run_on_page` executes `func` immediately with
-    `_MARKER_PAGE` (proving the exact object the wiring threads through),
-    unless `page_error` is set, modeling a session that closes/times out
-    between the `is_open` check and the drain.
-    """
-
-    def __init__(self, *, open_: bool, page_error: Exception | None = None):
-        self._open = open_
-        self._page_error = page_error
-        self.run_on_page_calls = 0
-
-    @property
-    def is_open(self) -> bool:
-        return self._open
-
-    def run_on_page(self, func, *, timeout: float = 20.0):
-        self.run_on_page_calls += 1
-        if self._page_error is not None:
-            raise self._page_error
-        return func(_MARKER_PAGE)
-
-    def close(self) -> None:
-        """No-op: these tests never exercise the close/poll lifecycle beyond
-        proving that closing does not disturb an already-displayed Mapping."""
-
-    def join(self, timeout: float | None = None) -> bool:
-        """No-op: matches the shape `PrismaMonitorApp.closeEvent()` (used by
-        the `window` fixture's teardown) requires from `prisma_lifecycle`."""
-        return True
-
-    @property
-    def state(self):
-        """Matches the shape `PrismaMonitorApp.closeEvent()` (used by the
-        `window` fixture's teardown) requires from `prisma_lifecycle`."""
-        return prisma_lifecycle.PrismaLifecycleState.IDLE
-
-
-class RecordingAuctionDetailFetcher:
-    def __init__(self, *, result=None, error: Exception | None = None):
-        self.calls: list[tuple[object, str, int]] = []
-        self._result = result
-        self._error = error
-
-    def fetch(self, page, auction_id, *, timeout_ms):
-        self.calls.append((page, auction_id, timeout_ms))
-        if self._error is not None:
-            raise self._error
-        return self._result
-
-
-def _install_recording_fetcher(monkeypatch, **kwargs) -> RecordingAuctionDetailFetcher:
-    fetcher = RecordingAuctionDetailFetcher(**kwargs)
-    monkeypatch.setattr(prisma_lifecycle, "PlaywrightAuctionDetailFetcher", lambda: fetcher)
-    return fetcher
-
-
-_FINISHED_AUCTION_RAW_FIELDS = {
-    "Auction ID": "1", "State": "Finished", "End of Auction": "2026-08-01T15:00:00Z",
-}
-
-
-def test_managed_download_success_resolves_an_uncached_finished_auction_through_the_real_page(
-    window, monkeypatch, tmp_path,
-):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert widget.prisma_lifecycle.run_on_page_calls == 1
-    assert len(fetcher.calls) == 1
-    called_page, auction_id, _ = fetcher.calls[0]
-    assert called_page is _MARKER_PAGE
-    assert auction_id == "1"
-    assert widget.mapping_table_model.rowCount() == 1
-
-
-def test_duplicate_auction_ids_are_fetched_once_per_refresh(window, monkeypatch, tmp_path):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [
-        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-1"},
-        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-2"},
-    ])
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert widget.mapping_table_model.rowCount() == 2
-    assert len(fetcher.calls) == 1
-
-
-def test_cached_resolution_does_not_invoke_the_managed_page(window, monkeypatch, tmp_path):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    AuctionStorage(widget._runtime_paths.database).save_rate_resolution(
-        RateResolutionRecord(
-            auction_id="1", auction_state="Finished",
-            auction_end_at="2026-08-01T15:00:00+00:00", currency="EUR",
-            ecb_publication_date="2026-08-01", rate_to_eur="1",
-            resolved_at_utc="2026-08-01T15:05:00+00:00", source_version="test",
-        )
-    )
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert fetcher.calls == []
-    assert widget.prisma_lifecycle.run_on_page_calls == 0
-    model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("EUR", "1", "2026-08-01")
-
-
-def test_cached_resolution_works_even_without_an_open_managed_page(window, monkeypatch, tmp_path):
-    """A previously fixed resolution must not require an open PRISMA page at
-    all (P.36.19 requirement 7): here `prisma_lifecycle` reports closed, yet
-    the cached rate still displays correctly."""
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=False)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    AuctionStorage(widget._runtime_paths.database).save_rate_resolution(
-        RateResolutionRecord(
-            auction_id="1", auction_state="Finished",
-            auction_end_at="2026-08-01T15:00:00+00:00", currency="EUR",
-            ecb_publication_date="2026-08-01", rate_to_eur="1",
-            resolved_at_utc="2026-08-01T15:05:00+00:00", source_version="test",
-        )
-    )
-    target = tmp_path / "PRISMA_Export.csv"
-    _write_prisma_export_with_rows(target, [{"Auction ID": "1", "State": "Finished"}])
-    monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
-    )
-
-    widget._select_manual_csv()
-
-    assert fetcher.calls == []
-    assert widget.prisma_lifecycle.run_on_page_calls == 0
-    model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("EUR", "1", "2026-08-01")
-
-
-def test_manual_csv_selection_without_a_managed_page_fails_safely(window, monkeypatch, tmp_path):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=False)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    target = tmp_path / "PRISMA_Export.csv"
-    _write_prisma_export_with_rows(target, [{"Auction ID": "1", "State": "Finished"}])
-    monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
-    )
-
-    widget._select_manual_csv()
-
-    assert fetcher.calls == []
-    assert widget.prisma_lifecycle.run_on_page_calls == 0
-    model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
-
-
-def test_a_closed_or_missing_page_produces_an_explicit_unresolved_result_not_a_crash(
-    window, monkeypatch, tmp_path,
-):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(
-        open_=True,
-        page_error=PrismaLifecycleNoActivePageError(
-            "The managed PRISMA session closed before this request could run."
-        ),
-    )
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
-
-
-def test_prisma_retrieval_failure_persists_no_partial_cache_and_no_misleading_mapping(
-    window, monkeypatch, tmp_path,
-):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _install_recording_fetcher(
-        monkeypatch, error=PrismaAuctionDetailTransportError("official request failed")
-    )
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert len(fetcher.calls) == 1
-    model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
     assert AuctionStorage(widget._runtime_paths.database).get_rate_resolution("1") is None
 
 
-def test_closing_prisma_after_a_successful_refresh_preserves_the_mapping_display(
-    window, monkeypatch, tmp_path,
-):
+# --- Cumulative rate-resolution cache -------------------------------------
+#
+# Per the revised specification, PrismaFunction never opens, controls, or
+# downloads anything from the PRISMA website. A Finished auction's rate can
+# only ever become resolved through `storage.AuctionStorage`'s durable
+# per-Auction-ID cache (see `_seed_resolved_rate`); a never-before-seen
+# Finished auction fails closed instead (see the test above). A previously
+# fixed resolution is reused deterministically and requires no PRISMA access
+# at all — this is what makes the cumulative Mapping display work across
+# sessions without any live transport.
+
+def test_cached_resolution_displays_without_any_live_transport(window, monkeypatch, tmp_path):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1", "State": "Finished"}])
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
+    _seed_resolved_rate(widget, "1")
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1", "State": "Finished"}])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
-    assert widget.mapping_table_model.rowCount() == 1
 
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget._update_controls()
-    widget._close_prisma_session()
+    widget._select_manual_csv()
 
-    assert widget.mapping_table_model.rowCount() == 1
-    assert not widget.mapping_table.isHidden()
+    model = widget.mapping_table_model
+
+    def cell(row, column):
+        return model.data(model.index(row, column))
+
+    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("EUR", "1", "2026-08-01")
+
+
+def test_duplicate_auction_ids_share_one_cached_resolution(window, monkeypatch, tmp_path):
+    widget, _ = window
+    _seed_resolved_rate(widget, "1")
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [
+        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-1"},
+        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-2"},
+    ])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+
+    model = widget.mapping_table_model
+    assert model.rowCount() == 2
+    assert model.data(model.index(0, 7)) == "EUR"
+    assert model.data(model.index(1, 7)) == "EUR"
 
 
 def test_filtered_and_rejected_only_csv_leaves_mapping_display_empty(
@@ -779,6 +579,7 @@ def test_selecting_a_new_csv_replaces_previous_mapping_rows(window, monkeypatch,
     )
     widget._select_manual_csv()
     assert widget.mapping_table_model.rowCount() == 1
+    _settle_processing(widget)
 
     second = tmp_path / "second.csv"
     _write_valid_prisma_export(second)
@@ -793,7 +594,7 @@ def test_selecting_a_new_csv_replaces_previous_mapping_rows(window, monkeypatch,
     assert widget.mapping_table.isHidden()
 
 
-def test_mapping_refresh_failure_clears_table_and_shows_safe_error(
+def test_mapping_refresh_failure_clears_table_shows_safe_error_and_skips_processing(
     window, monkeypatch, tmp_path
 ):
     widget, _ = window
@@ -804,6 +605,7 @@ def test_mapping_refresh_failure_clears_table_and_shows_safe_error(
     )
     widget._select_manual_csv()
     assert widget.mapping_table_model.rowCount() == 1
+    _settle_processing(widget)
 
     second = tmp_path / "second.csv"
     _write_valid_prisma_export(second)
@@ -817,6 +619,8 @@ def test_mapping_refresh_failure_clears_table_and_shows_safe_error(
     monkeypatch.setattr(app, "import_prisma_export", _raise)
     critical = Mock()
     monkeypatch.setattr(QMessageBox, "critical", critical)
+    process = Mock(side_effect=AssertionError("processing must not start when the preview fails"))
+    monkeypatch.setattr(app.PrismaMonitorApp, "_process_selected_csv", process)
 
     widget._select_manual_csv()
 
@@ -829,19 +633,7 @@ def test_mapping_refresh_failure_clears_table_and_shows_safe_error(
     assert message == (
         "The mapping evidence for the selected PRISMA Export CSV could not be displayed."
     )
-
-
-def test_downloaded_csv_populates_mapping_table(window, tmp_path):
-    widget, _ = window
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(csv_path, [{"Auction ID": "1"}])
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert widget.mapping_table_model.rowCount() == 1
-    assert not widget.mapping_table.isHidden()
+    process.assert_not_called()
 
 
 def test_rejected_manual_csv_replacement_clears_previous_mapping_rows(
@@ -855,6 +647,7 @@ def test_rejected_manual_csv_replacement_clears_previous_mapping_rows(
     )
     widget._select_manual_csv()
     assert widget.mapping_table_model.rowCount() == 1
+    _settle_processing(widget)
 
     bad = tmp_path / "wrong-header.csv"
     bad.write_bytes(b"a;b;c\r\n")
@@ -872,797 +665,11 @@ def test_rejected_manual_csv_replacement_clears_previous_mapping_rows(
     assert not widget.mapping_empty_label.isHidden()
 
 
-def test_rejected_download_csv_replacement_clears_previous_mapping_rows(
-    window, monkeypatch, tmp_path
-):
-    widget, _ = window
-    populated = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    _write_prisma_export_with_rows(populated, [{"Auction ID": "1"}])
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=populated)
-    )
-    assert widget.mapping_table_model.rowCount() == 1
-
-    bad = tmp_path / "bad-export.csv"
-    bad.write_text("not,the,right,header\n", encoding="utf-8")
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(12, True, kind="download", csv_path=bad)
-    )
-
-    critical.assert_called_once()
-    assert widget.mapping_table_model.rowCount() == 0
-    assert widget.mapping_table.isHidden()
-    assert not widget.mapping_empty_label.isHidden()
-
-
-def test_mapping_refresh_does_not_touch_output_writing_publication_or_browser(
-    window, monkeypatch, tmp_path
-):
+def test_processing_success_preserves_full_statistics(window, monkeypatch, tmp_path):
     widget, _ = window
     target = tmp_path / "PRISMA_Export.csv"
-    _write_prisma_export_with_rows(target, [{"Auction ID": "1"}])
-    monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
-    )
-    write_output = Mock(side_effect=AssertionError("write_prisma_output must not be called"))
-    publish = Mock(side_effect=AssertionError("publish_cumulative_output must not be called"))
-    monkeypatch.setattr(prisma_output, "write_prisma_output", write_output)
-    monkeypatch.setattr(prisma_publication, "publish_cumulative_output", publish)
-    lifecycle_calls_before = list(widget.prisma_lifecycle.mock_calls)
-
-    widget._select_manual_csv()
-
-    write_output.assert_not_called()
-    publish.assert_not_called()
-    assert list(widget.prisma_lifecycle.mock_calls) == lifecycle_calls_before
-
-
-def test_date_range_controls_and_validate_action_are_visible(window):
-    # The `window` fixture never calls show() on the top-level QMainWindow, so
-    # QWidget.isVisible() is False for every widget regardless of hide()
-    # state. isHidden() and window() are independent of top-level show() and
-    # deterministically prove these controls are constructed, attached under
-    # the same top-level window, not explicitly hidden, and usable.
-    widget, _ = window
-
-    for control in (
-        widget.start_date_edit, widget.end_date_edit,
-        widget.validate_date_range_button, widget.date_range_label,
-    ):
-        assert not control.isHidden()
-        assert control.isEnabled()
-        assert control.window() is widget
-    assert widget.validate_date_range_button.text() == "Validate Date Range"
-
-
-def test_date_range_controls_do_not_initialize_to_qts_minimum_date(window):
-    # Regression test: on real Windows, both controls were observed retaining
-    # values near Qt's minimum supported QDate (1752-09-25 / 1752-09-29)
-    # instead of a usable application date. Neither control may ever equal
-    # QDateEdit's own minimumDate() at construction time.
-    widget, _ = window
-
-    assert widget.start_date_edit.date() != widget.start_date_edit.minimumDate()
-    assert widget.end_date_edit.date() != widget.end_date_edit.minimumDate()
-    assert widget.start_date_edit.date().year() > 1752
-    assert widget.end_date_edit.date().year() > 1752
-
-
-def test_date_range_initial_state_is_deterministic_and_unset(window):
-    widget, _ = window
-
-    today = QDate.currentDate()
-    assert widget.start_date_edit.date() == today
-    assert widget.end_date_edit.date() == today
-    assert widget._date_range_selection.current is None
-    assert widget.date_range_label.text() == "No date range selected"
-
-
-def test_date_range_controls_initialize_to_a_fixed_current_date(monkeypatch, tmp_path):
-    fixed_today = date(2026, 3, 15)
-    monkeypatch.setattr(app, "_current_local_date", lambda: fixed_today)
-    widget, _ = _build_app(monkeypatch, tmp_path)
-    try:
-        assert widget.start_date_edit.date() == QDate(2026, 3, 15)
-        assert widget.end_date_edit.date() == QDate(2026, 3, 15)
-        assert widget._date_range_selection.current is None
-    finally:
-        _close_app(widget)
-
-
-def test_validating_same_day_range_accepts_and_updates_label(window):
-    widget, _ = window
-    widget.start_date_edit.setDate(QDate(2026, 3, 1))
-    widget.end_date_edit.setDate(QDate(2026, 3, 1))
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current == DateRange(date(2026, 3, 1), date(2026, 3, 1))
-    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-01"
-    assert widget.start_date_edit.date() == QDate(2026, 3, 1)
-    assert widget.end_date_edit.date() == QDate(2026, 3, 1)
-    assert widget.status.text() == "Date range accepted."
-
-
-def test_validating_multi_day_range_accepts_and_updates_label(window):
-    widget, _ = window
-    widget.start_date_edit.setDate(QDate(2026, 3, 1))
-    widget.end_date_edit.setDate(QDate(2026, 3, 10))
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current == DateRange(date(2026, 3, 1), date(2026, 3, 10))
-    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-10"
-
-
-def test_validating_with_missing_start_date_shows_error_and_preserves_state(window, monkeypatch):
-    widget, _ = window
-    # The "Not set" sentinel is represented by the control's own minimumDate();
-    # explicitly select it here to simulate a genuinely missing start date,
-    # since the control no longer defaults to that sentinel on construction.
-    widget.start_date_edit.setDate(widget.start_date_edit.minimumDate())
-    widget.end_date_edit.setDate(QDate(2026, 3, 10))
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current is None
-    assert widget.date_range_label.text() == "No date range selected"
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "Date Range"
-    assert message == "A start date is required."
-
-
-def test_validating_with_missing_end_date_shows_error_and_preserves_state(window, monkeypatch):
-    widget, _ = window
-    widget.start_date_edit.setDate(QDate(2026, 3, 1))
-    # See the missing-start-date test above for why the sentinel must now be
-    # selected explicitly rather than relying on construction-time defaults.
-    widget.end_date_edit.setDate(widget.end_date_edit.minimumDate())
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current is None
-    assert widget.date_range_label.text() == "No date range selected"
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "Date Range"
-    assert message == "An end date is required."
-
-
-def test_validating_reversed_range_shows_error_and_preserves_previous_accepted_range(
-    window, monkeypatch
-):
-    widget, _ = window
-    widget.start_date_edit.setDate(QDate(2026, 3, 1))
-    widget.end_date_edit.setDate(QDate(2026, 3, 5))
-    widget._validate_date_range()
-    previous = widget._date_range_selection.current
-    assert previous == DateRange(date(2026, 3, 1), date(2026, 3, 5))
-
-    widget.start_date_edit.setDate(QDate(2026, 3, 9))
-    widget.end_date_edit.setDate(QDate(2026, 3, 1))
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current == previous
-    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-05"
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "Date Range"
-    assert message == "The end date must not be earlier than the start date."
-
-
-def test_date_range_controls_remain_enabled_and_retryable_after_error(window, monkeypatch):
-    widget, _ = window
-    widget.start_date_edit.setDate(QDate(2026, 3, 9))
-    widget.end_date_edit.setDate(QDate(2026, 3, 1))
-    monkeypatch.setattr(QMessageBox, "critical", Mock())
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current is None
-    assert widget.start_date_edit.isEnabled()
-    assert widget.end_date_edit.isEnabled()
-    assert widget.validate_date_range_button.isEnabled()
-
-
-def test_date_range_successful_retry_after_correction(window, monkeypatch):
-    widget, _ = window
-    widget.start_date_edit.setDate(QDate(2026, 3, 9))
-    widget.end_date_edit.setDate(QDate(2026, 3, 1))
-    monkeypatch.setattr(QMessageBox, "critical", Mock())
-    widget._validate_date_range()
-    assert widget._date_range_selection.current is None
-
-    widget.start_date_edit.setDate(QDate(2026, 3, 1))
-    widget.end_date_edit.setDate(QDate(2026, 3, 9))
-
-    widget._validate_date_range()
-
-    assert widget._date_range_selection.current == DateRange(date(2026, 3, 1), date(2026, 3, 9))
-    assert widget.date_range_label.text() == "Accepted: 2026-03-01 to 2026-03-09"
-
-
-def test_date_range_validation_triggers_no_browser_lifecycle_file_or_processing_operation(
-    window, monkeypatch
-):
-    widget, _ = window
-    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", Mock())
-    monkeypatch.setattr(app.QFileDialog, "getExistingDirectory", Mock())
-    thread_start = Mock()
-    monkeypatch.setattr(threading.Thread, "start", thread_start)
-    # The second _validate_date_range() call below uses a reversed (invalid)
-    # range, which reaches _show_error() -> QMessageBox.critical(). Without
-    # mocking it, that call opens a real blocking modal Qt event loop that
-    # never returns under the offscreen platform, hanging the test.
-    monkeypatch.setattr(QMessageBox, "critical", Mock())
-    previous_download_directory = widget._download_directory.current
-    widget.start_date_edit.setDate(QDate(2026, 3, 1))
-    widget.end_date_edit.setDate(QDate(2026, 3, 5))
-
-    widget._validate_date_range()
-    widget.start_date_edit.setDate(QDate(2026, 3, 9))
-    widget.end_date_edit.setDate(QDate(2026, 3, 1))
-    widget._validate_date_range()
-
-    widget.prisma_lifecycle.open.assert_not_called()
-    widget.prisma_lifecycle.close.assert_not_called()
-    app.QFileDialog.getOpenFileName.assert_not_called()
-    app.QFileDialog.getExistingDirectory.assert_not_called()
-    thread_start.assert_not_called()
-    assert widget._download_directory.current == previous_download_directory
-    assert widget._manual_csv_selection.current is None
-
-
-def test_open_prisma_session_success_updates_badge_and_status(window, monkeypatch):
-    widget, _ = window
-    date_range = accept_date_range(widget)
-    widget.prisma_lifecycle.open.return_value = 11
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="open")
-    ]
-    monkeypatch.setattr(widget._prisma_timer, "start", Mock())
-    monkeypatch.setattr(widget._prisma_timer, "stop", Mock())
-
-    widget._open_prisma_session()
-    widget._poll_prisma_lifecycle()
-
-    widget.prisma_lifecycle.open.assert_called_once_with(
-        date_range=date_range, download_directory=widget._download_directory.current,
-    )
-    assert widget._prisma_open
-    assert widget.prisma_badge.text() == "Prisma open"
-    assert "PRISMA opened" in widget.status.text()
-    assert not widget.open_prisma_button.isEnabled()
-    assert widget.close_prisma_button.isEnabled()
-
-
-def test_open_prisma_rejects_without_an_accepted_date_range(window, monkeypatch):
-    widget, _ = window
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._open_prisma_session()
-
-    widget.prisma_lifecycle.open.assert_not_called()
-    assert widget._active_prisma_generation is None
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "Open Prisma"
-    assert message == "Select and validate a date range before opening PRISMA."
-
-
-def test_open_prisma_rejects_when_the_download_directory_is_no_longer_valid(
-    window, monkeypatch
-):
-    widget, _ = window
-    accept_date_range(widget)
-    widget._download_directory.current.rmdir()
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._open_prisma_session()
-
-    widget.prisma_lifecycle.open.assert_not_called()
-    assert widget._active_prisma_generation is None
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "Open Prisma"
-    assert message == (
-        "The selected download folder is not valid. Choose an existing, writable folder."
-    )
-
-
-def test_download_event_success_selects_the_csv_and_updates_labels(window, tmp_path):
-    widget, _ = window
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    header = ";".join(PRISMA_EXPORT_COLUMNS)
-    csv_path.write_bytes((header + "\r\n").encode("cp1252"))
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert widget._manual_csv_selection.current == csv_path.resolve()
-    assert widget.manual_csv_label.text() == csv_path.name
-    assert "PRISMA CSV downloaded" in widget.status.text()
-
-
-def test_download_event_failure_shows_the_stable_error_and_does_not_touch_csv_selection(
-    window, monkeypatch
-):
-    widget, _ = window
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-    message_text = describe_download_failure(PrismaDownloadOutcome.DOWNLOAD_TIMEOUT)
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, False, message_text, kind="download")
-    )
-
-    assert widget._manual_csv_selection.current is None
-    assert widget.status.text() == message_text
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "PRISMA Download"
-    assert message == message_text
-
-
-def test_download_event_with_an_invalid_csv_contract_is_rejected(window, monkeypatch, tmp_path):
-    widget, _ = window
-    csv_path = tmp_path / "bad-export.csv"
-    csv_path.write_text("not,the,right,header\n", encoding="utf-8")
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._handle_download_event(
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    )
-
-    assert widget._manual_csv_selection.current is None
-    critical.assert_called_once()
-    title, message = critical.call_args.args[1], critical.call_args.args[2]
-    assert title == "PRISMA Download"
-    assert message == describe_manual_csv_rejection(ManualCsvOutcome.DELIMITER)
-    assert widget.status.text() == (
-        "The downloaded PRISMA CSV did not match the expected export format."
-    )
-
-
-def test_poll_prisma_lifecycle_routes_a_download_event_without_closing_the_session(
-    window, tmp_path
-):
-    widget, _ = window
-    csv_path = tmp_path / "Auction_overview_2026-03-01_2026-03-05.csv"
-    header = ";".join(PRISMA_EXPORT_COLUMNS)
-    csv_path.write_bytes((header + "\r\n").encode("cp1252"))
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="download", csv_path=csv_path)
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    assert widget.manual_csv_label.text() == csv_path.name
-    assert widget._prisma_open
-    assert widget._active_prisma_generation == 11
-
-
-def test_repeated_open_prisma_click_is_a_safe_no_op_while_active(window):
-    widget, _ = window
-    widget.prisma_lifecycle.open.return_value = 11
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-
-    widget._open_prisma_session()
-
-    widget.prisma_lifecycle.open.assert_not_called()
-
-
-def test_close_prisma_with_no_active_session_is_idempotent(window):
-    widget, _ = window
-
-    widget._close_prisma_session()
-    widget._close_prisma_session()
-
-    assert widget.prisma_lifecycle.close.call_count == 2
-    assert not widget._prisma_open
-    assert widget._active_prisma_generation is None
-    assert widget.prisma_badge.text() == "Prisma closed"
-    assert widget.status.text() == "PRISMA closed"
-
-
-def test_close_prisma_session_enters_a_stable_closing_state(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget._update_controls()
-
-    widget._close_prisma_session()
-
-    widget.prisma_lifecycle.close.assert_called_once_with()
-    assert widget._prisma_closing
-    assert widget._active_prisma_generation == 11
-    assert widget.prisma_badge.text() == "Closing Prisma…"
-    assert widget.status.text() == "Closing PRISMA…"
-    assert not widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-
-
-def test_repeated_close_click_while_closing_does_not_resignal(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget._update_controls()
-    widget._close_prisma_session()
-
-    widget._close_prisma_session()
-
-    widget.prisma_lifecycle.close.assert_called_once_with()
-
-
-def test_close_completed_event_restores_idle_controls_only_after_cleanup(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget._update_controls()
-    widget._close_prisma_session()
-    assert not widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-
-    widget.prisma_lifecycle.get_events.return_value = []
-    widget._poll_prisma_lifecycle()
-    assert widget._prisma_closing
-    assert not widget.open_prisma_button.isEnabled()
-    assert widget.prisma_badge.text() == "Closing Prisma…"
-
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="close")
-    ]
-    widget._poll_prisma_lifecycle()
-
-    assert not widget._prisma_closing
-    assert not widget._prisma_open
-    assert widget._active_prisma_generation is None
-    assert widget.prisma_badge.text() == "Prisma closed"
-    assert widget.status.text() == "PRISMA closed"
-    assert widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-
-
-def test_open_prisma_click_during_closing_is_a_deterministic_no_op(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget._update_controls()
-    widget._close_prisma_session()
-    widget.prisma_lifecycle.open.reset_mock()
-
-    widget._open_prisma_session()
-
-    widget.prisma_lifecycle.open.assert_not_called()
-    assert widget._active_prisma_generation == 11
-    assert not widget.open_prisma_button.isEnabled()
-
-
-def test_rapid_close_then_open_cannot_produce_overlapping_sessions(window):
-    widget, _ = window
-    date_range = accept_date_range(widget)
-    widget.prisma_lifecycle.open.return_value = 11
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="open")
-    ]
-    widget._open_prisma_session()
-    widget._poll_prisma_lifecycle()
-    assert widget._prisma_open
-    widget.prisma_lifecycle.open.reset_mock()
-
-    widget._close_prisma_session()
-    widget._open_prisma_session()
-
-    widget.prisma_lifecycle.open.assert_not_called()
-
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="close")
-    ]
-    widget._poll_prisma_lifecycle()
-    assert widget.open_prisma_button.isEnabled()
-
-    widget.prisma_lifecycle.open.return_value = 12
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(12, True, kind="open")
-    ]
-    widget._open_prisma_session()
-    widget._poll_prisma_lifecycle()
-
-    widget.prisma_lifecycle.open.assert_called_once_with(
-        date_range=date_range, download_directory=widget._download_directory.current,
-    )
-    assert widget._prisma_open
-    assert widget._active_prisma_generation == 12
-
-
-def test_manual_prisma_closure_returns_a_retryable_state(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_open = True
-    widget._update_controls()
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(
-            11, False, "The PRISMA browser was closed manually.", kind="closed"
-        )
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    assert not widget._prisma_open
-    assert widget._active_prisma_generation is None
-    assert widget.prisma_badge.text() == "Prisma closed"
-    assert "Open Prisma to retry" in widget.status.text()
-    assert widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-
-
-def test_stale_prisma_event_does_not_change_dashboard(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(10, True, kind="open")
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    assert not widget._prisma_open
-    assert widget.prisma_badge.text() == "Prisma closed"
-
-
-def test_single_drain_with_open_then_manual_closed_loses_no_event(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="open"),
-        PrismaLifecycleEvent(
-            11, False, "The PRISMA browser was closed manually.", kind="closed"
-        ),
-    ]
-    status_spy = Mock(wraps=widget.status.setText)
-    widget.status.setText = status_spy
-
-    widget._poll_prisma_lifecycle()
-
-    assert not widget._prisma_open
-    assert widget._active_prisma_generation is None
-    assert widget.prisma_badge.text() == "Prisma closed"
-    assert "Open Prisma to retry" in widget.status.text()
-    assert widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-    status_texts = [call.args[0] for call in status_spy.call_args_list]
-    assert status_texts.count("PRISMA opened in the managed browser session.") == 1
-    assert status_texts.count("PRISMA was closed manually. Open Prisma to retry.") == 1
-
-
-def test_single_drain_with_open_then_close_completed_loses_no_event(window):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_closing = True
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="open"),
-        PrismaLifecycleEvent(11, True, kind="close"),
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    assert not widget._prisma_open
-    assert not widget._prisma_closing
-    assert widget._active_prisma_generation is None
-    assert widget.prisma_badge.text() == "Prisma closed"
-    assert widget.status.text() == "PRISMA closed"
-    assert widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-
-
-def test_close_failure_event_locks_controls_with_a_stable_error(window, monkeypatch):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    widget._prisma_closing = True
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(
-            11, False,
-            "The PRISMA browser could not be confirmed closed.", kind="close",
-        )
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    assert not widget._prisma_open
-    assert not widget._prisma_closing
-    assert widget._prisma_close_error
-    assert widget.prisma_badge.text() == "Prisma close error"
-    assert not widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-    critical.assert_called_once()
-
-    widget.prisma_lifecycle.open.reset_mock()
-    widget._open_prisma_session()
-    widget.prisma_lifecycle.open.assert_not_called()
-
-    widget.prisma_lifecycle.close.reset_mock()
-    widget._close_prisma_session()
-    widget.prisma_lifecycle.close.assert_not_called()
-
-
-def test_single_drain_skips_stale_generation_events_mixed_with_active_ones(window):
-    widget, _ = window
-    widget._active_prisma_generation = 12
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, True, kind="open"),
-        PrismaLifecycleEvent(
-            11, False, "The PRISMA browser was closed manually.", kind="closed"
-        ),
-        PrismaLifecycleEvent(12, True, kind="open"),
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    assert widget._prisma_open
-    assert widget._active_prisma_generation == 12
-    assert widget.prisma_badge.text() == "Prisma open"
-
-
-def test_open_prisma_startup_failure_shows_stable_english_error(window, monkeypatch):
-    widget, _ = window
-    accept_date_range(widget)
-    widget.prisma_lifecycle.open.return_value = 11
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, False, "diagnostic detail", kind="open")
-    ]
-    monkeypatch.setattr(widget._prisma_timer, "start", Mock())
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-
-    widget._open_prisma_session()
-    widget._poll_prisma_lifecycle()
-
-    assert widget.open_prisma_button.isEnabled()
-    assert not widget.close_prisma_button.isEnabled()
-    assert widget.prisma_badge.text() == "Prisma error"
-    critical.assert_called_once()
-    assert "diagnostic detail" not in critical.call_args.args[2]
-
-
-def test_single_drain_stops_after_a_terminal_open_failure_avoiding_duplicate_dialogs(
-    window, monkeypatch
-):
-    widget, _ = window
-    widget._active_prisma_generation = 11
-    critical = Mock()
-    monkeypatch.setattr(QMessageBox, "critical", critical)
-    widget.prisma_lifecycle.get_events.return_value = [
-        PrismaLifecycleEvent(11, False, "diagnostic detail", kind="open"),
-        PrismaLifecycleEvent(
-            11, False, "The PRISMA browser was closed manually.", kind="closed"
-        ),
-    ]
-
-    widget._poll_prisma_lifecycle()
-
-    critical.assert_called_once()
-    assert widget.prisma_badge.text() == "Prisma error"
-
-
-def test_open_prisma_session_raising_synchronously_is_handled(window, monkeypatch):
-    widget, _ = window
-    accept_date_range(widget)
-    widget.prisma_lifecycle.open.side_effect = RuntimeError("driver missing")
-    monkeypatch.setattr(QMessageBox, "critical", Mock())
-
-    widget._open_prisma_session()
-
-    assert not widget._prisma_open
-    assert widget._active_prisma_generation is None
-    assert widget.prisma_badge.text() == "Prisma error"
-
-
-def test_shutdown_closes_only_the_owned_prisma_session(window):
-    widget, _ = window
-
-    widget.closeEvent(Mock())
-
-    widget.prisma_lifecycle.close.assert_called_once_with()
-
-
-def test_shutdown_waits_boundedly_for_prisma_lifecycle_cleanup(window, monkeypatch):
-    widget, _ = window
-    widget.prisma_lifecycle.join.return_value = False
-    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
-    close_event = Mock()
-
-    widget.closeEvent(close_event)
-
-    widget.prisma_lifecycle.close.assert_called_once_with()
-    widget.prisma_lifecycle.join.assert_called_once_with(timeout=0.05)
-    close_event.ignore.assert_called_once_with()
-    close_event.accept.assert_not_called()
-    assert "PRISMA browser session is finishing safely" in widget.status.text()
-
-    widget.prisma_lifecycle.join.return_value = True
-    finished_event = Mock()
-    widget.closeEvent(finished_event)
-
-    finished_event.accept.assert_called_once_with()
-
-
-def test_shutdown_never_accepts_while_the_lifecycle_worker_is_still_alive(window, monkeypatch):
-    widget, _ = window
-    widget.prisma_lifecycle.join.return_value = False
-    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
-    widget.closeEvent(Mock())
-    widget._prisma_shutdown_deadline = time.monotonic() - 1
-
-    still_alive_event = Mock()
-    widget.closeEvent(still_alive_event)
-
-    still_alive_event.accept.assert_not_called()
-    still_alive_event.ignore.assert_called_once_with()
-    assert "longer than expected" in widget.status.text()
-
-    another_event = Mock()
-    widget.closeEvent(another_event)
-
-    another_event.accept.assert_not_called()
-    another_event.ignore.assert_called_once_with()
-
-    widget.prisma_lifecycle.join.return_value = True
-    finished_event = Mock()
-    widget.closeEvent(finished_event)
-
-    finished_event.accept.assert_called_once_with()
-
-
-def test_shutdown_never_accepts_when_close_cleanup_could_not_be_confirmed(
-    window, monkeypatch
-):
-    widget, _ = window
-    widget.prisma_lifecycle.join.return_value = True
-    widget.prisma_lifecycle.state = PrismaLifecycleState.CLOSE_FAILED
-    monkeypatch.setattr(app.QTimer, "singleShot", Mock())
-
-    first_event = Mock()
-    widget.closeEvent(first_event)
-
-    first_event.accept.assert_not_called()
-    first_event.ignore.assert_called_once_with()
-    assert "cannot exit safely" in widget.status.text()
-
-    second_event = Mock()
-    widget.closeEvent(second_event)
-
-    second_event.accept.assert_not_called()
-    second_event.ignore.assert_called_once_with()
-
-    widget.prisma_lifecycle.state = PrismaLifecycleState.IDLE
-    finished_event = Mock()
-    widget.closeEvent(finished_event)
-
-    finished_event.accept.assert_called_once_with()
-
-
-def test_processing_success_preserves_full_statistics(window, monkeypatch):
-    widget, _ = window
-    workflow_result = PrismaWorkflowResult(
+    _write_valid_prisma_export(target)
+    workflow_result = app.PrismaWorkflowResult(
         4, 1, 2, 1, 0, 0, (), Path("result.xlsx"),
         SourceUpdateStatus.APPLIED, "accepted",
     )
@@ -1670,16 +677,19 @@ def test_processing_success_preserves_full_statistics(window, monkeypatch):
         app, "run_prisma_import_workflow", Mock(return_value=workflow_result)
     )
     monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=("input.csv", "CSV"))
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
 
-    finished = QSignalSpy(widget.signals.processing_finished)
-    widget.start_processing()
-    assert finished.count() == 1 or finished.wait(2000)
-    QApplication.processEvents()
+    captured: list = []
+    widget.signals.processing_finished.connect(captured.append)
+    widget._select_manual_csv()
+    deadline = time.monotonic() + 5.0
+    while not captured and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.02)
+    assert captured, "processing_finished was not received within the timeout"
 
-    assert finished.count() == 1
-    outcome = finished.at(0)[0]
+    outcome = captured[0]
     assert outcome.result is workflow_result
     assert outcome.error is None
     assert widget.status.text() == (
@@ -1689,17 +699,19 @@ def test_processing_success_preserves_full_statistics(window, monkeypatch):
     assert not widget._processing_active
     assert widget._active_processing_thread is None
     assert not widget._processing_threads
-    assert widget.process_button.isEnabled()
+    assert widget.choose_manual_csv_button.isEnabled()
 
-    widget._processing_finished(app.ProcessingOutcome(workflow_result, None, 0))
+    widget._processing_finished(app.ProcessingOutcome(workflow_result, None, widget._processing_generation))
     assert widget.status.text().startswith("accepted Processed: 4")
 
 
-def test_import_processing_success_and_error_restore_controls(window, monkeypatch):
+def test_import_processing_success_and_error_restore_controls(window, monkeypatch, tmp_path):
     widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(target)
     monkeypatch.setattr(QMessageBox, "critical", Mock())
     monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=("export.csv", "CSV"))
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
 
     class FakeThread:
@@ -1708,15 +720,38 @@ def test_import_processing_success_and_error_restore_controls(window, monkeypatc
         def is_alive(self): return False
 
     monkeypatch.setattr(app.threading, "Thread", FakeThread)
-    widget.start_processing()
+    widget._select_manual_csv()
     assert widget._processing_active
-    assert not widget.process_button.isEnabled()
+    assert not widget.choose_manual_csv_button.isEnabled()
     assert "Importing" in widget.status.text()
 
     widget._processing_failed("Unsupported CSV format.", None)
     assert not widget._processing_active
-    assert widget.process_button.isEnabled()
+    assert widget.choose_manual_csv_button.isEnabled()
     assert "Unsupported CSV format" in widget.status.text()
+
+
+def test_select_csv_is_ignored_while_processing_is_active(window, monkeypatch, tmp_path):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(target)
+    dialog = Mock(return_value=(str(target), "CSV"))
+    monkeypatch.setattr(app.QFileDialog, "getOpenFileName", dialog)
+    widget._processing_active = True
+
+    widget._select_manual_csv()
+
+    dialog.assert_not_called()
+
+
+def test_close_event_accepts_immediately_when_idle(window):
+    widget, _ = window
+    event = Mock()
+
+    widget.closeEvent(event)
+
+    event.accept.assert_called_once_with()
+    event.ignore.assert_not_called()
 
 
 def test_close_defers_without_blocking_until_live_workers_finish(window, monkeypatch):
@@ -1806,30 +841,55 @@ def test_startup_does_not_migrate_when_required_logging_fails(tmp_path, monkeypa
     assert "required user-data log file could not be created" in message.call_args.args[2]
 
 
+def test_startup_shows_generic_error_when_the_publication_directory_is_unavailable(
+    tmp_path, monkeypatch
+):
+    application = Mock()
+    paths = app.RuntimePaths(
+        root=tmp_path, database=tmp_path / "data/db.sqlite",
+        result=tmp_path / "data/result/result.xlsx",
+        state=tmp_path / "state/state.json", log=tmp_path / "logs/app.log",
+    )
+    monkeypatch.setattr(app.QApplication, "instance", Mock(return_value=application))
+    monkeypatch.setattr(app, "runtime_paths", Mock(return_value=paths))
+    monkeypatch.setattr(
+        app, "initialize_runtime_logging", Mock(return_value=(Mock(), tmp_path / "logs/app.log"))
+    )
+    monkeypatch.setattr(app, "migrate_legacy_runtime_data", Mock())
+    monkeypatch.setattr(
+        app, "default_download_directory",
+        Mock(side_effect=RuntimeError("The current user's Documents directory is unavailable.")),
+    )
+    message = Mock()
+    monkeypatch.setattr(app.QMessageBox, "critical", message)
+
+    assert app.main() == 1
+
+    message.assert_called_once()
+    assert "Documents directory is unavailable" in message.call_args.args[2]
+
+
 # --- P.36.21 correction: the real, unmocked active processing call graph ----
 #
 # These tests never mock `run_prisma_import_workflow` itself: they drive the
-# real `PrismaMonitorApp.start_processing()` -> `_process_worker()` ->
-# `prisma_import_workflow.run_prisma_import_workflow()` ->
-# `price_normalization.normalize_prices_for_output()` ->
-# `prisma_publication.publish_cumulative_output()` call graph end-to-end, the
-# exact path a blocking review found could previously present a completed
-# result without a confirmed EUR/MWh/h price. Only the Playwright transport
-# at the very bottom (`PlaywrightAuctionDetailFetcher`) is faked, via the
-# same `FakeManagedLifecycle`/`RecordingAuctionDetailFetcher` pair the
-# existing P.36.19 Mapping-wiring tests above already use, so no real
-# network/PRISMA/ECB access ever happens. `VGS Storage Hub`'s real,
-# evidenced EXIT-side EUR currency (`DEFAULT_PRISMA_REFERENCES`, unchanged)
-# is used directly — no test-only reference catalog is needed for the
-# resolvable-row scenarios below.
+# real `PrismaMonitorApp._select_manual_csv()` -> `_process_selected_csv()` ->
+# `_process_worker()` -> `prisma_import_workflow.run_prisma_import_workflow()`
+# -> `price_normalization.normalize_prices_for_output()` ->
+# `prisma_publication.publish_cumulative_output()` call graph end-to-end —
+# Select CSV is the single user action that immediately processes the
+# selected file and merges it into cumulative persistent storage. Per the
+# revised specification, PrismaFunction never opens, controls, or downloads
+# anything from the PRISMA website, so a resolved rate always comes from
+# `_seed_resolved_rate` (`storage.AuctionStorage`'s durable per-Auction-ID
+# cache) here, exactly as it would in production for a previously resolved
+# auction.
 
 
-def _run_processing_and_wait(widget, monkeypatch, csv_path, *, timeout_s: float = 10.0):
-    """Drive `start_processing()` end-to-end and return the resulting
+def _select_csv_and_wait(widget, monkeypatch, csv_path, *, timeout_s: float = 10.0):
+    """Drive `_select_manual_csv()` end-to-end and return the resulting
     `ProcessingOutcome`.
 
-    `QSignalSpy(...).wait()` (the pattern the existing mocked-workflow tests
-    above use) proved unreliable here for a *real*, unmocked
+    `QSignalSpy(...).wait()` proved unreliable here for a *real*, unmocked
     `run_prisma_import_workflow()` call: the worker thread's
     `processing_finished.emit()` is a genuine cross-thread queued signal, and
     only an explicit `QApplication.processEvents()` poll loop was observed to
@@ -1843,30 +903,13 @@ def _run_processing_and_wait(widget, monkeypatch, csv_path, *, timeout_s: float 
     )
     captured: list = []
     widget.signals.processing_finished.connect(captured.append)
-    widget.start_processing()
+    widget._select_manual_csv()
     deadline = time.monotonic() + timeout_s
     while not captured and time.monotonic() < deadline:
         QApplication.processEvents()
         time.sleep(0.02)
     assert captured, "processing_finished was not received within the timeout"
     return captured[0]
-
-
-class _MultiAuctionFetcher:
-    """Returns a distinct Finished auction-end record per requested Auction
-    ID, unlike `RecordingAuctionDetailFetcher` (which always returns one
-    fixed payload) — needed for a genuinely mixed resolved/unresolved batch
-    spanning two different Auction IDs."""
-
-    def __init__(self, auction_ids: set[str]):
-        self.calls: list[tuple[object, str, int]] = []
-        self._auction_ids = auction_ids
-
-    def fetch(self, page, auction_id, *, timeout_ms):
-        self.calls.append((page, auction_id, timeout_ms))
-        if auction_id not in self._auction_ids:
-            raise PrismaAuctionDetailTransportError(f"unexpected auction id {auction_id}")
-        return {"Auction ID": auction_id, "State": "Finished", "End of Auction": "2026-08-01T15:00:00Z"}
 
 
 _RESOLVABLE_EXIT_ROW = {
@@ -1886,25 +929,18 @@ def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
     window, monkeypatch, tmp_path,
 ):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    _seed_resolved_rate(widget, "1")
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 
-    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
     assert outcome.error is None
     assert outcome.result is not None
-    # The managed page was reached exactly once, through
-    # `PrismaLifecycleController.run_on_page()` — proving strict EUR
-    # normalization (P.36.19/P.36.21) genuinely ran on this real call path,
-    # not a bypassed/mocked one.
-    assert widget.prisma_lifecycle.run_on_page_calls == 1
-    assert len(fetcher.calls) == 1
 
-    # Published into the approved download directory (`P.36.3`), never
-    # `%LOCALAPPDATA%`.
-    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    # Merged into cumulative persistent storage and published into the
+    # approved Documents-directory default (`P.36.3`), never `%LOCALAPPDATA%`.
+    published = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
     assert published.exists()
     with published.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.reader(handle, delimiter=";"))
@@ -1913,147 +949,79 @@ def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
     # 2 cent/kWh/h/Runtime -> 20 EUR/MWh/h source price; VGS Storage Hub's
     # EXIT-side evidence is EUR, so the identity rate (1) applies unchanged.
     assert record[header.index("Tariff Price")] == "20.000000"
-    opened = []
-    with monkeypatch.context() as m:
-        m.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
-        widget.open_result()
-    assert Path(opened[0]) == published
 
 
 def test_unresolved_currency_produces_no_output_and_no_ui_success(window, monkeypatch, tmp_path):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
     csv_path = tmp_path / "Auction_overview.csv"
     # ENTRY-side VGS Storage Hub has no approved currency evidence in the
-    # real, unmodified `DEFAULT_PRISMA_REFERENCES` catalog.
+    # real, unmodified `DEFAULT_PRISMA_REFERENCES` catalog, and this auction
+    # was never previously resolved, so there is no cached rate either.
     _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
 
-    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
     assert outcome.result is None
     assert outcome.error is not None
     assert "EUR" in outcome.error
-    assert not (widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
+    assert not (widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
     assert not widget._processing_active
-    assert widget.process_button.isEnabled()
-    # No successful processing run has ever completed, so Open Result must
-    # keep reporting "process first" rather than pointing at anything.
-    assert widget._last_output_path is None
-    info = Mock()
-    with monkeypatch.context() as m:
-        m.setattr(QMessageBox, "information", info)
-        widget.open_result()
-    info.assert_called_once()
+    assert widget.choose_manual_csv_button.isEnabled()
 
 
 def test_mixed_batch_publishes_nothing_through_the_real_app_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _MultiAuctionFetcher({"1", "2"})
-    monkeypatch.setattr(prisma_lifecycle, "PlaywrightAuctionDetailFetcher", lambda: fetcher)
+    # Auction "1" has a cached resolution; auction "2" was never resolved and
+    # has no live transport to fall back to.
+    _seed_resolved_rate(widget, "1")
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [
         _RESOLVABLE_EXIT_ROW,
         {**_UNRESOLVED_ENTRY_ROW, "Auction ID": "2", "Network Point ID Entry": "ENTRY-2"},
     ])
 
-    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
     assert outcome.result is None
     assert outcome.error is not None
-    assert not (widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
-    assert {auction_id for (_page, auction_id, _timeout) in fetcher.calls} == {"1", "2"}
+    assert not (widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
 
 
 def test_blocked_processing_does_not_finalize_source_operation_as_accepted(window, monkeypatch, tmp_path):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
 
-    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert outcome.result is None
 
     storage = AuctionStorage(widget._runtime_paths.database)
     assert all(row["status"] != "accepted" for row in storage.operations())
 
 
-def test_retry_after_prisma_session_opens_succeeds(window, monkeypatch, tmp_path):
+def test_retry_after_a_rate_becomes_available_succeeds(window, monkeypatch, tmp_path):
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 
-    # First attempt: no managed PRISMA session is open, so no managed page
-    # is available for the uncached Finished auction's rate resolution.
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=False)
-    first = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    # First selection: auction "1" has never been resolved before, so there
+    # is no cached rate and no live transport to resolve it.
+    first = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert first.result is None
-    assert not (widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
-    assert widget._last_output_path is None
+    assert not (widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
 
-    # Second attempt, same source/date: Prisma is now open.
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    fetcher = _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    second = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    # Second selection of the same source: the rate has since become
+    # available (e.g. resolved separately and cached).
+    _seed_resolved_rate(widget, "1")
+    second = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert second.result is not None
-    assert len(fetcher.calls) == 1
-    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    published = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
     assert published.exists()
-    assert widget._last_output_path == published
-
-
-def test_failed_retry_after_a_success_does_not_clobber_open_result(window, monkeypatch, tmp_path):
-    widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    csv_path = tmp_path / "Auction_overview.csv"
-    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
-
-    first = _run_processing_and_wait(widget, monkeypatch, csv_path)
-    assert first.result is not None
-    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
-    assert widget._last_output_path == published
-
-    # A second, different, blocked source must not make Open Result point at
-    # a nonexistent or partially produced file: `_last_output_path` must
-    # still be the previous genuinely published result.
-    blocked_csv_path = tmp_path / "Auction_overview_blocked.csv"
-    _write_prisma_export_with_rows(blocked_csv_path, [_UNRESOLVED_ENTRY_ROW])
-    second = _run_processing_and_wait(widget, monkeypatch, blocked_csv_path)
-    assert second.result is None
-    assert widget._last_output_path == published
-
-    opened = []
-    with monkeypatch.context() as m:
-        m.setattr(app.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
-        widget.open_result()
-    assert Path(opened[0]) == published
-
-
-def test_processing_never_constructs_a_second_prisma_lifecycle_controller(window, monkeypatch, tmp_path):
-    widget, _ = window
-    construction_count_before = app.PrismaLifecycleController.call_count
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
-    csv_path = tmp_path / "Auction_overview.csv"
-    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
-
-    _run_processing_and_wait(widget, monkeypatch, csv_path)
-
-    # `app.PrismaLifecycleController` is the mocked constructor `_build_app`
-    # installs; `PrismaMonitorApp.__init__` calls it exactly once. Nothing in
-    # the processing call graph may call it again — the same single managed
-    # session (here, `widget.prisma_lifecycle`, a fake standing in for it) is
-    # always reused via `run_on_page()`, never a second browser.
-    assert app.PrismaLifecycleController.call_count == construction_count_before
 
 
 def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    _seed_resolved_rate(widget, "1")
     monkeypatch.setattr(
         AuctionStorage, "export_excel",
         lambda *_a, **_k: pytest.fail(
@@ -2063,16 +1031,15 @@ def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, mon
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 
-    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert outcome.result is not None
 
 
 def test_legacy_published_csv_is_never_touched_by_the_active_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    widget.prisma_lifecycle = FakeManagedLifecycle(open_=True)
-    _install_recording_fetcher(monkeypatch, result=dict(_FINISHED_AUCTION_RAW_FIELDS))
+    _seed_resolved_rate(widget, "1")
     legacy_path = (
-        widget._download_directory.current / prisma_publication.LEGACY_PUBLISHED_OUTPUT_FILENAME
+        widget._publication_directory / prisma_publication.LEGACY_PUBLISHED_OUTPUT_FILENAME
     )
     legacy_path.parent.mkdir(parents=True, exist_ok=True)
     legacy_content = b"pre-P.36.21 rows; unconverted; never proven EUR\n"
@@ -2080,13 +1047,36 @@ def test_legacy_published_csv_is_never_touched_by_the_active_workflow(window, mo
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 
-    outcome = _run_processing_and_wait(widget, monkeypatch, csv_path)
+    outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
     assert outcome.result is not None
     assert legacy_path.read_bytes() == legacy_content
-    published = widget._download_directory.current / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    published = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
     assert published != legacy_path
     assert published.exists()
+
+
+def test_reselecting_the_same_csv_does_not_duplicate_cumulative_rows(window, monkeypatch, tmp_path):
+    # "merge it into cumulative persistent storage without duplicates":
+    # selecting and processing the exact same accepted source a second time
+    # must be an idempotent exact retry, never a second set of rows.
+    widget, _ = window
+    _seed_resolved_rate(widget, "1")
+    csv_path = tmp_path / "Auction_overview.csv"
+    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+
+    first = _select_csv_and_wait(widget, monkeypatch, csv_path)
+    assert first.result is not None
+    published = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    first_content = published.read_bytes()
+
+    second = _select_csv_and_wait(widget, monkeypatch, csv_path)
+
+    assert second.result is not None
+    assert published.read_bytes() == first_content
+    storage = AuctionStorage(widget._runtime_paths.database)
+    accepted = [row for row in storage.operations() if row["status"] == "accepted"]
+    assert len(accepted) == 1
 
 
 def test_active_modules_are_reachable_from_apps_own_import_graph():

@@ -47,64 +47,86 @@ P.35.2–P.35.5 were cancelled on 2026-07-28. Do not restore their automated
 CSV/PDF pairing, staging, fingerprinting, or browser-driven source-acquisition
 design.
 
-P.36 is the authoritative forward roadmap. Its current workflow is: the user
-selects a date range in Prisma Function, the application performs a
-user-initiated, application-managed PRISMA CSV download, the downloaded CSV is
-transformed into the 12-column output contract below, and the result is
-published. Manual selection of an already-downloaded CSV (`P.36.4`) is a
-fallback path only, not the primary workflow.
+P.36 was the authoritative forward roadmap through P.36.22. **P.38 (2026-08-16,
+customer-approved revision) supersedes P.36's managed-download design.**
+PrismaFunction no longer opens, controls, or downloads anything from the
+PRISMA website. The user downloads the official PRISMA Export CSV
+independently; Select CSV (the completed `P.36.4` manual-selection path) is
+now the sole and primary acquisition path, not a fallback. The managed
+browser/download product code — `browser.py`, `prisma_lifecycle.py`,
+`prisma_download.py`, `prisma_page.py`, `date_range_selection.py`, the Open
+Prisma/Close Prisma/date-range/download-folder UI and controller wiring in
+`app.py`, and their dedicated tests — was removed by P.38; do not restore it.
+`playwright` is no longer a dependency anywhere in the codebase or packaging
+configuration. See `ROADMAP.md`'s P.38 entry for the full scope and the
+disposition of every superseded P.36 sub-increment (P.36.2, P.36.3's
+managed-download support, P.36.8's managed-download trigger, P.36.13,
+P.36.14, P.36.20, P.36.22).
 
-- P.36.1–P.36.5 are complete. P.36.5 resolved the PDF-scope question — PDF
-  input/processing stays excluded from the current version — but its separate
-  14-column/four-field-split output decision was withdrawn by a 2026-08-02
-  customer correction and must not guide implementation.
+- P.36.1, P.36.4, P.36.5, P.36.8 (mapping display), P.36.15
+  (`prisma_output.write_prisma_output`), P.36.16
+  (`prisma_publication.publish_cumulative_output`), P.36.19 (historical ECB
+  rate to EUR in Mapping), and P.36.21 (strict EUR normalization) remain
+  implemented and in active use; P.38 did not change their scope. P.36.5's
+  PDF-scope decision (PDF input/processing excluded) still stands; its
+  separate 14-column/four-field-split output decision remains withdrawn.
 - P.36.6, P.36.7, and P.36.9 are suspended/superseded. The old 14-field
   P.36.6 prompt must not be executed.
 - P.36.10 (removal of the superseded monitoring/scheduler product flow and
   obsolete dependencies) is implemented, automated-tested, and merged to
   `main` via PR #65 (merge commit `d6dd456`).
-- P.36.13–P.36.16 (date-range selection, application-managed download,
-  transformation into the 12-column contract, and publication) are each
-  implemented and merged to `main`; each still requires manual real-Windows/
-  real-PRISMA validation before it can be marked fully complete — see the
-  current status recorded in `ROADMAP.md`. P.36.8 (mapping display) is
-  implemented, automated-tested, and merged to `main` via PR #64 (merge
-  commit `5e3f309`).
-- `app.py`'s "Import PRISMA Export" button calls
+- **P.39 (2026-08-16) correction:** Select CSV is the single user action.
+  `app.py`'s `_select_manual_csv()` validates the chosen local file, refreshes
+  the Mapping preview, and — if that preview succeeded — immediately calls
+  `_process_selected_csv()` on a background thread; there is no separate
+  "Import PRISMA Export" button, export-date picker, or two-step selected-
+  file/import state anymore. `_process_selected_csv()` calls
   `prisma_import_workflow.run_prisma_import_workflow`, which itself calls
   `prisma_publication.publish_cumulative_output` (P.36.16) to produce the
-  active, EUR-confirmed 12-column result. `prisma_output.write_prisma_output`
-  (P.36.15, the independent per-import single-file writer) is still not
-  called from `app.py` anywhere. Never assume a module is reachable from the
-  running application merely because it exists — verify the actual call
-  graph before relying on it; this exact gap (P.36.15/16 unreachable from
-  `app.py`) was found and partially corrected by P.36.21 — see `ROADMAP.md`.
-- P.36.19 (historical ECB rate to EUR in Mapping) and P.36.21 (strict EUR
-  normalization of `Tariff Price`/`Premium Price`, fail-closed, wired into
-  the real active processing path) are implemented and automated-tested; see
-  `ROADMAP.md` for exact merge status. `price_normalization.py` is the one
-  place a row's price is converted to EUR/MWh/h; never add a second
-  conversion or rate-selection implementation. The pre-P.36 Excel pipeline
-  (`storage.export_excel`/`AuctionStorage.EXCEL_COLUMNS`) is dormant,
-  intentionally unconverted, independently tested compatibility code — it is
-  never called by the active workflow.
+  active, EUR-confirmed 12-column result, merged into cumulative storage
+  without duplicates (`prisma_source_updates`/`storage.py`, unchanged).
+  `source_date` is always `datetime.now().date()` (today) now that there is
+  no UI date picker — the same fallback the pre-P.39 code already used when
+  no date was supplied. `prisma_output.write_prisma_output` (P.36.15, the
+  independent per-import single-file writer) is still not called from
+  `app.py` anywhere. Never assume a module is reachable from the running
+  application merely because it exists — verify the actual call graph before
+  relying on it.
+- `price_normalization.py` is the one place a row's price is converted to
+  EUR/MWh/h; never add a second conversion or rate-selection implementation.
+  A Finished auction's rate resolves only from `storage.AuctionStorage`'s
+  durable per-Auction-ID cache (`rate_resolution.py`): since P.38 removed all
+  browser/PRISMA-website access, there is no live transport left, and
+  `prisma_auction_lookup.PrismaAuctionLookup` fails closed
+  (`PrismaAuctionDetailTransportError`) whenever no explicit `fetcher` is
+  supplied — which is always true in the running application. A
+  never-before-resolved Finished auction therefore blocks EUR normalization
+  for its whole batch (P.36.21's existing fail-closed contract, unchanged);
+  a previously resolved auction keeps working from cache indefinitely. The
+  pre-P.36 Excel pipeline (`storage.export_excel`/
+  `AuctionStorage.EXCEL_COLUMNS`) is dormant, intentionally unconverted,
+  independently tested compatibility code — it is never called by the active
+  workflow.
 - The active `Prisma_Output_Published_EUR.csv` is published directly into the
-  approved download directory (`app.py`'s `DownloadDirectorySelection.current`,
-  snapshotted before the processing worker starts — the same `P.36.3`
-  Documents-directory-or-user-selected-directory contract, never
-  `%LOCALAPPDATA%`). `RuntimePaths.published_directory` was removed (P.36.21
-  third-pass correction, 2026-08-13) after this fix — it had no remaining
-  legitimate runtime-data purpose. "Open Result" opens the exact
-  `PrismaWorkflowResult.output_path` of the most recent successful processing
-  run (`PrismaMonitorApp._last_output_path`), never a guessed or reconstructed
-  path, and a later failed attempt never overwrites it. A processing operation
+  approved publication directory: `app.py`'s `main()` resolves and validates
+  the current user's Documents folder once at startup
+  (`download_directory.default_download_directory()` +
+  `validate_download_directory()`) and passes it to `PrismaMonitorApp` as
+  `self._publication_directory` — the same `P.36.3` Documents-directory
+  contract, never `%LOCALAPPDATA%`, and no longer user-reselectable (the
+  "Choose Download Folder" control was removed by P.38 along with the
+  managed-download workflow it existed for). There is no "Open Result"
+  control (removed by P.39 along with `PrismaMonitorApp._last_output_path`);
+  the published cumulative CSV in the approved directory is the durable,
+  structured output — this is what a later monitoring-system integration
+  reads, not anything the UI opens for the user. A processing operation
   resolves and normalizes prices exactly once
   (`price_normalization.normalize_prices_for_output`); the result is reused as
   `precomputed_normalization` when calling
   `prisma_publication.publish_cumulative_output`, which validates it belongs to
   the exact row batch before trusting it — never a second normalization pass
   for the same batch, and never a mismatched result silently accepted.
-- Later P.36 increments must follow the dependency and status recorded in
+- Later increments must follow the dependency and status recorded in
   `ROADMAP.md`.
 
 ## Separate CSV contracts — never conflate
@@ -162,10 +184,12 @@ Done). The rules below are specific to the Prisma Function product:
 - General application runtime data (SQLite, logs, import state) belongs only
   under `%LOCALAPPDATA%\PrismaFunction\`. Never write it to the installation
   directory, current working directory, or a hidden staging path.
-- P.36 downloaded and published user-facing files follow the approved
-  Documents-directory-or-user-selected-directory contract (`P.36.3`), not
-  `%LOCALAPPDATA%`.
-- Never bypass PRISMA authentication, anti-bot protection, or terms.
+- Published user-facing output files follow the approved Documents-directory
+  contract (`P.36.3`), not `%LOCALAPPDATA%`.
+- PrismaFunction never opens, controls, or downloads anything from the
+  PRISMA website (P.38). The user acquires the official CSV export
+  independently; do not reintroduce browser automation, Playwright, or any
+  other PRISMA-website access.
 
 ## Claude Code efficiency
 

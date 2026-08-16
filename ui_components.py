@@ -31,11 +31,6 @@ QPushButton[sidebar="true"] { color: #e9f0f8; background: #223149; border-color:
 QPushButton[sidebar="true"]:hover { background: #2a405c; border-color: #3c5876; }
 QPushButton[sidebar="true"]:disabled { color: #75869c; background: #1c293d; border-color: #29394f; }
 QFrame#card, QFrame#panel { background: white; border: 1px solid #e1e7ef; border-radius: 10px; }
-QLabel#browserBadge { border-radius: 10px; padding: 4px 10px; font-weight: 600; }
-QLabel[state="idle"] { background: #e8edf3; color: #526173; }
-QLabel[state="working"] { background: #fff1cc; color: #835b00; }
-QLabel[state="ready"] { background: #d9f5e8; color: #176846; }
-QLabel[state="error"] { background: #fde2e2; color: #9a2d2d; }
 QLineEdit, QComboBox { min-height: 32px; border: 1px solid #ccd6e2; border-radius: 7px; padding: 2px 9px; background: white; color: #243247; selection-background-color: #087f9d; selection-color: white; }
 QLineEdit { placeholder-text-color: #718096; }
 QLineEdit:focus, QComboBox:focus { border: 2px solid #1593b5; }
