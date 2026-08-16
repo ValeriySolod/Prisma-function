@@ -90,6 +90,31 @@ class RateResolutionRecord:
     source_version: str
 
 
+class EcbAuctionDateRateConflictError(AuctionStorageError):
+    """A previously fixed P.37 (auction_date, currency) rate resolution
+    contradicts newly retrieved authoritative ECB data. The previously fixed
+    result is never silently overwritten."""
+
+
+@dataclass(frozen=True)
+class EcbAuctionDateRateRecord:
+    """One deterministically fixed P.37 ECB rate-to-EUR resolution, keyed by
+    (auction_date, currency) -- the calendar date parsed from a row's own
+    `Start of Auction` and a price field's own CSV-unit-derived ISO 4217
+    currency -- sufficient to audit the resolution safely without repeating
+    the ECB lookup. Independent of, and never mixed with,
+    `RateResolutionRecord`'s Auction-ID-keyed P.36.19 table, which continues
+    to serve only the Mapping UI's own Currency/Rate to EUR/Rate Date
+    columns."""
+
+    auction_date: str
+    currency: str
+    ecb_publication_date: str
+    rate_to_eur: str
+    resolved_at_utc: str
+    source_version: str
+
+
 class AuctionStorage:
     AUCTION_IDENTITY_FIELDS = (
         "auction_id", "network_point_id", "direction", "flow_start", "flow_end",
@@ -190,6 +215,30 @@ class AuctionStorage:
         resolved_at_utc TEXT NOT NULL,
         source_version TEXT NOT NULL
     )"""
+    ECB_AUCTION_DATE_RATE_FIELDS = (
+        "auction_date", "currency", "ecb_publication_date",
+        "rate_to_eur", "resolved_at_utc", "source_version",
+    )
+    ECB_AUCTION_DATE_RATES_SQL = """CREATE TABLE IF NOT EXISTS ecb_auction_date_rates (
+        auction_date TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        ecb_publication_date TEXT NOT NULL,
+        rate_to_eur TEXT NOT NULL,
+        resolved_at_utc TEXT NOT NULL,
+        source_version TEXT NOT NULL,
+        PRIMARY KEY (auction_date, currency)
+    )"""
+    # P.37: row-dict keys `processor.py` produces that describe the
+    # side-specific source-currency price/currency breakdown, needed by
+    # `price_normalization.py` but not part of the dormant `auctions` table
+    # schema. Dropped by `_translate_legacy_price_fields` before a row ever
+    # reaches `_upsert_rows`, whose INSERT/UPDATE column list is built
+    # directly from the row dict's own keys.
+    _P37_ONLY_FIELDS = (
+        "tariff_exit_source_mwh_h", "tariff_exit_currency",
+        "tariff_entry_source_mwh_h", "tariff_entry_currency",
+        "premium_currency",
+    )
 
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,12 +338,47 @@ class AuctionStorage:
                     summary_json TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(source_date)
+                    UNIQUE(source_date, sha256)
                 )""",
                     self.RATE_RESOLUTIONS_SQL,
+                    self.ECB_AUCTION_DATE_RATES_SQL,
             ):
                 connection.execute(statement)
+            self._ensure_prisma_source_operations_schema(connection)
             self._ensure_historical_schema(connection)
+
+    @classmethod
+    def _ensure_prisma_source_operations_schema(cls, connection: sqlite3.Connection) -> None:
+        indexes = cls._indexes(connection, "prisma_source_operations")
+        has_date_only_unique = any(
+            unique and columns == ("source_date",)
+            for _name, unique, _origin, columns in indexes
+        )
+        if not has_date_only_unique:
+            return
+        connection.execute("ALTER TABLE prisma_source_operations RENAME TO prisma_source_operations_legacy")
+        connection.execute(
+            """
+            CREATE TABLE prisma_source_operations (
+                operation_id TEXT PRIMARY KEY,
+                source_date TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+                summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_date, sha256)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status, summary_json, created_at, updated_at) "
+            "SELECT operation_id, source_date, source_name, sha256, status, summary_json, created_at, updated_at "
+            "FROM prisma_source_operations_legacy"
+        )
+        connection.execute("DROP TABLE prisma_source_operations_legacy")
 
     @staticmethod
     def _table_columns(connection: sqlite3.Connection, table: str) -> tuple[tuple[Any, ...], ...]:
@@ -588,7 +672,7 @@ class AuctionStorage:
     def operations(self) -> list[sqlite3.Row]:
         with self._connection() as connection, connection:
             return list(connection.execute(
-                "SELECT * FROM prisma_source_operations ORDER BY source_date"
+                "SELECT * FROM prisma_source_operations ORDER BY source_date, created_at, operation_id"
             ))
 
     def unresolved_operations(self) -> list[sqlite3.Row]:
@@ -608,17 +692,28 @@ class AuctionStorage:
     def operation_for_date(self, source_date: str) -> sqlite3.Row | None:
         with self._connection() as connection, connection:
             return connection.execute(
-                "SELECT * FROM prisma_source_operations WHERE source_date = ?", (source_date,)
+                "SELECT * FROM prisma_source_operations WHERE source_date = ? "
+                "ORDER BY created_at DESC, operation_id DESC",
+                (source_date,),
+            ).fetchone()
+
+    def operation_for_source(self, source_date: str, digest: str) -> sqlite3.Row | None:
+        with self._connection() as connection, connection:
+            return connection.execute(
+                "SELECT * FROM prisma_source_operations WHERE source_date = ? AND sha256 = ?",
+                (source_date, digest),
+            ).fetchone()
+
+    def operation_by_id(self, operation_id: str) -> sqlite3.Row | None:
+        with self._connection() as connection, connection:
+            return connection.execute(
+                "SELECT * FROM prisma_source_operations WHERE operation_id = ?",
+                (operation_id,),
             ).fetchone()
 
     def begin_operation(self, source_date: str, source_name: str, digest: str) -> sqlite3.Row:
-        existing = self.operation_for_date(source_date)
+        existing = self.operation_for_source(source_date, digest)
         if existing is not None:
-            if existing["sha256"] != digest:
-                state = "accepted" if existing["status"] == "accepted" else "unresolved"
-                raise AuctionStorageError(
-                    f"A different PRISMA source for this date is already {state}."
-                )
             return existing
         operation_id = uuid.uuid4().hex
         with self._connection() as connection, connection:
@@ -627,20 +722,32 @@ class AuctionStorage:
                 "(operation_id, source_date, source_name, sha256, status) VALUES (?, ?, ?, ?, 'pending')",
                 (operation_id, source_date, source_name, digest),
             )
-        return self.operation_for_date(source_date)  # type: ignore[return-value]
+        return self.operation_by_id(operation_id)  # type: ignore[return-value]
 
     @classmethod
     def _translate_legacy_price_fields(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """See `_LEGACY_PRICE_FIELD_ALIASES` for why this translation exists."""
+        """See `_LEGACY_PRICE_FIELD_ALIASES` for why the rename exists, and
+        `_P37_ONLY_FIELDS` for why those keys are dropped: both exist so a
+        `processor.py` row dict -- which now also carries P.37's
+        side-specific source-price/currency breakdown for
+        `price_normalization.py` -- can still be passed unmodified into
+        `_upsert_rows`, whose INSERT/UPDATE column list is built directly
+        from the row dict's own keys and must match the `auctions` table
+        schema exactly."""
         translated = []
         for row in rows:
-            if not any(field in row for field in cls._LEGACY_PRICE_FIELD_ALIASES):
+            if not any(
+                field in row
+                for field in (*cls._LEGACY_PRICE_FIELD_ALIASES, *cls._P37_ONLY_FIELDS)
+            ):
                 translated.append(row)
                 continue
             updated = dict(row)
             for new_name, legacy_name in cls._LEGACY_PRICE_FIELD_ALIASES.items():
                 if new_name in updated:
                     updated[legacy_name] = updated.pop(new_name)
+            for field in cls._P37_ONLY_FIELDS:
+                updated.pop(field, None)
             translated.append(updated)
         return translated
 
@@ -785,6 +892,71 @@ class AuctionStorage:
                     record.auction_id, record.auction_state, record.auction_end_at,
                     record.currency, record.ecb_publication_date, record.rate_to_eur,
                     record.resolved_at_utc, record.source_version,
+                ),
+            )
+        return record
+
+    def get_ecb_auction_date_rate(
+        self, auction_date: str, currency: str
+    ) -> EcbAuctionDateRateRecord | None:
+        """Return the previously fixed P.37 rate resolution for
+        `(auction_date, currency)`, or `None` when no resolution has been
+        fixed yet."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM ecb_auction_date_rates WHERE auction_date = ? AND currency = ?",
+                (auction_date, currency),
+            ).fetchone()
+        if row is None:
+            return None
+        return EcbAuctionDateRateRecord(**{
+            field: row[field] for field in self.ECB_AUCTION_DATE_RATE_FIELDS
+        })
+
+    def save_ecb_auction_date_rate(
+        self, record: EcbAuctionDateRateRecord
+    ) -> EcbAuctionDateRateRecord:
+        """Atomically fix one new P.37 `(auction_date, currency)` rate
+        resolution.
+
+        Reusing an identical previously fixed resolution is a no-op that
+        returns the existing record unchanged (`resolved_at_utc` is excluded
+        from the equality check, since reuse must not fail merely because
+        time has passed). Any other difference from a previously fixed
+        record for the same `(auction_date, currency)` is a contradiction
+        between cached data and newly retrieved authoritative ECB data, and
+        raises `EcbAuctionDateRateConflictError` with both records for
+        diagnostics instead of silently overwriting the previously fixed
+        result.
+        """
+        with self._connection() as connection, self._transaction(connection):
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                "SELECT * FROM ecb_auction_date_rates WHERE auction_date = ? AND currency = ?",
+                (record.auction_date, record.currency),
+            ).fetchone()
+            if existing_row is not None:
+                existing = EcbAuctionDateRateRecord(**{
+                    field: existing_row[field] for field in self.ECB_AUCTION_DATE_RATE_FIELDS
+                })
+                comparable = [
+                    field for field in self.ECB_AUCTION_DATE_RATE_FIELDS
+                    if field != "resolved_at_utc"
+                ]
+                if all(getattr(existing, field) == getattr(record, field) for field in comparable):
+                    return existing
+                raise EcbAuctionDateRateConflictError(
+                    "A previously fixed ECB rate resolution for "
+                    f"{record.auction_date}/{record.currency} contradicts newly "
+                    f"retrieved data: existing={existing!r} new={record!r}."
+                )
+            connection.execute(
+                "INSERT INTO ecb_auction_date_rates "
+                "(auction_date, currency, ecb_publication_date, rate_to_eur, "
+                "resolved_at_utc, source_version) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    record.auction_date, record.currency, record.ecb_publication_date,
+                    record.rate_to_eur, record.resolved_at_utc, record.source_version,
                 ),
             )
         return record

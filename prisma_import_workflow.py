@@ -4,17 +4,19 @@ SQLite is authoritative for source lifecycle. Legacy JSON is read only when the
 ledger is empty. A pending ledger row precedes auction mutation; auction changes
 and summary metadata share one transaction with the data_committed transition.
 
-P.36.21 correction. This is `app.py`'s only active completed-processing path
-(the "Import PRISMA Export" button), so it is also where P.36.21's strict
-EUR/MWh/h invariant must be enforced for the application to ever present a
-result as completed. `price_normalization.normalize_prices_for_output`
-(reusing P.36.19's `rate_resolution.resolve_rates_for_rows` and its durable
-per-Auction-ID cache) is resolved exactly once per processing operation,
-strictly before any operation-state transition or output write; a blocked
-normalization raises `PrismaPriceNormalizationError` (a `PrismaWorkflowError`)
-with no state change and no output written, so a retry is always safe once
-resolution becomes available. That one `PriceNormalizationResult` is then
-reused as-is (`precomputed_normalization=`) when publishing, so
+P.36.21/P.37 correction. This is `app.py`'s only active completed-processing
+path (the "Select CSV" action), so it is also where the strict EUR/MWh/h
+invariant must be enforced for the application to ever present a result as
+completed. `price_normalization.normalize_prices_for_output` (resolving the
+ECB rate per P.37 by `(auction_date, currency)` parsed directly from each
+row's own `Start of Auction` and CSV unit strings, with its own durable
+cache — no PRISMA lookup, no market-catalog currency) is resolved exactly
+once per processing operation, strictly before any operation-state
+transition or output write; a blocked normalization raises
+`PrismaPriceNormalizationError` (a `PrismaWorkflowError`) with no state
+change and no output written, so a retry is always safe once resolution
+becomes available. That one `PriceNormalizationResult` is then reused as-is
+(`precomputed_normalization=`) when publishing, so
 `price_normalization.normalize_prices_for_output` never runs a second time
 for the same batch. The active published result is the strict, EUR-confirmed
 12-column CSV written by `prisma_publication.publish_cumulative_output`
@@ -54,7 +56,6 @@ from price_normalization import (
     describe_price_normalization_failure,
     normalize_prices_for_output,
 )
-from prisma_auction_lookup import PrismaAuctionLookup
 from prisma_publication import describe_publication_failure, publish_cumulative_output
 from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
 from prisma_source_updates import AcceptedPrismaSource, PrismaSourceState, SourceUpdateStatus, evaluate_prisma_source_update
@@ -75,12 +76,12 @@ class PrismaWorkflowError(RuntimeError):
 
 class PrismaPriceNormalizationError(PrismaWorkflowError):
     """At least one otherwise-publishable row lacks a confirmed EUR/MWh/h
-    conversion (P.36.21). No source operation was begun/applied/finalized and
-    no output was created or replaced; retry once the missing currency,
-    auction-end, or ECB rate evidence becomes available. `normalization`
-    carries the full typed detail (affected Auction IDs and stable reason
-    codes) for callers/logs; `str(self)` is the same stable,
-    technical-detail-free summary shown to the user."""
+    conversion (P.36.21/P.37). No source operation was begun/applied/
+    finalized and no output was created or replaced; retry once the missing
+    ECB rate evidence for the required auction date/currency becomes
+    available. `normalization` carries the full typed detail (affected
+    Auction IDs and stable reason codes) for callers/logs; `str(self)` is
+    the same stable, technical-detail-free summary shown to the user."""
 
     def __init__(self, normalization: PriceNormalizationResult) -> None:
         self.normalization = normalization
@@ -100,14 +101,21 @@ class PrismaWorkflowResult:
     source_status: SourceUpdateStatus
     message: str
     audit_issue_count: int | None = None
+    total_source_rows: int | None = None
+    accepted: int | None = None
+    deduplicated: int | None = None
 
     def summary(self) -> str:
         value = lambda item: "unavailable" if item is None else str(item)
         audit = self.audit_issue_count if self.audit_issue_count is not None else len(self.issues)
+        source_rows = self.total_source_rows if self.total_source_rows is not None else self.processed
+        accepted = self.accepted if self.accepted is not None else self.processed
+        deduplicated = self.deduplicated if self.deduplicated is not None else 0
         return (
-            f"{self.message} Processed: {value(self.processed)}; inserted: {value(self.inserted)}; "
-            f"updated: {value(self.updated)}; unchanged: {value(self.unchanged)}; "
+            f"{self.message} Source rows: {value(source_rows)}; accepted: {value(accepted)}; "
             f"filtered: {value(self.filtered)}; rejected: {value(self.rejected)}; "
+            f"deduplicated: {value(deduplicated)}; inserted: {value(self.inserted)}; "
+            f"updated: {value(self.updated)}; unchanged: {value(self.unchanged)}; "
             f"audit issues: {value(audit)}. Output: {self.output_path}"
         )
 
@@ -140,36 +148,58 @@ def _state(storage: AuctionStorage, legacy_path: Path) -> PrismaSourceState:
     return PrismaSourceState(accepted)
 
 
-def _result_from_operation(row, output_path: Path, status: SourceUpdateStatus, message: str,
-                            issues: tuple[PrismaImportIssue, ...] = ()) -> PrismaWorkflowResult:
+def _result_from_operation(
+    row,
+    output_path: Path,
+    status: SourceUpdateStatus,
+    message: str,
+    issues: tuple[PrismaImportIssue, ...] = (),
+    *,
+    processed: int | None = None,
+    inserted: int | None = None,
+    updated: int | None = None,
+    unchanged: int | None = None,
+    filtered: int | None = None,
+    rejected: int | None = None,
+    audit_issue_count: int | None = None,
+    total_source_rows: int | None = None,
+    accepted: int | None = None,
+    deduplicated: int | None = None,
+) -> PrismaWorkflowResult:
     summary = json.loads(row["summary_json"] or "{}")
     get = lambda key: int(summary[key]) if key in summary else None
-    return PrismaWorkflowResult(get("processed"), get("inserted"), get("updated"), get("unchanged"),
-        get("filtered"), get("rejected"), issues, output_path, status, message, get("audit_issues"))
+    return PrismaWorkflowResult(
+        processed if processed is not None else get("processed"),
+        inserted if inserted is not None else get("inserted"),
+        updated if updated is not None else get("updated"),
+        unchanged if unchanged is not None else get("unchanged"),
+        filtered if filtered is not None else get("filtered"),
+        rejected if rejected is not None else get("rejected"),
+        issues, output_path, status, message,
+        audit_issue_count if audit_issue_count is not None else get("audit_issues"),
+        total_source_rows if total_source_rows is not None else get("total_source_rows"),
+        accepted if accepted is not None else get("accepted"),
+        deduplicated if deduplicated is not None else get("deduplicated"))
 
 
 def run_prisma_import_workflow(
     source_path: str | Path, *, source_date: date, evaluated_at: datetime,
     database_path: Path, state_path: Path, publication_directory: Path,
     reference_catalog: PrismaReferenceCatalog = DEFAULT_PRISMA_REFERENCES,
-    auction_lookup: PrismaAuctionLookup | None = None,
-    page: object = None,
     ecb_source: EcbRateSource | None = None,
 ) -> PrismaWorkflowResult:
-    """Validate, EUR-normalize (P.36.21), and publish (P.36.16) one PRISMA
-    Export CSV as the exact 12-column cumulative EUR/MWh/h output.
+    """Validate, EUR-normalize (P.36.21/P.37), and publish (P.36.16) one
+    PRISMA Export CSV as the exact 12-column cumulative EUR/MWh/h output.
 
-    ``auction_lookup``/``page`` are forwarded unchanged to
-    `rate_resolution.resolve_rates_for_rows` for any uncached Finished
-    auction. Per the revised specification, PrismaFunction never opens,
-    controls, or downloads anything from the PRISMA website, so no caller
-    supplies either argument today: an uncached Finished auction's rate
-    resolution fails closed (`RateResolutionOutcome.AUCTION_END_UNAVAILABLE`)
-    instead of blocking on live PRISMA access, and a previously resolved
-    auction is served from `storage.AuctionStorage`'s durable cache. Both
-    parameters remain so a fake/test `PrismaAuctionLookup` can still exercise
-    this function's full call graph. This function never touches a browser
-    itself.
+    ``ecb_source`` is forwarded unchanged to
+    `price_normalization.resolve_ecb_rates_for_rows` for any uncached
+    `(auction_date, currency)` pair. Per P.37, this needs no PRISMA lookup
+    at all -- the ECB rate is resolved from each row's own `Start of
+    Auction` calendar date and each price's own CSV-unit-derived currency,
+    so, unlike the pre-P.37 mechanism, a never-before-cached pair still
+    resolves on demand (from ECB) instead of permanently blocking. A
+    previously resolved pair is served from `storage.AuctionStorage`'s
+    durable cache. This function never touches a browser itself.
     """
     detection = detect_csv_format(source_path)
     if detection.format is CsvFormat.MONITORING:
@@ -183,7 +213,8 @@ def run_prisma_import_workflow(
 
     storage = AuctionStorage(database_path)
     unresolved = storage.unresolved_operations()
-    if any(row["source_date"] != source_date.isoformat() for row in unresolved):
+    source_date_text = source_date.isoformat()
+    if any(row["source_date"] != source_date_text for row in unresolved):
         raise PrismaWorkflowError(
             "Another PRISMA source operation is unresolved. Retry that source before importing a new date."
         )
@@ -196,34 +227,37 @@ def run_prisma_import_workflow(
         prior_state=_state(storage, state_path), importer=importer)
     if update.status is SourceUpdateStatus.REJECTED:
         raise PrismaWorkflowError(update.message)
+    if any(row["sha256"] != update.sha256 for row in unresolved):
+        raise PrismaWorkflowError(
+            "Another PRISMA source operation is unresolved. Retry that source before importing a new source."
+        )
 
     imported = captured[0] if captured else import_prisma_export(source_path, reference_catalog=reference_catalog)
 
-    # P.36.21 strict EUR gate: resolved once, before any operation-state
+    # P.36.21/P.37 strict EUR gate: resolved once, before any operation-state
     # transition or output write. A blocked normalization never begins,
     # applies, or finalizes a source operation, and never creates, replaces,
     # or appends any output.
     normalization = normalize_prices_for_output(
-        imported.rows, storage=storage, reference_catalog=reference_catalog,
-        auction_lookup=auction_lookup, page=page, ecb_source=ecb_source,
+        imported.rows, storage=storage, ecb_source=ecb_source,
     )
     if not normalization.succeeded:
         raise PrismaPriceNormalizationError(normalization)
 
     try:
-        operation = storage.begin_operation(source_date.isoformat(), update.source_name, update.sha256)
+        operation = storage.begin_operation(source_date_text, update.source_name, update.sha256)
         already_accepted = operation["status"] == "accepted"
         if operation["status"] == "pending":
             summary = {"total_source_rows": imported.total_source_rows,
+                       "accepted": imported.imported_count,
                        "filtered": imported.filtered_count, "rejected": imported.rejected_count,
                        "audit_issues": len(imported.issues)}
             storage.apply_operation(operation["operation_id"], imported.rows, summary)
-            operation = storage.operation_for_date(source_date.isoformat())
+            operation = storage.operation_by_id(operation["operation_id"])
 
         publication = publish_cumulative_output(
             imported, publication_directory, storage=storage,
-            reference_catalog=reference_catalog, auction_lookup=auction_lookup,
-            page=page, ecb_source=ecb_source,
+            ecb_source=ecb_source,
             precomputed_normalization=normalization,
         )
         if not publication.succeeded:
@@ -235,14 +269,31 @@ def run_prisma_import_workflow(
 
         if not already_accepted:
             storage.finalize_operation(operation["operation_id"])
-        final = storage.operation_for_date(source_date.isoformat())
+        final = storage.operation_by_id(operation["operation_id"])
         message = (
             "Exact retry: the accepted PRISMA source and confirmed EUR output are valid."
             if already_accepted else
             "The PRISMA source was validated, confirmed in EUR, published, and accepted."
         )
+        current_stats = (
+            {
+                "processed": imported.imported_count,
+                "inserted": 0,
+                "updated": 0,
+                "unchanged": imported.imported_count,
+                "filtered": imported.filtered_count,
+                "rejected": imported.rejected_count,
+                "audit_issue_count": len(imported.issues),
+            }
+            if already_accepted else
+            {}
+        )
         return _result_from_operation(
-            final, publication.output_path, update.status, message, tuple(imported.issues)
+            final, publication.output_path, update.status, message, tuple(imported.issues),
+            **current_stats,
+            total_source_rows=imported.total_source_rows,
+            accepted=imported.imported_count,
+            deduplicated=publication.deduplicated_row_count,
         )
     except (AuctionStorageError, sqlite3.Error, OSError) as exc:
         raise PrismaWorkflowError(str(exc)) from exc

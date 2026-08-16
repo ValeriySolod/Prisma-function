@@ -52,13 +52,13 @@ Mapping supports unrestricted vertical and horizontal scrolling and has no previ
 - Runtime storage: %LOCALAPPDATA%\PrismaFunction\.
 - User-facing publication: approved Documents directory.
 
-## Current increment
+## Completed increment
 
 ### P.37 — Start-of-Auction ECB normalization and cumulative Mapping correction
 
-Status: In progress; not merged.
+Status: implemented, automated-tested, and manually validated on real Windows on 2026-08-16; PR #77 pending merge.
 
-Required acceptance:
+Implemented result:
 
 - EUR, GBP, CZK, and CHF source prices normalize to EUR/MWh/h using Start of Auction.
 - Each unique date/currency rate is resolved once and persisted for reuse.
@@ -68,8 +68,10 @@ Required acceptance:
 - Multiple CSV files for the same date are accepted.
 - Exact retry and partial overlap are idempotent.
 - Mapping shows all cumulative accepted rows using the exact 12-column contract.
-- Real Windows validation is recorded before completion.
+- Manual Windows acceptance confirmed same-date multi-file import, cumulative Mapping, and idempotent behavior.
+
+Automated evidence reported for the final correction: 608 passed, 1 skipped; final source-update focused suite 21 passed; tracked Python py_compile passed; git diff --check passed with the existing CRLF warning for tests/test_prisma_publication.py.
 
 ## Next work
 
-Select the next increment only after P.37 is accepted, merged into main, and its feature branch is cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.
+Select the next increment only after P.37 is merged into main and its feature branch is cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.

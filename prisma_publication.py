@@ -59,13 +59,15 @@ existing caller; this module adds a new, separate entry point for the
 cumulative-publication use case P.36.16 approves. No UI or browser code is
 touched here.
 
-P.36.21 strict EUR contract and legacy-file compatibility decision.
+P.36.21/P.37 strict EUR contract and legacy-file compatibility decision.
 `Tariff Price`/`Premium Price` must be confirmed EUR/MWh/h before any row is
 merged into the cumulative file, using the same
 `price_normalization.normalize_prices_for_output` boundary
-`prisma_output.write_prisma_output` uses; when at least one otherwise-
-publishable row lacks a confirmed conversion, `publish_cumulative_output`
-returns `PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED` and leaves the
+`prisma_output.write_prisma_output` uses — resolving the ECB rate per P.37
+by `(auction_date, currency)` parsed directly from each row's own CSV data,
+no PRISMA lookup; when at least one otherwise-publishable row lacks a
+confirmed conversion, `publish_cumulative_output` returns
+`PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED` and leaves the
 existing cumulative file byte-for-byte unchanged (the normalization check
 runs before the existing file is even read).
 
@@ -100,10 +102,8 @@ from price_normalization import (
     describe_price_normalization_failure,
     normalize_prices_for_output,
 )
-from prisma_auction_lookup import PrismaAuctionLookup
 from processor import PrismaImportResult
 from prisma_output import OUTPUT_CSV_COLUMNS, transform_row
-from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
 from storage import AuctionStorage
 
 __all__ = [
@@ -181,6 +181,7 @@ class PrismaPublicationResult:
     import_result: PrismaImportResult | None = None
     price_normalization: PriceNormalizationResult | None = None
     appended_row_count: int = 0
+    deduplicated_row_count: int = 0
     total_row_count: int | None = None
     error: str | None = None
 
@@ -354,9 +355,6 @@ def publish_cumulative_output(
     publication_directory: str | Path,
     *,
     storage: AuctionStorage,
-    reference_catalog: PrismaReferenceCatalog = DEFAULT_PRISMA_REFERENCES,
-    auction_lookup: PrismaAuctionLookup | None = None,
-    page: object = None,
     ecb_source: EcbRateSource | None = None,
     precomputed_normalization: PriceNormalizationResult | None = None,
 ) -> PrismaPublicationResult:
@@ -368,13 +366,13 @@ def publish_cumulative_output(
     repeated here); this function only formats accepted rows via
     `prisma_output.transform_row` and merges them into the cumulative file
     under the approved exact-full-row deduplication rule. See the module
-    docstring for the complete approved contract, including the P.36.21
+    docstring for the complete approved contract, including the P.36.21/P.37
     strict EUR gate and legacy-file compatibility decision.
 
-    ``storage``/``auction_lookup``/``page``/``ecb_source`` are forwarded
-    unchanged to `price_normalization.normalize_prices_for_output`, which
-    reuses P.36.19's durable per-Auction-ID cache — so republishing an
-    already-normalized import never repeats a PRISMA/ECB lookup.
+    ``storage``/``ecb_source`` are forwarded unchanged to
+    `price_normalization.normalize_prices_for_output`, which reuses P.37's
+    durable `(auction_date, currency)` cache — so republishing an
+    already-normalized import never repeats an ECB lookup.
 
     ``precomputed_normalization``, when supplied, must be the exact
     `PriceNormalizationResult` already computed for ``import_result.rows`` in
@@ -407,9 +405,6 @@ def publish_cumulative_output(
         normalization = normalize_prices_for_output(
             import_result.rows,
             storage=storage,
-            reference_catalog=reference_catalog,
-            auction_lookup=auction_lookup,
-            page=page,
             ecb_source=ecb_source,
         )
     if not normalization.succeeded:
@@ -438,10 +433,12 @@ def publish_cumulative_output(
 
     new_rows: list[tuple[str, ...]] = []
     seen_in_import: set[tuple[str, ...]] = set()
+    deduplicated_row_count = 0
     for index, row in enumerate(import_result.rows):
         formatted = transform_row(row, normalization.prices_by_row_index[index])
         as_tuple = tuple(formatted[column] for column in OUTPUT_CSV_COLUMNS)
         if as_tuple in existing_set or as_tuple in seen_in_import:
+            deduplicated_row_count += 1
             continue
         seen_in_import.add(as_tuple)
         new_rows.append(as_tuple)
@@ -453,6 +450,7 @@ def publish_cumulative_output(
             import_result=import_result,
             price_normalization=normalization,
             appended_row_count=0,
+            deduplicated_row_count=deduplicated_row_count,
             total_row_count=len(existing_rows),
         )
 
@@ -473,5 +471,6 @@ def publish_cumulative_output(
         import_result=import_result,
         price_normalization=normalization,
         appended_row_count=len(new_rows),
+        deduplicated_row_count=deduplicated_row_count,
         total_row_count=len(all_rows),
     )

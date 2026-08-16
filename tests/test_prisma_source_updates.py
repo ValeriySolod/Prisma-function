@@ -57,38 +57,58 @@ def test_first_and_newer_sources_apply(tmp_path):
     assert (second.total_count, second.imported_count, second.filtered_count, second.rejected_count) == (2, 1, 1, 0)
 
 
-def test_exact_retry_is_unchanged_without_import(tmp_path):
+def test_exact_retry_is_processed_with_complete_counts(tmp_path):
     path = write_export(tmp_path / "daily.csv")
     first = evaluate(path)
     calls = 0
 
-    def forbidden(path):
+    def importer(path):
         nonlocal calls
         calls += 1
-        raise AssertionError
+        return counts(1, 1, 0, 0)
 
-    retry = evaluate(path, state=first.accepted_state, importer=forbidden)
-    assert retry.status is SourceUpdateStatus.UNCHANGED
-    assert retry.reason is SourceUpdateReason.IDENTICAL_SOURCE
+    retry = evaluate(path, state=first.accepted_state, importer=importer)
+    assert retry.status is SourceUpdateStatus.APPLIED
+    assert retry.reason is SourceUpdateReason.APPLIED
     assert retry.accepted_state is first.accepted_state
-    assert calls == 0
+    assert (retry.total_count, retry.imported_count, retry.filtered_count, retry.rejected_count) == (1, 1, 0, 0)
+    assert calls == 1
 
 
-def test_conflict_stale_and_future_are_rejected_without_import(tmp_path):
+def test_same_content_under_different_filename_is_processed(tmp_path):
+    first = evaluate(write_export(tmp_path / "first.csv", b"same"))
+    copy = write_export(tmp_path / "copy.csv", b"same")
+
+    retry = evaluate(copy, state=first.accepted_state, importer=lambda path: counts(1, 1, 0, 0))
+
+    assert retry.status is SourceUpdateStatus.APPLIED
+    assert retry.reason is SourceUpdateReason.APPLIED
+    assert retry.accepted_state is first.accepted_state
+    assert retry.imported_count == 1
+
+
+def test_same_date_and_older_distinct_sources_are_applied_after_import(tmp_path):
+    first_path = write_export(tmp_path / "first.csv")
+    first = evaluate(first_path)
+    changed = write_export(tmp_path / "changed.csv", b"changed")
+    same_date = evaluate(changed, state=first.accepted_state, importer=lambda path: counts(2, 2, 0, 0))
+    stale = evaluate(changed, day=DAY - timedelta(days=1), state=first.accepted_state, importer=lambda path: counts(1, 1, 0, 0))
+
+    assert same_date.status is SourceUpdateStatus.APPLIED
+    assert stale.status is SourceUpdateStatus.APPLIED
+
+
+def test_future_source_is_rejected_without_import(tmp_path):
     first_path = write_export(tmp_path / "first.csv")
     first = evaluate(first_path)
     changed = write_export(tmp_path / "changed.csv", b"changed")
     forbidden = lambda path: pytest.fail("importer must not run")
-    conflict = evaluate(changed, state=first.accepted_state, importer=forbidden)
-    stale = evaluate(changed, day=DAY - timedelta(days=1), state=first.accepted_state, importer=forbidden)
     future = evaluate_prisma_source_update(
         changed, source_date=DAY + timedelta(days=1), evaluated_at=NOW,
         prior_state=first.accepted_state, importer=forbidden,
     )
-    assert conflict.reason is SourceUpdateReason.CONFLICTING_SOURCE
-    assert stale.reason is SourceUpdateReason.STALE_SOURCE_DATE
     assert future.reason is SourceUpdateReason.FUTURE_SOURCE_DATE
-    assert all(item.status is SourceUpdateStatus.REJECTED for item in (conflict, stale, future))
+    assert future.status is SourceUpdateStatus.REJECTED
 
 
 def test_fatal_validation_failure_leaves_state_unchanged(tmp_path):
@@ -173,7 +193,7 @@ def test_invalid_public_inputs_and_inconsistent_state(tmp_path):
     with pytest.raises(ValueError, match="regular file"):
         evaluate_prisma_source_update(tmp_path, source_date=DAY, evaluated_at=NOW)
     accepted = AcceptedPrismaSource(DAY, "one.csv", "0" * 64)
-    with pytest.raises(ValueError, match="unique source dates"):
+    with pytest.raises(ValueError, match="unique source date and digest pairs"):
         PrismaSourceState((accepted, accepted))
 
 
