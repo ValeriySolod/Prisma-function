@@ -136,6 +136,47 @@ def _seed_resolved_rate(
     )
 
 
+def _seed_ecb_date_rate(
+    widget, auction_date: str, currency: str, *, rate_to_eur: str = "1",
+    ecb_publication_date: str | None = None,
+) -> None:
+    """Directly populate `AuctionStorage`'s durable P.37 `(auction_date,
+    currency)` rate cache, mirroring `_seed_resolved_rate` above for the
+    separate, Auction-ID-keyed Mapping-display cache. The real active
+    processing call graph (`app.py` -> `run_prisma_import_workflow` ->
+    `price_normalization.normalize_prices_for_output`) never injects a fake
+    `ecb_source`, so a non-EUR currency with no cached rate would otherwise
+    need real network access to the public ECB endpoint; seeding this cache
+    directly exercises the exact same read path a previously resolved pair
+    uses in production, without any network access.
+    """
+    from storage import EcbAuctionDateRateRecord
+
+    AuctionStorage(widget._runtime_paths.database).save_ecb_auction_date_rate(
+        EcbAuctionDateRateRecord(
+            auction_date=auction_date, currency=currency,
+            ecb_publication_date=ecb_publication_date or auction_date,
+            rate_to_eur=rate_to_eur,
+            resolved_at_utc="2026-08-01T15:05:00+00:00",
+            source_version="test",
+        )
+    )
+
+
+def _block_live_ecb_access(monkeypatch) -> None:
+    """Patch the production ECB HTTP source so a non-EUR currency with no
+    cached P.37 rate fails closed deterministically and without any real
+    network access, since `app.py`'s real processing call graph never
+    injects a fake `ecb_source` of its own.
+    """
+    from ecb_rates import EcbRateNotFoundError
+
+    def fail(self, currency, *, on_or_before, timeout_seconds):
+        raise EcbRateNotFoundError(f"no rate for {currency} (test double)")
+
+    monkeypatch.setattr("ecb_rates.EcbSdwHttpRateSource.fetch", fail)
+
+
 def test_initial_dashboard_state_and_accessibility(window):
     widget, _ = window
     assert widget.windowTitle() == f"{APP_DISPLAY_NAME} v{__version__}"
@@ -256,6 +297,46 @@ def _write_prisma_export_with_rows(path, rows: list[dict]) -> None:
             writer.writerow(full_row)
 
 
+def _write_published_output(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=prisma_output.OUTPUT_CSV_COLUMNS, delimiter=";")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _output_row(**overrides: str) -> dict[str, str]:
+    row = {
+        "Auction Date": "2025-01-01",
+        "Exit Market": "",
+        "Entry Market": "VGS Storage Hub",
+        "Capacity Type": "entry",
+        "Network Point Name": "VGS Storage Hub (4290)",
+        "Product Type": "Day",
+        "Flow Start": "2025-01-02 00:00",
+        "Flow End": "2025-01-03 00:00",
+        "Booked Capacity": "1000.0",
+        "Flow Duration Hours": "24.0",
+        "Tariff Price": "0.010000",
+        "Premium Price": "0.005000",
+    }
+    row.update(overrides)
+    return row
+
+
+def _mock_successful_processing(monkeypatch, widget, rows: list[dict[str, str]]):
+    output_path = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
+    _write_published_output(output_path, rows)
+    workflow_result = app.PrismaWorkflowResult(
+        1, len(rows), 0, 0, 0, 0, (), output_path,
+        SourceUpdateStatus.APPLIED, "Processed.",
+    )
+    monkeypatch.setattr(
+        app, "run_prisma_import_workflow", Mock(return_value=workflow_result)
+    )
+    return workflow_result
+
+
 # Every accepted CSV selection below immediately triggers real background
 # processing (see `app._select_manual_csv`/`_process_selected_csv`): none of
 # these tests mock `run_prisma_import_workflow`. This is safe and
@@ -300,10 +381,12 @@ def test_cancelling_manual_csv_dialog_after_a_valid_selection_preserves_mapping_
     widget, _ = window
     populated = tmp_path / "PRISMA_Export.csv"
     _write_prisma_export_with_rows(populated, [{"Auction ID": "1"}])
+    _mock_successful_processing(monkeypatch, widget, [_output_row()])
     monkeypatch.setattr(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(populated), "CSV"))
     )
     widget._select_manual_csv()
+    _settle_processing(widget)
     assert widget.mapping_table_model.rowCount() == 1
     _settle_processing(widget)
 
@@ -337,7 +420,7 @@ def test_choosing_a_valid_manual_csv_selects_it_and_starts_processing(
     # Select CSV is the single user action: selecting a valid file
     # immediately starts processing (see `app._process_selected_csv`),
     # synchronously reflected before the background thread completes.
-    assert widget.status.text() == "Importing PRISMA Export CSV…"
+    assert widget.status.text() == "Importing PRISMA Export CSV..."
     assert widget._processing_active
     assert not widget.choose_manual_csv_button.isEnabled()
 
@@ -438,7 +521,7 @@ def test_selecting_a_csv_with_no_data_rows_leaves_mapping_display_empty(
     assert not widget.mapping_empty_label.isHidden()
 
 
-def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
+def test_selecting_a_valid_csv_populates_mapping_table_from_cumulative_output(
     window, monkeypatch, tmp_path
 ):
     widget, _ = window
@@ -458,8 +541,31 @@ def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
     monkeypatch.setattr(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
+    _mock_successful_processing(monkeypatch, widget, [
+        _output_row(
+            **{
+                "Entry Market": "VGS Storage Hub",
+                "Network Point Name": "VGS Storage Hub (4290)",
+                "Flow Start": "2025-01-02 00:00",
+                "Tariff Price": "0.010000",
+                "Premium Price": "0.005000",
+            }
+        ),
+        _output_row(
+            **{
+                "Exit Market": "THE",
+                "Entry Market": "",
+                "Capacity Type": "exit",
+                "Network Point Name": "VIP DK-THE (H646) (H646)",
+                "Flow Start": "2025-01-03 00:00",
+                "Tariff Price": "0.020000",
+                "Premium Price": "0.006000",
+            }
+        ),
+    ])
 
     widget._select_manual_csv()
+    _settle_processing(widget)
 
     model = widget.mapping_table_model
     assert model.rowCount() == 2
@@ -469,51 +575,36 @@ def test_selecting_a_valid_csv_populates_mapping_table_with_resolved_evidence(
     def cell(row, column):
         return model.data(model.index(row, column))
 
-    # Deterministic order: rows appear exactly as they were in the source CSV.
-    # Both source rows share `_MAPPING_ROW_DEFAULTS`' "Start of Auction"
-    # ("01.01.2025 09:00") and "Marketed Capacity"/"Unit Marketed Capacity"
-    # ("1000"/"kWh/h"), so both display the same authoritative Auction Date
-    # and Booked Capacity.
-    assert (cell(0, 0), cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4), cell(0, 5), cell(0, 6)) == (
-        "2025-01-01", "", "VGS Storage Hub", "VGS Storage Hub (4290)", "", "GUD", "1000.0",
+    assert (cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4), cell(0, 6), cell(0, 10), cell(0, 11)) == (
+        "THE", "", "exit", "VIP DK-THE (H646) (H646)", "2025-01-03 00:00", "0.020000", "0.006000",
     )
-    assert (cell(1, 0), cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4), cell(1, 5), cell(1, 6)) == (
-        "2025-01-01", "THE", "", "VIP DK-THE (H646) (H646)", "GTE", "", "1000.0",
+    assert (cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4), cell(1, 6), cell(1, 10), cell(1, 11)) == (
+        "", "VGS Storage Hub", "entry", "VGS Storage Hub (4290)", "2025-01-02 00:00", "0.010000", "0.005000",
     )
-    # P.36.19: neither source row has an explicit State of "Finished" (both
-    # default to blank), so both are ineligible for rate resolution and must
-    # never display a fabricated Currency/Rate to EUR/Rate Date.
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Not finished",) * 3
-    assert (cell(1, 7), cell(1, 8), cell(1, 9)) == ("Not finished",) * 3
 
 
-def test_finished_auction_with_no_cached_resolution_shows_unavailable_and_no_partial_cache(
+def test_mapping_display_preserves_cumulative_rows_after_later_slice(
     window, monkeypatch, tmp_path
 ):
-    # Per the revised specification, PrismaFunction never opens, controls, or
-    # downloads anything from the PRISMA website, so a Finished auction that
-    # has never been resolved before has no way to reach a live PRISMA
-    # surface. This must surface as a safe "Unavailable" placeholder end-to-
-    # end through the real app wiring, never a fabricated date/currency/rate,
-    # and must never persist a partial or misleading cache entry.
     widget, _ = window
     target = tmp_path / "PRISMA_Export.csv"
-    _write_prisma_export_with_rows(target, [
-        {"Auction ID": "1", "State": "Finished"},
-    ])
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1"}])
     monkeypatch.setattr(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
+    _mock_successful_processing(monkeypatch, widget, [
+        _output_row(**{"Exit Market": "Earlier", "Flow Start": "2025-01-02 00:00"}),
+        _output_row(**{"Exit Market": "Later", "Flow Start": "2025-01-04 00:00"}),
+    ])
 
     widget._select_manual_csv()
+    _settle_processing(widget)
 
     model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("Unavailable",) * 3
-    assert AuctionStorage(widget._runtime_paths.database).get_rate_resolution("1") is None
+    assert model.rowCount() == 2
+    assert [model.data(model.index(row, 1)) for row in range(model.rowCount())] == [
+        "Later", "Earlier",
+    ]
 
 
 # --- Cumulative rate-resolution cache -------------------------------------
@@ -527,43 +618,10 @@ def test_finished_auction_with_no_cached_resolution_shows_unavailable_and_no_par
 # at all — this is what makes the cumulative Mapping display work across
 # sessions without any live transport.
 
-def test_cached_resolution_displays_without_any_live_transport(window, monkeypatch, tmp_path):
+def test_mapping_table_has_scrollbars_for_unbounded_rows(window):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
-    target = tmp_path / "PRISMA_Export.csv"
-    _write_prisma_export_with_rows(target, [{"Auction ID": "1", "State": "Finished"}])
-    monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
-    )
-
-    widget._select_manual_csv()
-
-    model = widget.mapping_table_model
-
-    def cell(row, column):
-        return model.data(model.index(row, column))
-
-    assert (cell(0, 7), cell(0, 8), cell(0, 9)) == ("EUR", "1", "2026-08-01")
-
-
-def test_duplicate_auction_ids_share_one_cached_resolution(window, monkeypatch, tmp_path):
-    widget, _ = window
-    _seed_resolved_rate(widget, "1")
-    target = tmp_path / "PRISMA_Export.csv"
-    _write_prisma_export_with_rows(target, [
-        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-1"},
-        {"Auction ID": "1", "State": "Finished", "Network Point ID Entry": "ENTRY-2"},
-    ])
-    monkeypatch.setattr(
-        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
-    )
-
-    widget._select_manual_csv()
-
-    model = widget.mapping_table_model
-    assert model.rowCount() == 2
-    assert model.data(model.index(0, 7)) == "EUR"
-    assert model.data(model.index(1, 7)) == "EUR"
+    assert widget.mapping_table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
+    assert widget.mapping_table.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded
 
 
 def test_filtered_and_rejected_only_csv_leaves_mapping_display_empty(
@@ -585,16 +643,17 @@ def test_filtered_and_rejected_only_csv_leaves_mapping_display_empty(
     assert widget.mapping_table.isHidden()
 
 
-def test_selecting_a_new_csv_replaces_previous_mapping_rows(window, monkeypatch, tmp_path):
+def test_selecting_a_new_csv_preserves_cumulative_mapping_rows(window, monkeypatch, tmp_path):
     widget, _ = window
     first = tmp_path / "first.csv"
     _write_prisma_export_with_rows(first, [{"Auction ID": "1"}])
+    _mock_successful_processing(monkeypatch, widget, [_output_row()])
     monkeypatch.setattr(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(first), "CSV"))
     )
     widget._select_manual_csv()
-    assert widget.mapping_table_model.rowCount() == 1
     _settle_processing(widget)
+    assert widget.mapping_table_model.rowCount() == 1
 
     second = tmp_path / "second.csv"
     _write_valid_prisma_export(second)
@@ -603,10 +662,10 @@ def test_selecting_a_new_csv_replaces_previous_mapping_rows(window, monkeypatch,
     )
     widget._select_manual_csv()
 
-    # The replacement CSV has zero data rows: no stale row from the first
-    # selection may survive the refresh.
-    assert widget.mapping_table_model.rowCount() == 0
-    assert widget.mapping_table.isHidden()
+    _settle_processing(widget)
+
+    assert widget.mapping_table_model.rowCount() == 1
+    assert not widget.mapping_table.isHidden()
 
 
 def test_mapping_refresh_failure_clears_table_shows_safe_error_and_skips_processing(
@@ -615,12 +674,13 @@ def test_mapping_refresh_failure_clears_table_shows_safe_error_and_skips_process
     widget, _ = window
     target = tmp_path / "PRISMA_Export.csv"
     _write_prisma_export_with_rows(target, [{"Auction ID": "1"}])
+    _mock_successful_processing(monkeypatch, widget, [_output_row()])
     monkeypatch.setattr(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
     widget._select_manual_csv()
-    assert widget.mapping_table_model.rowCount() == 1
     _settle_processing(widget)
+    assert widget.mapping_table_model.rowCount() == 1
 
     second = tmp_path / "second.csv"
     _write_valid_prisma_export(second)
@@ -645,9 +705,7 @@ def test_mapping_refresh_failure_clears_table_shows_safe_error_and_skips_process
     title, message = critical.call_args.args[1], critical.call_args.args[2]
     assert title == "Mapping"
     assert str(second) not in message
-    assert message == (
-        "The mapping evidence for the selected PRISMA Export CSV could not be displayed."
-    )
+    assert message == "The selected PRISMA Export CSV could not be validated for Mapping."
     process.assert_not_called()
 
 
@@ -657,10 +715,12 @@ def test_rejected_manual_csv_replacement_clears_previous_mapping_rows(
     widget, _ = window
     populated = tmp_path / "PRISMA_Export.csv"
     _write_prisma_export_with_rows(populated, [{"Auction ID": "1"}])
+    _mock_successful_processing(monkeypatch, widget, [_output_row()])
     monkeypatch.setattr(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(populated), "CSV"))
     )
     widget._select_manual_csv()
+    _settle_processing(widget)
     assert widget.mapping_table_model.rowCount() == 1
     _settle_processing(widget)
 
@@ -708,8 +768,9 @@ def test_processing_success_preserves_full_statistics(window, monkeypatch, tmp_p
     assert outcome.result is workflow_result
     assert outcome.error is None
     assert widget.status.text() == (
-        "accepted Processed: 4; inserted: 1; updated: 2; unchanged: 1; "
-        "filtered: 0; rejected: 0; audit issues: 0. Output: result.xlsx"
+        "accepted Source rows: 4; accepted: 4; filtered: 0; rejected: 0; "
+        "deduplicated: 0; inserted: 1; updated: 2; unchanged: 1; "
+        "audit issues: 0. Output: result.xlsx"
     )
     assert not widget._processing_active
     assert widget._active_processing_thread is None
@@ -717,7 +778,7 @@ def test_processing_success_preserves_full_statistics(window, monkeypatch, tmp_p
     assert widget.choose_manual_csv_button.isEnabled()
 
     widget._processing_finished(app.ProcessingOutcome(workflow_result, None, widget._processing_generation))
-    assert widget.status.text().startswith("accepted Processed: 4")
+    assert widget.status.text().startswith("accepted Source rows: 4")
 
 
 def test_import_processing_success_and_error_restore_controls(window, monkeypatch, tmp_path):
@@ -885,7 +946,7 @@ def test_startup_shows_generic_error_when_the_publication_directory_is_unavailab
     assert "Documents directory is unavailable" in message.call_args.args[2]
 
 
-# --- P.36.21 correction: the real, unmocked active processing call graph ----
+# --- P.36.21/P.37 correction: the real, unmocked active processing call graph
 #
 # These tests never mock `run_prisma_import_workflow` itself: they drive the
 # real `PrismaMonitorApp._select_manual_csv()` -> `_process_selected_csv()` ->
@@ -893,12 +954,13 @@ def test_startup_shows_generic_error_when_the_publication_directory_is_unavailab
 # -> `price_normalization.normalize_prices_for_output()` ->
 # `prisma_publication.publish_cumulative_output()` call graph end-to-end —
 # Select CSV is the single user action that immediately processes the
-# selected file and merges it into cumulative persistent storage. Per the
-# revised specification, PrismaFunction never opens, controls, or downloads
-# anything from the PRISMA website, so a resolved rate always comes from
-# `_seed_resolved_rate` (`storage.AuctionStorage`'s durable per-Auction-ID
-# cache) here, exactly as it would in production for a previously resolved
-# auction.
+# selected file and merges it into cumulative persistent storage. Under
+# P.37, an EUR-unit row resolves without any cache seeding at all (no
+# PRISMA/ECB transport needed for EUR identity); a non-EUR row needs either
+# `_block_live_ecb_access` (deterministic failure, no network) or
+# `_seed_ecb_date_rate` (`storage.AuctionStorage`'s durable
+# `(auction_date, currency)` cache, populated directly, exactly as it would
+# be in production for a previously resolved pair).
 
 
 def _select_csv_and_wait(widget, monkeypatch, csv_path, *, timeout_s: float = 10.0):
@@ -934,10 +996,18 @@ _RESOLVABLE_EXIT_ROW = {
     "Network Point ID Exit": "EXIT-1", "Network Point ID Entry": "", "State": "Finished",
     "Regulated Tariff Exit TSO": "2", "Unit Regulated Exit Capacity Tariff": "cent/kWh/h/Runtime",
 }
+# `_MAPPING_ROW_DEFAULTS`'s "Start of Auction" (01.01.2025 09:00) parses to
+# auction_date "2025-01-01" -- the P.37 cache key `_seed_ecb_date_rate`
+# below must match.
+_UNRESOLVED_ENTRY_AUCTION_DATE = "2025-01-01"
 _UNRESOLVED_ENTRY_ROW = {
     "Auction ID": "1", "Direction": "Entry",
     "Network Point Name Entry": "VGS Storage Hub (4290)", "Network Point ID Entry": "ENTRY-1",
     "State": "Finished",
+    # A non-EUR unit (GBP) so this row genuinely requires a P.37 ECB
+    # resolution, unlike `_RESOLVABLE_EXIT_ROW`'s EUR unit (identity, no
+    # transport needed at all).
+    "Regulated Tariff Entry TSO": "1", "Unit Regulated Entry Capacity Tariff": "pence/kWh/h/Runtime",
 }
 
 
@@ -945,7 +1015,9 @@ def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
     window, monkeypatch, tmp_path,
 ):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
+    # No cache seeding needed: `_RESOLVABLE_EXIT_ROW`'s unit is EUR, which
+    # `ecb_rates.resolve_rate_to_eur` resolves to the identity rate with no
+    # transport at all under P.37.
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 
@@ -967,13 +1039,14 @@ def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
     assert record[header.index("Tariff Price")] == "20.000000"
 
 
-def test_unresolved_currency_produces_no_output_and_no_ui_success(window, monkeypatch, tmp_path):
+def test_unresolved_ecb_rate_produces_no_output_and_no_ui_success(window, monkeypatch, tmp_path):
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
-    # ENTRY-side VGS Storage Hub has no approved currency evidence in the
-    # real, unmodified `DEFAULT_PRISMA_REFERENCES` catalog, and this auction
-    # was never previously resolved, so there is no cached rate either.
+    # `_UNRESOLVED_ENTRY_ROW`'s GBP unit was never previously resolved, so
+    # there is no cached rate, and `_block_live_ecb_access` makes the live
+    # ECB lookup fail deterministically without real network access.
     _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
+    _block_live_ecb_access(monkeypatch)
 
     outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
@@ -987,14 +1060,14 @@ def test_unresolved_currency_produces_no_output_and_no_ui_success(window, monkey
 
 def test_mixed_batch_publishes_nothing_through_the_real_app_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    # Auction "1" has a cached resolution; auction "2" was never resolved and
-    # has no live transport to fall back to.
-    _seed_resolved_rate(widget, "1")
+    # Auction "1" is EUR (resolves without any transport); auction "2" is
+    # GBP and was never resolved, with live ECB access blocked deterministically.
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [
         _RESOLVABLE_EXIT_ROW,
         {**_UNRESOLVED_ENTRY_ROW, "Auction ID": "2", "Network Point ID Entry": "ENTRY-2"},
     ])
+    _block_live_ecb_access(monkeypatch)
 
     outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
@@ -1007,6 +1080,7 @@ def test_blocked_processing_does_not_finalize_source_operation_as_accepted(windo
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
+    _block_live_ecb_access(monkeypatch)
 
     outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert outcome.result is None
@@ -1015,20 +1089,21 @@ def test_blocked_processing_does_not_finalize_source_operation_as_accepted(windo
     assert all(row["status"] != "accepted" for row in storage.operations())
 
 
-def test_retry_after_a_rate_becomes_available_succeeds(window, monkeypatch, tmp_path):
+def test_retry_after_an_ecb_rate_becomes_available_succeeds(window, monkeypatch, tmp_path):
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
-    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+    _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
 
-    # First selection: auction "1" has never been resolved before, so there
-    # is no cached rate and no live transport to resolve it.
+    # First selection: this GBP-unit row has never been resolved before, and
+    # live ECB access is blocked deterministically, so there is no rate.
+    _block_live_ecb_access(monkeypatch)
     first = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert first.result is None
     assert not (widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
 
     # Second selection of the same source: the rate has since become
     # available (e.g. resolved separately and cached).
-    _seed_resolved_rate(widget, "1")
+    _seed_ecb_date_rate(widget, _UNRESOLVED_ENTRY_AUCTION_DATE, "GBP", rate_to_eur="0.5")
     second = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert second.result is not None
     published = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
@@ -1037,7 +1112,6 @@ def test_retry_after_a_rate_becomes_available_succeeds(window, monkeypatch, tmp_
 
 def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
     monkeypatch.setattr(
         AuctionStorage, "export_excel",
         lambda *_a, **_k: pytest.fail(
@@ -1053,7 +1127,6 @@ def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, mon
 
 def test_legacy_published_csv_is_never_touched_by_the_active_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
     legacy_path = (
         widget._publication_directory / prisma_publication.LEGACY_PUBLISHED_OUTPUT_FILENAME
     )
@@ -1077,7 +1150,6 @@ def test_reselecting_the_same_csv_does_not_duplicate_cumulative_rows(window, mon
     # selecting and processing the exact same accepted source a second time
     # must be an idempotent exact retry, never a second set of rows.
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 

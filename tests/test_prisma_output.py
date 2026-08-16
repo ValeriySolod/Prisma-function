@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -10,7 +9,7 @@ import pytest
 
 from csv_contracts import PRISMA_EXPORT_COLUMNS
 from download_directory import DownloadDirectoryError
-from prisma_auction_lookup import AuctionEndRecord
+from ecb_rates import EcbRateNotFoundError
 from prisma_output import (
     OUTPUT_CSV_COLUMNS,
     PrismaOutputOutcome,
@@ -43,22 +42,16 @@ BASE = {
     "Unit Surcharge": "cent/kWh/h/Runtime", "State": "Finished",
 }
 
-# A fixed, deterministic auction-end instant for `FakeAuctionLookup`, used by
-# every test below that reaches P.36.21's strict EUR normalization step
-# (`BASE["State"] == "Finished"` makes every row eligible for P.36.19
-# resolution). `eur_catalog()` grants EUR currency evidence for the exact
-# source values `BASE` and its variants use, so these P.36.15 mapping/
-# transform tests are not blocked by the strict EUR gate; the EUR-conversion
-# behavior itself (non-EUR currencies, ECB rates, blocking, Decimal
-# formatting) is covered in `tests/test_price_normalization.py`.
-_AUCTION_END = datetime(2025, 1, 3, 12, 0, tzinfo=timezone.utc)
-
-
-class FakeAuctionLookup:
-    def lookup(self, page, auction_id):
-        return AuctionEndRecord(auction_id, _AUCTION_END, "Finished")
-
-
+# `BASE`'s tariff/surcharge units are all `cent/kWh/h/Runtime`, which
+# `processor.py` resolves to currency EUR -- `ecb_rates.resolve_rate_to_eur`
+# short-circuits EUR to the identity rate with zero ECB access, so these
+# P.36.15 mapping/transform tests are never blocked by the P.37 strict EUR
+# gate and never need an injected `ecb_source`. The EUR-conversion behavior
+# itself (non-EUR currencies, ECB rates, blocking, Decimal formatting) is
+# covered in `tests/test_price_normalization.py`. `eur_catalog()` grants
+# market/storage currency metadata that P.37 no longer reads for pricing
+# (kept only because `import_prisma_export` still needs a reference catalog
+# for market/storage name resolution, unrelated to currency).
 def eur_catalog() -> PrismaReferenceCatalog:
     return PrismaReferenceCatalog((
         PrismaReference(
@@ -89,7 +82,6 @@ def _output(source, out_dir, tmp_path: Path, **overrides):
     kwargs = dict(
         storage=AuctionStorage(tmp_path / "auctions.db"),
         reference_catalog=eur_catalog(),
-        auction_lookup=FakeAuctionLookup(),
     )
     kwargs.update(overrides)
     return write_prisma_output(source, out_dir, **kwargs)
@@ -323,37 +315,29 @@ def test_describe_output_failure_returns_stable_messages() -> None:
         assert isinstance(message, str) and message
 
 
-# --- P.36.21 strict EUR gate ----------------------------------------------
+# --- P.36.21/P.37 strict EUR gate ------------------------------------------
 
-def test_unresolved_currency_blocks_output_and_writes_nothing(tmp_path: Path) -> None:
-    """A row with no approved currency evidence (the real, unmodified
-    `DEFAULT_PRISMA_REFERENCES` catalog has no ENTRY-side evidence for VGS
-    Storage Hub) must block the whole operation and create no file."""
-    from prisma_references import DEFAULT_PRISMA_REFERENCES
+def test_unresolved_ecb_rate_blocks_output_and_writes_nothing(tmp_path: Path) -> None:
+    """A row whose price is denominated in a non-EUR currency with no
+    available ECB rate (P.37's `(auction_date, currency)` resolution) must
+    block the whole operation and create no file."""
+    class UnavailableEcbSource:
+        def fetch(self, currency, *, on_or_before, timeout_seconds):
+            raise EcbRateNotFoundError(f"no rate for {currency}")
 
-    source = write_csv(tmp_path, [BASE])
+    source = write_csv(tmp_path, [{
+        **BASE,
+        "Regulated Tariff Entry TSO": "1", "Unit Regulated Entry Capacity Tariff": "pence/kWh/h/Runtime",
+    }])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    result = _output(
-        source, out_dir, tmp_path, reference_catalog=DEFAULT_PRISMA_REFERENCES,
-    )
+    result = _output(source, out_dir, tmp_path, ecb_source=UnavailableEcbSource())
     assert result.outcome is PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED
     assert result.output_path is None
     assert list(out_dir.iterdir()) == []
     assert result.price_normalization is not None
     assert not result.price_normalization.succeeded
-    assert result.price_normalization.failures[0].reason_code == "currency_unknown"
-
-
-def test_not_finished_auction_blocks_output_and_writes_nothing(tmp_path: Path) -> None:
-    source = write_csv(tmp_path, [{**BASE, "State": "Cancelled"}])
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    result = _output(source, out_dir, tmp_path)
-    assert result.outcome is PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED
-    assert result.output_path is None
-    assert list(out_dir.iterdir()) == []
-    assert result.price_normalization.failures[0].reason_code == "not_finished"
+    assert result.price_normalization.failures[0].reason_code == "ecb_rate_unavailable"
 
 
 # --- destination validation ------------------------------------------------

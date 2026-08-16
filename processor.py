@@ -29,6 +29,26 @@ from prisma_references import (
 
 MIN_MARKETED_CAPACITY_KWH_H = 1000.0
 
+# P.37: unit string -> (ISO 4217 currency, physical-unit factor to MWh/h).
+# Currency conversion itself never happens here (see price_normalization.py);
+# this only unit-normalizes the source-currency amount, exactly as the
+# pre-P.37 cent-only table already did. cent/pence/halér are minor units
+# (÷100 implicit); CHF/100 states its own ÷100 explicitly in the unit
+# string itself -- all four therefore share the same numeric factors.
+# Only the exact "/Runtime"-suffixed strings evidenced in
+# Auction_overview.csv are supported; ".../d/d" and ".../h/d" (no
+# "/Runtime") stay unsupported, same as before P.37.
+_PRICE_UNITS: dict[str, tuple[str, float]] = {
+    "cent/kWh/h/Runtime": ("EUR", 10.0),
+    "cent/kWh/d/Runtime": ("EUR", 10.0 / 24),
+    "pence/kWh/h/Runtime": ("GBP", 10.0),
+    "pence/kWh/d/Runtime": ("GBP", 10.0 / 24),
+    "halér/kWh/h/Runtime": ("CZK", 10.0),
+    "halér/kWh/d/Runtime": ("CZK", 10.0 / 24),
+    "CHF/100/kWh/h/Runtime": ("CHF", 10.0),
+    "CHF/100/kWh/d/Runtime": ("CHF", 10.0 / 24),
+}
+
 
 class PrismaImportStatus(str, Enum):
     IMPORTED = "imported"
@@ -221,11 +241,25 @@ def _product_type(auction_date: datetime, start: datetime, wall_clock_hours: flo
     return "Year"
 
 
-def _price(row: dict[str, Any], value_field: str, unit_field: str, *, label: str) -> float:
+@dataclass(frozen=True)
+class _ParsedPrice:
+    """One already-unit-normalized (cent/pence/halér/CHF-100 -> main
+    currency unit, kWh -> MWh) source-currency price field, plus the ISO
+    4217 currency it was denominated in. ``currency == ""`` means the field
+    was entirely absent (both value and unit blank); a present field always
+    carries one of `_PRICE_UNITS`'s currencies, never a guessed or unknown
+    one, since `_price()` rejects the row for any other unit string.
+    """
+
+    value_mwh_h: float
+    currency: str
+
+
+def _price(row: dict[str, Any], value_field: str, unit_field: str, *, label: str) -> _ParsedPrice:
     value_text = _text(row.get(value_field))
     unit = _text(row.get(unit_field))
     if not value_text and not unit:
-        return 0.0
+        return _ParsedPrice(0.0, "")
     if not value_text:
         raise _RowRejected(
             f"empty_{label}",
@@ -236,13 +270,14 @@ def _price(row: dict[str, Any], value_field: str, unit_field: str, *, label: str
             f"missing_{label}_unit",
             f"{label.replace('_', ' ').title()} has no unit.",
         )
-    factors = {"cent/kWh/h/Runtime": 10.0, "cent/kWh/d/Runtime": 10.0 / 24}
-    if unit not in factors:
+    parsed = _PRICE_UNITS.get(unit)
+    if parsed is None:
         raise _RowRejected(
             f"unsupported_{label}_unit",
             f"Unsupported {label.replace('_', ' ')} unit: {unit}.",
         )
-    return _number(value_text, label=label) * factors[unit]
+    currency, factor = parsed
+    return _ParsedPrice(_number(value_text, label=label) * factor, currency)
 
 
 def _import_row(source: dict[str, Any]) -> dict[str, Any]:
@@ -269,13 +304,18 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
     if not math.isfinite(runtime_hours) or runtime_hours <= 0:
         raise _RowRejected("non_positive_runtime", "Product runtime must be positive and finite.")
     wall_clock_hours = local_wall_clock_hours(flow_start, flow_end)
-    tariff = _price(
+    # P.37: exit and entry tariff are parsed and kept independently -- never
+    # summed here -- because a bundle (`Direction == "Exit/Entry"`) row's two
+    # sides may be denominated in different currencies. Only
+    # `price_normalization.py` may sum them, and only after each side has
+    # already been independently converted to EUR.
+    tariff_exit = _price(
         source,
         "Regulated Tariff Exit TSO",
         "Unit Regulated Exit Capacity Tariff",
         label="exit_tariff",
     )
-    tariff += _price(
+    tariff_entry = _price(
         source,
         "Regulated Tariff Entry TSO",
         "Unit Regulated Entry Capacity Tariff",
@@ -297,12 +337,26 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
         "flow_end": format_flow_timestamp(flow_end),
         "booked_capacity_kwh_h": marketed,
         "runtime_hours": runtime_hours,
-        # Physical-unit-normalized (cent/kWh/h[/d] -> MWh/h) source-currency
-        # price. Not EUR: no currency conversion has happened yet. See
-        # `price_normalization.py` (P.36.21) for the single place that
-        # converts this to EUR/MWh/h using the resolved historical rate.
-        "tariff_source_mwh_h": tariff,
-        "premium_source_mwh_h": premium,
+        # Physical-unit-normalized (cent/pence/halér/CHF-100 per kWh/h[/d] ->
+        # main-currency-unit per MWh/h) source-currency prices, kept
+        # side-independent for tariff (exit/entry may differ in currency on
+        # a bundle row) and with their own resolved ISO 4217 currency. Not
+        # EUR: no currency conversion has happened yet. See
+        # `price_normalization.py` (P.37/P.36.21) for the single place that
+        # converts these to EUR/MWh/h, using the ECB rate resolved for this
+        # row's own `auction_date` and each price's own currency.
+        "tariff_exit_source_mwh_h": tariff_exit.value_mwh_h,
+        "tariff_exit_currency": tariff_exit.currency,
+        "tariff_entry_source_mwh_h": tariff_entry.value_mwh_h,
+        "tariff_entry_currency": tariff_entry.currency,
+        "premium_source_mwh_h": premium.value_mwh_h,
+        "premium_currency": premium.currency,
+        # LEGACY (pre-P.37): the currency-blind sum of both tariff sides,
+        # kept only for `storage.py`'s dormant `auctions`/Excel export path,
+        # which never claimed EUR correctness even before P.37 (see
+        # `storage.py`'s `_LEGACY_PRICE_FIELD_ALIASES` docstring). Never used
+        # by the active EUR-normalized output.
+        "tariff_source_mwh_h": tariff_exit.value_mwh_h + tariff_entry.value_mwh_h,
         "state": _text(source.get("State")),
     }
 

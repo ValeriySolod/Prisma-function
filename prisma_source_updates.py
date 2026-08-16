@@ -21,8 +21,6 @@ class SourceUpdateStatus(str, Enum):
 class SourceUpdateReason(str, Enum):
     APPLIED = "applied"
     IDENTICAL_SOURCE = "identical_source"
-    STALE_SOURCE_DATE = "stale_source_date"
-    CONFLICTING_SOURCE = "conflicting_source"
     FUTURE_SOURCE_DATE = "future_source_date"
     INVALID_SOURCE = "invalid_source"
 
@@ -30,8 +28,6 @@ class SourceUpdateReason(str, Enum):
 _MESSAGES = {
     SourceUpdateReason.APPLIED: "The PRISMA source was validated and accepted.",
     SourceUpdateReason.IDENTICAL_SOURCE: "This exact PRISMA source was already accepted.",
-    SourceUpdateReason.STALE_SOURCE_DATE: "The source date is older than the latest accepted source date.",
-    SourceUpdateReason.CONFLICTING_SOURCE: "A different PRISMA source was already accepted for this source date.",
     SourceUpdateReason.FUTURE_SOURCE_DATE: "The source date is later than the evaluation date.",
     SourceUpdateReason.INVALID_SOURCE: "The PRISMA source did not pass authoritative import validation.",
 }
@@ -81,9 +77,9 @@ class PrismaSourceState:
             raise TypeError("accepted_sources must be a tuple.")
         if any(not isinstance(item, AcceptedPrismaSource) for item in self.accepted_sources):
             raise TypeError("accepted_sources must contain only AcceptedPrismaSource values.")
-        dates = tuple(item.source_date for item in self.accepted_sources)
-        if dates != tuple(sorted(dates)) or len(dates) != len(set(dates)):
-            raise ValueError("Accepted sources must have unique source dates in ascending order.")
+        keys = tuple((item.source_date, item.sha256) for item in self.accepted_sources)
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise ValueError("Accepted sources must have unique source date and digest pairs in ascending order.")
 
     @property
     def latest_source_date(self) -> date | None:
@@ -91,6 +87,15 @@ class PrismaSourceState:
 
     def source_for(self, source_date: date) -> AcceptedPrismaSource | None:
         return next((item for item in self.accepted_sources if item.source_date == source_date), None)
+
+    def exact_source(self, source_date: date, sha256: str) -> AcceptedPrismaSource | None:
+        return next(
+            (
+                item for item in self.accepted_sources
+                if item.source_date == source_date and item.sha256 == sha256
+            ),
+            None,
+        )
 
 
 @dataclass(frozen=True)
@@ -123,8 +128,6 @@ class PrismaSourceUpdateResult:
             SourceUpdateStatus.APPLIED: {SourceUpdateReason.APPLIED},
             SourceUpdateStatus.UNCHANGED: {SourceUpdateReason.IDENTICAL_SOURCE},
             SourceUpdateStatus.REJECTED: {
-                SourceUpdateReason.STALE_SOURCE_DATE,
-                SourceUpdateReason.CONFLICTING_SOURCE,
                 SourceUpdateReason.FUTURE_SOURCE_DATE,
                 SourceUpdateReason.INVALID_SOURCE,
             },
@@ -148,19 +151,13 @@ class PrismaSourceUpdateResult:
         elif self.status is SourceUpdateStatus.APPLIED:
             raise ValueError("Applied results must include import counts.")
 
-        accepted = self.accepted_state.source_for(self.source_date)
-        matches = accepted is not None and accepted.source_name == self.source_name and accepted.sha256 == self.sha256
+        accepted = self.accepted_state.exact_source(self.source_date, self.sha256)
+        matches = accepted is not None
         if self.status is SourceUpdateStatus.APPLIED and not matches:
             raise ValueError("accepted_state does not contain the matching accepted source.")
-        if self.status is SourceUpdateStatus.UNCHANGED and (accepted is None or accepted.sha256 != self.sha256):
+        if self.status is SourceUpdateStatus.UNCHANGED and accepted is None:
             raise ValueError("accepted_state does not contain the matching accepted digest.")
-        if self.reason is SourceUpdateReason.CONFLICTING_SOURCE:
-            if accepted is None or accepted.sha256 == self.sha256:
-                raise ValueError("A conflicting result requires a different accepted digest for the source date.")
-        elif self.reason is SourceUpdateReason.STALE_SOURCE_DATE:
-            if accepted is not None or self.accepted_state.latest_source_date is None or self.accepted_state.latest_source_date <= self.source_date:
-                raise ValueError("A stale result requires a later accepted source date.")
-        elif self.reason is SourceUpdateReason.INVALID_SOURCE and matches:
+        if self.reason is SourceUpdateReason.INVALID_SOURCE and matches:
             raise ValueError("A rejected result cannot advance the matching source.")
 
 
@@ -203,14 +200,6 @@ def evaluate_prisma_source_update(
 
     if source_date > evaluated_at.date():
         return result(SourceUpdateStatus.REJECTED, SourceUpdateReason.FUTURE_SOURCE_DATE)
-    accepted = state.source_for(source_date)
-    if accepted is not None:
-        if accepted.sha256 == digest:
-            return result(SourceUpdateStatus.UNCHANGED, SourceUpdateReason.IDENTICAL_SOURCE)
-        return result(SourceUpdateStatus.REJECTED, SourceUpdateReason.CONFLICTING_SOURCE)
-    if state.latest_source_date is not None and source_date < state.latest_source_date:
-        return result(SourceUpdateStatus.REJECTED, SourceUpdateReason.STALE_SOURCE_DATE)
-
     try:
         imported = importer(path)
         counts = {
@@ -232,8 +221,15 @@ def evaluate_prisma_source_update(
         return result(SourceUpdateStatus.REJECTED, SourceUpdateReason.INVALID_SOURCE)
 
     digest = verified_digest
-    accepted_source = AcceptedPrismaSource(source_date, source_name, digest)
-    new_state = PrismaSourceState(state.accepted_sources + (accepted_source,))
+    accepted = state.exact_source(source_date, digest)
+    if accepted is None:
+        accepted_source = AcceptedPrismaSource(source_date, source_name, digest)
+        new_state = PrismaSourceState(tuple(sorted(
+            state.accepted_sources + (accepted_source,),
+            key=lambda item: (item.source_date, item.sha256),
+        )))
+    else:
+        new_state = state
     return PrismaSourceUpdateResult(
         source_date, source_name, digest, evaluated_at, SourceUpdateStatus.APPLIED,
         SourceUpdateReason.APPLIED, _MESSAGES[SourceUpdateReason.APPLIED], new_state, **counts,

@@ -30,17 +30,15 @@ from PySide6.QtWidgets import (
 from csv_contracts import CsvFormatError
 from download_directory import default_download_directory, validate_download_directory
 from manual_csv_selection import ManualCsvSelection, describe_rejection
-from mapping_presentation import build_mapping_rows
+from mapping_presentation import load_mapping_rows_from_output_csv
 from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
 from processor import PrismaImportError, import_prisma_export
-from rate_resolution import resolve_rates_for_rows
 from runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
     safe_log,
 )
 from runtime_paths import RuntimePathError, RuntimePaths, migrate_legacy_runtime_data, runtime_paths
-from storage import AuctionStorage, AuctionStorageError
 from ui_components import APP_STYLE, MappingTableModel
 from version import APP_DISPLAY_NAME, __version__
 
@@ -49,7 +47,7 @@ from version import APP_DISPLAY_NAME, __version__
 # enough that no header label is clipped. Interactive resize mode (see
 # PrismaMonitorApp._build_ui) lets the user resize further; a horizontal
 # scrollbar appears whenever the available window width is insufficient.
-_MAPPING_COLUMN_WIDTHS = (130, 160, 160, 200, 150, 150, 130, 100, 110, 110)
+_MAPPING_COLUMN_WIDTHS = (130, 160, 160, 130, 200, 130, 150, 150, 130, 150, 120, 120)
 
 
 @dataclass(frozen=True)
@@ -180,6 +178,7 @@ class PrismaMonitorApp(QMainWindow):
         mapping_hdr.setStretchLastSection(False)
         mapping_hdr.setMinimumSectionSize(90)
         self.mapping_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.mapping_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         for column, width in enumerate(_MAPPING_COLUMN_WIDTHS):
             self.mapping_table.setColumnWidth(column, width)
         mapping_layout.addWidget(self.mapping_table, 1)
@@ -233,45 +232,32 @@ class PrismaMonitorApp(QMainWindow):
         self.mapping_table_model.set_rows(())
         self._update_mapping_empty_state()
 
-    def _refresh_mapping_display(self, path: Path) -> bool:
-        """Refresh the P.36.8 mapping presentation for the current CSV selection.
-
-        Re-runs the read-only P.36.15 import/enrichment boundary
-        (`processor.import_prisma_export`, the same boundary
-        `prisma_output.write_prisma_output` already uses) purely to obtain
-        already-resolved mapping evidence for display; it writes no output
-        file and touches no browser, network, or publication behavior. A
-        failure clears the table rather than leaving stale rows from a
-        previous selection.
-
-        Returns ``True`` if the CSV could be parsed and the table refreshed,
-        ``False`` if it could not (the table was already cleared and an
-        error shown) — `_select_manual_csv` uses this to avoid attempting to
-        process a file that could not even be read for the preview.
-        """
+    def _validate_mapping_source(self, path: Path) -> bool:
+        """Validate the selected CSV before the processing thread starts."""
         try:
-            imported = import_prisma_export(path)
+            import_prisma_export(path)
         except (PrismaImportError, CsvFormatError, OSError) as exc:
-            safe_log(self._logger, logging.ERROR, "Mapping preview failed: %s", exc)
+            safe_log(self._logger, logging.ERROR, "Mapping source validation failed: %s", exc)
             self._clear_mapping_display()
             self._show_error(
                 "Mapping",
-                "The mapping evidence for the selected PRISMA Export CSV could not be displayed.",
+                "The selected PRISMA Export CSV could not be validated for Mapping.",
             )
             return False
-        try:
-            resolutions = resolve_rates_for_rows(
-                imported.rows, storage=AuctionStorage(self._runtime_paths.database),
-            )
-        except AuctionStorageError as exc:
-            safe_log(
-                self._logger, logging.ERROR,
-                "Rate resolution unavailable for this Mapping refresh: %s", exc,
-            )
-            resolutions = {}
-        self.mapping_table_model.set_rows(build_mapping_rows(imported, resolutions))
-        self._update_mapping_empty_state()
         return True
+
+    def _refresh_mapping_display_from_output(self, path: Path) -> None:
+        try:
+            self.mapping_table_model.set_rows(load_mapping_rows_from_output_csv(path))
+        except (OSError, ValueError) as exc:
+            safe_log(self._logger, logging.ERROR, "Mapping output refresh failed: %s", exc)
+            self._clear_mapping_display()
+            self._show_error(
+                "Mapping",
+                "The published Mapping output could not be displayed.",
+            )
+            return
+        self._update_mapping_empty_state()
 
     def _select_manual_csv(self) -> None:
         if self._processing_active:
@@ -291,7 +277,7 @@ class PrismaMonitorApp(QMainWindow):
             self._show_error("Select CSV", describe_rejection(result.outcome))
             return
         self.manual_csv_label.setText(result.path.name)
-        if not self._refresh_mapping_display(result.path):
+        if not self._validate_mapping_source(result.path):
             return
         self._process_selected_csv(result.path)
 
@@ -303,7 +289,7 @@ class PrismaMonitorApp(QMainWindow):
         CSV is disabled (see `_update_controls`) until this finishes.
         """
         self._processing_active = True
-        self.status.setText("Importing PRISMA Export CSV…")
+        self.status.setText("Importing PRISMA Export CSV...")
         self._update_controls()
         self._processing_generation += 1
         generation = self._processing_generation
@@ -359,7 +345,7 @@ class PrismaMonitorApp(QMainWindow):
         # returned or is about to; an unbounded join is the only boundary
         # that can't silently expose completion (re-enabling Select CSV,
         # letting a second import start) while storage/database work on the
-        # old thread is still in flight — the prior 0.1s timeout could give
+        # old thread is still in flight вЂ” the prior 0.1s timeout could give
         # up and proceed anyway, which was the source of the Windows access
         # violation.
         if thread is None:
@@ -378,6 +364,7 @@ class PrismaMonitorApp(QMainWindow):
         self, result: PrismaWorkflowResult, thread: threading.Thread | None
     ) -> None:
         if not self._is_closing and self._finish_processing(thread):
+            self._refresh_mapping_display_from_output(result.output_path)
             self.status.setText(result.summary())
 
     def _processing_failed(

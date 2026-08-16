@@ -10,6 +10,8 @@ from openpyxl.utils import get_column_letter
 from storage import (
     AuctionStorage,
     AuctionStorageError,
+    EcbAuctionDateRateConflictError,
+    EcbAuctionDateRateRecord,
     HistoricalBackfillStatus,
     RateResolutionConflictError,
     RateResolutionRecord,
@@ -657,6 +659,62 @@ def test_commit_primary_survives_rollback_close_and_broken_add_note(
         ).fetchone()[0] == 0
 
 
+def test_source_operations_allow_multiple_distinct_sources_for_same_date(tmp_path):
+    storage = AuctionStorage(tmp_path / "test.db")
+
+    first = storage.begin_operation("2025-01-01", "first.csv", "a" * 64)
+    second = storage.begin_operation("2025-01-01", "second.csv", "b" * 64)
+    repeated = storage.begin_operation("2025-01-01", "first.csv", "a" * 64)
+
+    assert first["operation_id"] != second["operation_id"]
+    assert repeated["operation_id"] == first["operation_id"]
+    assert sorted(
+        (row["source_date"], row["source_name"], row["sha256"])
+        for row in storage.operations()
+    ) == [
+        ("2025-01-01", "first.csv", "a" * 64),
+        ("2025-01-01", "second.csv", "b" * 64),
+    ]
+
+
+def test_source_operations_schema_migrates_legacy_unique_source_date(tmp_path):
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE prisma_source_operations (
+                operation_id TEXT PRIMARY KEY,
+                source_date TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+                summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_date)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status) "
+            "VALUES ('legacy', '2025-01-01', 'legacy.csv', ?, 'accepted')",
+            ("a" * 64,),
+        )
+
+    storage = AuctionStorage(database)
+    added = storage.begin_operation("2025-01-01", "new.csv", "b" * 64)
+
+    assert added["source_name"] == "new.csv"
+    assert sorted(
+        (row["source_name"], row["sha256"])
+        for row in storage.operations()
+    ) == [
+        ("legacy.csv", "a" * 64),
+        ("new.csv", "b" * 64),
+    ]
+
+
 def test_begin_immediate_prevents_concurrent_lost_update(tmp_path, monkeypatch):
     storage = AuctionStorage(tmp_path / "test.db")
     storage.upsert([historical_row()])
@@ -939,3 +997,125 @@ def test_rate_resolution_table_created_idempotently(tmp_path) -> None:
     storage = AuctionStorage(path)
     storage.save_rate_resolution(_rate_resolution())
     assert storage.get_rate_resolution("62333921") is not None
+
+
+def _ecb_auction_date_rate(**overrides) -> EcbAuctionDateRateRecord:
+    fields = dict(
+        auction_date="2026-08-03",
+        currency="USD",
+        ecb_publication_date="2026-08-01",
+        rate_to_eur="0.9156670635",
+        resolved_at_utc="2026-08-04T09:00:00+00:00",
+        source_version="ecb_rates=1;price_normalization=2",
+    )
+    fields.update(overrides)
+    return EcbAuctionDateRateRecord(**fields)
+
+
+def test_get_ecb_auction_date_rate_returns_none_when_unresolved(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") is None
+
+
+def test_save_and_get_ecb_auction_date_rate_round_trips(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    record = _ecb_auction_date_rate()
+    saved = storage.save_ecb_auction_date_rate(record)
+    assert saved == record
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") == record
+
+
+def test_save_ecb_auction_date_rate_is_idempotent_for_identical_data(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    second = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(resolved_at_utc="2099-01-01T00:00:00+00:00")
+    )
+    # resolved_at_utc is excluded from the equality check: reuse is a no-op
+    # and returns the originally fixed record, never overwritten by a later
+    # resolution timestamp alone.
+    assert second == first
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD").resolved_at_utc == first.resolved_at_utc
+
+
+def test_save_ecb_auction_date_rate_rejects_contradicting_rate(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    with pytest.raises(EcbAuctionDateRateConflictError):
+        storage.save_ecb_auction_date_rate(_ecb_auction_date_rate(rate_to_eur="0.5"))
+    # The previously fixed record is untouched by the rejected attempt.
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD").rate_to_eur == "0.9156670635"
+
+
+def test_save_ecb_auction_date_rate_rejects_contradicting_publication_date(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    with pytest.raises(EcbAuctionDateRateConflictError):
+        storage.save_ecb_auction_date_rate(
+            _ecb_auction_date_rate(ecb_publication_date="2026-07-31")
+        )
+
+
+def test_two_distinct_auction_date_currency_pairs_are_resolved_independently(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-03", currency="USD")
+    )
+    second = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-03", currency="GBP", rate_to_eur="1.15")
+    )
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") == first
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "GBP") == second
+
+
+def test_same_currency_different_auction_dates_are_resolved_independently(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-01", rate_to_eur="0.9")
+    )
+    second = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-04", rate_to_eur="0.91")
+    )
+    assert storage.get_ecb_auction_date_rate("2026-08-01", "USD") == first
+    assert storage.get_ecb_auction_date_rate("2026-08-04", "USD") == second
+
+
+def test_ecb_auction_date_rates_table_created_idempotently(tmp_path) -> None:
+    path = tmp_path / "test.db"
+    AuctionStorage(path)
+    AuctionStorage(path)  # second construction must not fail or reset data
+    storage = AuctionStorage(path)
+    storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") is not None
+
+
+def test_upsert_row_carrying_p37_only_fields_persists_only_legacy_columns(tmp_path) -> None:
+    """`processor.py` rows now also carry P.37's side-specific source-price/
+    currency breakdown fields, which are not `auctions` table columns.
+    `_translate_legacy_price_fields` must drop them before `_upsert_rows`
+    builds its INSERT column list from the row dict's own keys, or this
+    raises `sqlite3.OperationalError: no such column`."""
+    storage = AuctionStorage(tmp_path / "test.db")
+    row = {
+        "auction_id": "1", "auction_date": "2026-08-03", "exit_market": "",
+        "entry_market": "", "direction": "exit", "network_point": "Point",
+        "network_point_id": "NP-1", "tso_exit": "", "tso_entry": "",
+        "product_type": "WD", "flow_start": "2026-08-03 00:00",
+        "flow_end": "2026-08-04 00:00", "booked_capacity_kwh_h": 1000.0,
+        "runtime_hours": 24.0, "state": "Finished",
+        "tariff_exit_source_mwh_h": 10.0, "tariff_exit_currency": "EUR",
+        "tariff_entry_source_mwh_h": 0.0, "tariff_entry_currency": "",
+        "premium_source_mwh_h": 5.0, "premium_currency": "EUR",
+        "tariff_source_mwh_h": 10.0,
+    }
+    stats = storage.upsert([row])
+    assert stats["inserted"] == 1
+    with closing(sqlite3.connect(storage.database_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        stored = connection.execute("SELECT * FROM auctions").fetchone()
+    assert stored["tariff_eur_mwh_h"] == 10.0
+    assert stored["premium_eur_mwh_h"] == 5.0
+    assert set(stored.keys()).isdisjoint({
+        "tariff_exit_source_mwh_h", "tariff_exit_currency",
+        "tariff_entry_source_mwh_h", "tariff_entry_currency", "premium_currency",
+    })
