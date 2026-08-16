@@ -1,76 +1,60 @@
 # Prisma Function — Auction Data Processing
 
-## Overview
+Prisma Function is a Windows desktop application that processes official PRISMA Export CSV files into cumulative structured auction data.
 
-Prisma Function is a desktop application that transforms capacity auction
-data exported from the official Prisma Capacity platform. Prisma Function
-does not open, control, or download anything from the Prisma website itself:
-the user downloads the official CSV export independently, then selects that
-local file inside Prisma Function using the **Select CSV** control. All
-processing of the selected file happens exclusively inside Prisma Function,
-which parses the CSV and outputs it according to the mapping described
-below.
+## Workflow
 
-## 1. Data Source
+1. Download one or more official PRISMA Export CSV files independently.
+2. Select each file in Prisma Function with Select CSV.
+3. Prisma Function reads the complete CSV, validates and transforms every row, filters irrelevant auctions, normalizes prices, persists new rows without duplicates, publishes the result, and refreshes Mapping.
 
-- Data is downloaded independently by the user from the official auction
-  platform, then selected as a local file inside Prisma Function.
-- Filtering is applied so that only auctions with at least the minimum
-  booked capacity (**≥ 1 MWh**) are retained.
+The application does not open, control, or download from the PRISMA website.
 
-## 2. Input Format
+## Input
 
-- A CSV file (PDF if needed) exported from the auction system.
-- Contains information about all trades conducted during the selected period.
+- Official 34-column PRISMA Export CSV.
+- Encoding: Windows-1252.
+- Delimiter: semicolon.
+- Detection: exact headers, never filename.
+- Every row is processed to end-of-file; Prisma Function has no 5,000-row limit.
+- Multiple CSV files for the same date or period may be selected.
+- PDF input is not supported.
 
-## 3. Data Transformation Requirements
+## Filtering
 
-The output CSV/table must contain the following fields:
+Only auctions with normalized booked capacity of at least 1 MWh are retained.
 
-| # | Field | Details |
-|---|-------|---------|
-| 1 | Auction date | Format: `YYYY-MM-DD` |
-| 2 | Exit market | Name of the market/storage from which capacity exits |
-| 3 | Entry market | Name of the market/storage into which capacity enters |
-| 4 | Capacity type | Allowed values: `entry`, `exit`, `bundle` |
-| 5 | Point name | e.g. `VGS Storage Hub` |
-| 6 | Product type | Allowed values: `WD`, `Day ahead`, `Month`, `Quarter`, `Year` |
-| 7 | Flow start date | Format: `YYYY-MM-DD HH:mm` |
-| 8 | Flow end date | Format: `YYYY-MM-DD HH:mm` |
-| 9 | Booked capacity | Unit: kWh/h |
-| 10 | Number of hours between fields 7 and 8 | Automatically calculated as the difference between flow start and end dates |
-| 11 | Auction tariff price | Unit: EUR/MWh/h |
-| 12 | Auction premium price | Unit: EUR/MWh/h |
+## Mapping and output
 
-## 4. Output Requirements
+Mapping and the published CSV contain exactly these columns:
 
-- The output file must be CSV, delimited by `;`.
-- Encoding: UTF-8.
-- All numeric values must use a standard format (decimal separator — dot).
-- Dates and times must use a single, consistent time zone (CET/CEST).
-- Prices must be normalized to a single standard: EUR/MWh/h.
+| # | Column | Contract |
+|---:|---|---|
+| 1 | Auction Date | YYYY-MM-DD |
+| 2 | Exit Market | Exact exit-side market or storage |
+| 3 | Entry Market | Exact entry-side market or storage |
+| 4 | Capacity Type | entry, exit, or bundle |
+| 5 | Network Point Name | Official point name |
+| 6 | Product Type | WD, Day Ahead, Month, Quarter, or Year |
+| 7 | Flow Start | YYYY-MM-DD HH:mm |
+| 8 | Flow End | YYYY-MM-DD HH:mm |
+| 9 | Booked Capacity | kWh/h |
+| 10 | Flow Duration Hours | Difference between Flow Start and Flow End |
+| 11 | Tariff Price | EUR/MWh/h |
+| 12 | Premium Price | EUR/MWh/h |
 
-## 5. Expected Result
+Mapping displays all cumulative accepted rows and supports vertical and horizontal scrolling without a row limit.
 
-- An automated CSV file containing only relevant auctions (booked capacity
-  ≥ 1 MWh).
-- Structured data ready for further analysis and integration into the
-  monitoring system.
-- The application must also display the market mapping according to the
-  attached reference screenshot.
+The published file is UTF-8 and semicolon-delimited. Decimal values use a dot.
 
-## Notes
+## Data rules
 
-- All processing actions on downloaded files must be performed only within
-  the Prisma Function application — no manual editing outside the app.
-- The `DD.MM.YYYY HH:MM` PRISMA local date/time values in the source export
-  are interpreted as explicit Europe/Berlin local time (CET during standard
-  time, CEST during daylight saving; resolved via the IANA `Europe/Berlin`
-  zone, never a fixed UTC+1/UTC+2 offset). A local time that does not exist
-  (the spring-forward gap) or is ambiguous (the autumn-back overlap) is
-  rejected as a typed row error rather than guessed. Auction Date, Flow
-  Start, and Flow End are serialized exactly as `YYYY-MM-DD` /
-  `YYYY-MM-DD HH:mm` — no `T` separator, seconds, or UTC-offset suffix.
-- This document is derived from the original specification
-  (`Prisma Function.odt`). For updated business rules, packaging notes, and
-  implementation increments, see the project's implementation log.
+- Previously accepted data persists across sessions.
+- New distinct rows are added atomically.
+- Exact re-import and partial overlap do not create duplicates.
+- Files are not rejected merely because another file has the same source date.
+- Dates and times use the approved Europe/Berlin CET/CEST contract.
+- Prices are normalized to EUR/MWh/h using the calendar date from Start of Auction and official ECB reference rates.
+- Market/storage resolution uses exact, side-specific, Auction-ID-linked approved evidence only.
+
+See AGENTS.md for repository rules, ROADMAP.md for active work, and CHANGELOG.md for historical implementation records.
