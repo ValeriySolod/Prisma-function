@@ -1,127 +1,63 @@
-# AGENTS.md — Prisma-function
+# AGENTS.md — Prisma-function repository rules
 
-Repository-wide engineering rules for anyone or anything implementing changes
-in this repository — Claude Code, Codex, GitHub Copilot review, or a human
-contributor. The implementation executor may be Claude Code or Codex, but
-both follow the same roadmap, branch boundaries, requirements, and
-Definition of Done below.
+These rules apply to every contributor and automation working in this repository.
 
-For project identity, current roadmap state, CSV contracts, and other
-product-specific context, see `CLAUDE.md` and `ROADMAP.md`. This file does
-not duplicate that content; it defines how work is done, not what the
-product is.
+## Source of truth
 
-## Source of truth and precedence
+Before changing the project:
 
-Before making any change:
+1. Read this file, CLAUDE.md, ROADMAP.md, and the newest approved Prisma Function specification.
+2. Inspect relevant production code, tests, configuration, packaging files, recent history, remotes, and Git status.
+3. Resolve conflicts in this order: newest explicit customer decision; newest approved specification; current ROADMAP.md; implementation evidence; other documentation.
+4. Never import requirements from Prisma Function Mini or another project.
 
-- Read this file completely.
-- Read `ROADMAP.md` completely, plus the architecture, build, packaging,
-  testing, and release documents it references.
-- Read `Prisma Function.odt` (the authoritative business specification) when
-  a change touches product requirements.
-- Inspect relevant production code, tests, configuration, and packaging
-  files — do not rely on documentation alone.
-- Run `git status --short --branch` before starting.
+Code, identifiers, comments, UI text, CSV content, technical documentation, branches, and commit messages must be English.
 
-Priority when sources conflict: the newest explicitly approved customer
-decision, then the newest authoritative specification (`Prisma
-Function.odt`), then the corrected `ROADMAP.md`, then implementation
-evidence in the repository, then `CLAUDE.md`/this file. Never infer missing
-requirements.
+## Active product contract
 
-## Language
+Prisma Function is a single-user Windows desktop application built with PySide6.
 
-Code, identifiers, comments, UI text, CSV headers and values, technical
-documentation, branch names, and commit messages must be English.
+- The user independently downloads one or more official PRISMA Export CSV files and selects them locally with Select CSV.
+- Prisma Function never opens, controls, or downloads from the PRISMA website. Browser automation and Playwright must not be restored.
+- Input PRISMA CSV is the official 34-column, semicolon-delimited Windows-1252 contract. Detection is header-based, never filename-based.
+- Every selected CSV must be read to end-of-file. The application must not impose a 5,000-row limit.
+- Multiple distinct CSV files for the same source date or period are valid and must be accepted.
+- Exact re-import and partial overlap must be idempotent. Deduplicate at the persisted row identity boundary, never by filename, whole-file hash, or source date.
+- Previously accepted data persists across sessions and new accepted rows are added atomically.
+- Retain only auctions with normalized booked capacity of at least 1 MWh.
+- Mapping contains exactly the ordered 12 fields defined in CLAUDE.md and remains vertically and horizontally scrollable without a row limit.
+- Output is UTF-8, semicolon-delimited, and uses the same ordered 12-field contract.
+- Dates and times use the approved Europe/Berlin CET/CEST contract.
+- Tariff and premium prices are EUR/MWh/h. Currency normalization uses the calendar date from Start of Auction, with official ECB rates and the approved prior-reference-date fallback.
+- Market and storage values may use only exact, side-specific, Auction-ID-linked approved evidence. No fuzzy, geographic, TSO, EIC, substring, cross-side, or name-based inference.
+- Runtime data belongs under %LOCALAPPDATA%\PrismaFunction\. User-facing published output belongs in the approved Documents directory.
+- PDF input, live monitoring, scheduling, notifications, and managed PRISMA acquisition are outside the active product.
 
-## Scope: one bounded increment per branch
+## Implementation workflow
 
-- One increment equals one bounded scope, implemented on its own feature
-  branch, and independently tested.
-- Do not include unrelated refactoring, cleanup, formatting, or dependency
-  updates.
-- Implement the entire agreed scope and run only the necessary checks
-  without repeated permission requests within an already-agreed task; stop
-  and ask for clarification only before a significant change in behavior,
-  architecture, data, security, or scope.
-- Do not start the next increment until the current one is finished and
-  merged to `main`.
-- Prefer tests over production changes when existing behavior only needs to
-  be proven, not corrected.
+- Implement one bounded increment on one English feature branch.
+- Make the smallest complete change and preserve module boundaries.
+- Keep business logic outside UI and infrastructure layers.
+- Validate input at system boundaries and preserve useful error context without exposing sensitive data.
+- Preserve atomicity, retry behavior, security, auditability, and backward compatibility.
+- Do not include unrelated refactoring, cleanup, formatting, or dependency changes.
+- Stop for customer direction only when a missing decision materially changes behavior, architecture, data, security, or scope.
+- Do not start the next increment until the current increment is completed and merged.
 
-## Validation, error-handling, and safety requirements
+## Verification and documentation
 
-- Preserve validation, auditing, error context, atomicity, recovery,
-  security, and backward compatibility.
-- Handle every error without hanging the application and without blocking a
-  retry.
-- Never weaken, reinterpret, or silently contradict authoritative
-  requirements. Any deviation requires explicit customer approval, recorded
-  in `ROADMAP.md`, before implementation.
+- Add or update focused regression tests for changed behavior.
+- Run focused tests, the complete test suite, the documented Python compilation check, relevant packaging validation, and git diff --check.
+- Never claim a check passed unless it was run against the current state.
+- Real Windows behavior must be validated on Windows; automated tests do not replace required manual acceptance.
+- Update current documentation when behavior, configuration, contracts, status, or dependencies change.
+- Keep historical implementation narratives in CHANGELOG.md; do not copy obsolete reports into active rules or the roadmap.
+- Do not create final-review.diff artifacts unless the user explicitly requests one.
 
-## Testing, compilation, and packaging requirements
+## Git safety
 
-- Run focused tests for the changed behavior, then the complete automated
-  test suite.
-- Run the project's documented Python compilation check (see
-  `BUILDING.md`).
-- Run relevant packaging validation when packaging-affecting files change
-  (see `BUILDING.md`, `INSTALLER.md`, `RELEASE_CHECKLIST.md`).
-- Run `git diff --check`.
-- Do not repeat an expensive check if the code it covers has not changed
-  since the check last passed.
-- Real-environment (Windows/PRISMA) validation is required before a
-  real-environment-dependent increment can be marked fully complete. Never
-  claim such validation passed unless it was actually run and the exact
-  result is recorded.
-
-## Documentation requirements
-
-- Update `ROADMAP.md`, `CLAUDE.md`, and any other current documentation
-  whenever behavior, configuration, contracts, conditions, or status change.
-- Record the exact validation commands and their exact results, not a
-  paraphrase or an assumption.
-- Do not copy obsolete historical implementation reports between documents;
-  Git history is the record of superseded documentation.
-
-## Review and correction workflow
-
-- Review may use GitHub Copilot (or an equivalent automated review pass)
-  without allowing it to edit files.
-- Fix critical and important review findings, then rerun the full test
-  suite.
-- Produce one final report containing: the exact implemented scope; the
-  list of changed files; the result of every check actually run; any
-  outstanding manual/real-environment checks; risks and blockers; and
-  confirmation that no commit or push happened without authorization.
-- When manual or real-environment validation is required, complete it
-  before producing the final review diff; if it surfaces actionable
-  findings, apply one narrow correction at a time and repeat the
-  report-and-review cycle.
-- When a review diff is requested, produce it with
-  `git status --short --branch`, `git diff --check`, `git diff --stat`, and
-  `git diff --binary --no-ext-diff > <increment>-final-review.diff`. These
-  `*-final-review.diff` files are working artifacts for human review and are
-  never committed.
-
-## Git safety rules
-
-- Never commit, push, merge, rebase, force-push, release, or delete a
-  branch without explicit user authorization. The user creates and merges
-  pull requests.
-- Never skip hooks or bypass signing unless explicitly instructed.
+Do not commit, push, pull, merge, rebase, force-push, create or delete branches, open pull requests, release, or publish unless the user explicitly authorizes the operation. Stage only files belonging to the approved increment. Never commit credentials, tokens, private data, generated output, local databases, logs, caches, or review artifacts.
 
 ## Definition of Done
 
-An increment is done when:
-
-- it contains only the agreed scope;
-- English UI and CSV contracts are preserved;
-- errors, retry, and cleanup are handled;
-- focused and full automated tests pass;
-- authoritative requirements remain intact;
-- no critical review finding remains unresolved;
-- documentation is current;
-- the change is merged to `main`;
-- the feature branch is deleted.
+An increment is complete only when its agreed scope is implemented, required checks pass, required manual acceptance is recorded, documentation is current, no critical finding remains, the change is merged to main, and explicitly approved branch cleanup is complete.
