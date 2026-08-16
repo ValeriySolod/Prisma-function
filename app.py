@@ -319,6 +319,7 @@ class PrismaMonitorApp(QMainWindow):
             thread.start()
         except Exception as exc:
             self._processing_threads.discard(thread)
+            self._active_processing_thread = None
             self._processing_active = False
             self._update_controls()
             self._processing_finished(ProcessingOutcome(None, str(exc), generation))
@@ -353,13 +354,20 @@ class PrismaMonitorApp(QMainWindow):
             self._processing_succeeded(outcome.result, None)
 
     def _finish_processing(self, thread: threading.Thread | None) -> bool:
+        # `_process_worker`'s signal emit is its last statement, so by the
+        # time this runs (on `processing_finished`) the worker has already
+        # returned or is about to; an unbounded join is the only boundary
+        # that can't silently expose completion (re-enabling Select CSV,
+        # letting a second import start) while storage/database work on the
+        # old thread is still in flight — the prior 0.1s timeout could give
+        # up and proceed anyway, which was the source of the Windows access
+        # violation.
         if thread is None:
             thread = self._active_processing_thread
         if thread is not None and thread is not self._active_processing_thread:
             return False
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=0.1)
-        if thread is not None and not thread.is_alive():
+        if thread is not None:
+            thread.join()
             self._processing_threads.discard(thread)
         self._active_processing_thread = None
         self._processing_active = False
