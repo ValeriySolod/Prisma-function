@@ -35,11 +35,9 @@ No customer-approved publication naming/collision policy exists yet for this
 specific transformed output (that is explicitly deferred to the blocked
 `P.36.16` decision gate, which will define destination, filename, and
 overwrite/versioning behavior). Pending that decision, `build_output_filename`
-uses the same "<stem>_<distinguishing-suffix>.csv" template `P.36.14`
-established for the downloaded source file, and collision handling reuses
-`prisma_download.reserve_unique_download_path`'s existing, already-approved
-never-overwrite/incrementing-suffix rule unchanged rather than reimplementing
-it.
+uses a "<stem>_<distinguishing-suffix>.csv" template, and collision handling
+uses `reserve_unique_download_path`'s never-overwrite/incrementing-suffix
+rule.
 """
 from __future__ import annotations
 
@@ -61,7 +59,6 @@ from price_normalization import (
     normalize_prices_for_output,
 )
 from prisma_auction_lookup import PrismaAuctionLookup
-from prisma_download import reserve_unique_download_path
 from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
 from processor import PrismaImportError, PrismaImportResult, import_prisma_export
 from storage import AuctionStorage
@@ -72,6 +69,7 @@ __all__ = [
     "PrismaOutputResult",
     "describe_output_failure",
     "build_output_filename",
+    "reserve_unique_download_path",
     "transform_row",
     "write_prisma_output",
 ]
@@ -199,14 +197,40 @@ def _validate_output_directory(directory: str | Path) -> Path:
     """Accept only an existing, readable, writable directory.
 
     Reuses `download_directory.validate_download_directory`'s existing
-    existence/readability boundary check and adds the writability check
-    `prisma_download.validate_download_configuration` already requires for a
+    existence/readability boundary check and adds a writability check for a
     directory PrismaFunction is about to write into.
     """
     resolved = validate_download_directory(directory)
     if not os.access(resolved, os.W_OK):
         raise DownloadDirectoryError(f"Directory is not writable: {directory}")
     return resolved
+
+
+def reserve_unique_download_path(directory: str | Path, filename: str) -> Path:
+    """Atomically reserve a non-colliding path for ``filename`` in ``directory``.
+
+    A name collision is resolved with an incrementing numeric suffix (``_2``,
+    ``_3``, ...) and an existing file is never overwritten. Reservation uses
+    exclusive file creation (`os.O_CREAT | os.O_EXCL`) so the chosen name
+    cannot be silently claimed by a concurrent writer between the existence
+    check and the reservation; the returned path is a zero-byte placeholder
+    this call created, which the caller then overwrites with the actual
+    content.
+    """
+    base = Path(directory)
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    candidate = base / filename
+    attempt = 1
+    while True:
+        try:
+            handle = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            attempt += 1
+            candidate = base / f"{stem}_{attempt}{suffix}"
+            continue
+        os.close(handle)
+        return candidate
 
 
 def _write_rows(target: Path, rows: list[dict[str, str]]) -> None:
@@ -217,8 +241,7 @@ def _write_rows(target: Path, rows: list[dict[str, str]]) -> None:
     temporary file only (removed in ``finally``); ``target`` itself, having
     been created by `reserve_unique_download_path`'s exclusive reservation,
     is never partially overwritten. This is the same stage-then-`os.replace`
-    pattern `storage.py`'s `export_excel` and `prisma_download.py`'s
-    finalize paths already use.
+    pattern `storage.py`'s `export_excel` already uses.
     """
     directory = target.parent
     descriptor, staged_name = tempfile.mkstemp(

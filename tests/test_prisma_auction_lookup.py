@@ -5,13 +5,9 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from prisma_auction_lookup import (
-    AUCTION_DETAIL_URL_TEMPLATE,
     FIELD_AUCTION_END,
     FIELD_AUCTION_ID,
     FIELD_STATE,
-    FINISHED_STATE,
-    AuctionEndRecord,
-    PlaywrightAuctionDetailFetcher,
     PrismaAuctionDetailTransportError,
     PrismaAuctionEndFieldMalformedError,
     PrismaAuctionEndFieldMissingError,
@@ -251,235 +247,17 @@ def test_blank_requested_auction_id_is_rejected(blank_id: str) -> None:
         )
 
 
-# --- PlaywrightAuctionDetailFetcher: live-evidenced production transport ---
+# --- No live PRISMA transport exists ---------------------------------------
 #
-# Live Windows/PRISMA DevTools inspection (Auction ID 62756895, 2026-08-13;
-# see ROADMAP.md's P.36.19 entry) found the official endpoint
-# `GET https://platform.prisma-capacity.eu/rest/auctions/{auction_id}`.
-# These fakes model Playwright's `page.request` (`APIRequestContext`) and
-# its `APIResponse` closely enough to exercise the real fetcher without any
-# network access.
+# Per the revised specification, PrismaFunction never opens, controls, or
+# downloads anything from the PRISMA website, so `PrismaAuctionLookup` has no
+# default transport implementation to fall back to (see its docstring). A
+# previously resolved auction's rate is unaffected: it is served from
+# `storage.AuctionStorage`'s durable cache and never reaches this lookup
+# again (see `rate_resolution.py`/`tests/test_rate_resolution.py`).
 
 
-class FakeApiResponse:
-    def __init__(self, *, status=200, ok=None, json_body=None, json_error=None):
-        self.status = status
-        self.ok = ok if ok is not None else 200 <= status < 300
-        self._json_body = json_body
-        self._json_error = json_error
-
-    def json(self):
-        if self._json_error is not None:
-            raise self._json_error
-        return self._json_body
-
-
-class FakeApiRequestContext:
-    def __init__(self, response=None, *, error=None):
-        self._response = response
-        self._error = error
-        self.calls: list[tuple[str, int]] = []
-
-    def get(self, url, *, timeout):
-        self.calls.append((url, timeout))
-        if self._error is not None:
-            raise self._error
-        return self._response
-
-
-class FakePage:
-    def __init__(self, request):
-        self.request = request
-
-
-def _live_evidence_payload(**overrides) -> dict:
-    """The exact sanitized live response shape recorded in ROADMAP.md's
-    P.36.19 entry, including the fields that must never be substituted for
-    `auctionEnd` (`auctionStart`, `runtime.start`/`runtime.end`)."""
-    payload = {
-        "id": 62756895,
-        "phase": "FINISHED",
-        "auctionStart": "2026-08-01T14:30:00.008Z",
-        "auctionEnd": "2026-08-01T15:00:23.589Z",
-        "runtime": {
-            "start": "2026-08-02T04:00:00.000Z",
-            "end": "2026-08-03T04:00:00.000Z",
-        },
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_fetcher_constructs_exact_endpoint_and_issues_get_with_explicit_timeout() -> None:
-    request_context = FakeApiRequestContext(
-        FakeApiResponse(json_body=_live_evidence_payload())
-    )
-    page = FakePage(request_context)
-    PlaywrightAuctionDetailFetcher().fetch(page, "62756895", timeout_ms=7_500)
-    assert request_context.calls == [
-        (AUCTION_DETAIL_URL_TEMPLATE.format(auction_id="62756895"), 7_500)
-    ]
-
-
-def test_fetcher_uses_the_default_timeout_when_not_overridden() -> None:
-    request_context = FakeApiRequestContext(
-        FakeApiResponse(json_body=_live_evidence_payload())
-    )
-    page = FakePage(request_context)
-    PlaywrightAuctionDetailFetcher().fetch(page, "62756895")
-    assert request_context.calls[0][1] == 10_000
-
-
-def test_fetcher_rejects_non_success_http_status() -> None:
-    page = FakePage(FakeApiRequestContext(FakeApiResponse(status=404, ok=False)))
-    with pytest.raises(PrismaAuctionDetailTransportError, match="404"):
-        PlaywrightAuctionDetailFetcher().fetch(page, "1", timeout_ms=10_000)
-
-
-def test_fetcher_rejects_connection_failure() -> None:
-    page = FakePage(FakeApiRequestContext(error=OSError("connection reset")))
-    with pytest.raises(PrismaAuctionDetailTransportError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "1", timeout_ms=10_000)
-
-
-def test_fetcher_rejects_invalid_json() -> None:
-    page = FakePage(
-        FakeApiRequestContext(FakeApiResponse(json_error=ValueError("bad json")))
-    )
-    with pytest.raises(PrismaAuctionDetailTransportError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "1", timeout_ms=10_000)
-
-
-def test_fetcher_rejects_non_object_json() -> None:
-    page = FakePage(FakeApiRequestContext(FakeApiResponse(json_body=[1, 2, 3])))
-    with pytest.raises(PrismaAuctionDetailTransportError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "1", timeout_ms=10_000)
-
-
-def test_fetcher_rejects_mismatched_response_id() -> None:
-    page = FakePage(
-        FakeApiRequestContext(
-            FakeApiResponse(json_body=_live_evidence_payload(id=1))
-        )
-    )
-    with pytest.raises(PrismaAuctionRecordMismatchError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "62756895", timeout_ms=10_000)
-
-
-def test_fetcher_rejects_missing_response_id() -> None:
-    payload = _live_evidence_payload()
-    del payload["id"]
-    page = FakePage(FakeApiRequestContext(FakeApiResponse(json_body=payload)))
-    with pytest.raises(PrismaAuctionRecordMismatchError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "62756895", timeout_ms=10_000)
-
-
-def test_fetcher_normalizes_numeric_response_id_for_exact_comparison() -> None:
-    # Explicit, permitted system-boundary normalization: the live API
-    # returns `id` as a JSON number, `auction_id` is this module's own
-    # string identity; only the type difference is tolerated here.
-    page = FakePage(
-        FakeApiRequestContext(
-            FakeApiResponse(json_body=_live_evidence_payload(id=62756895))
-        )
-    )
-    raw_fields = PlaywrightAuctionDetailFetcher().fetch(
-        page, "62756895", timeout_ms=10_000
-    )
-    assert raw_fields[FIELD_AUCTION_ID] == "62756895"
-
-
-def test_fetcher_normalizes_finished_phase_to_the_business_layer_convention() -> None:
-    page = FakePage(
-        FakeApiRequestContext(FakeApiResponse(json_body=_live_evidence_payload()))
-    )
-    raw_fields = PlaywrightAuctionDetailFetcher().fetch(
-        page, "62756895", timeout_ms=10_000
-    )
-    assert raw_fields[FIELD_STATE] == FINISHED_STATE
-
-
-@pytest.mark.parametrize("phase", ["CANCELLED", "OPEN", "PENDING", "finished"])
-def test_fetcher_rejects_non_finished_phase(phase: str) -> None:
-    page = FakePage(
-        FakeApiRequestContext(
-            FakeApiResponse(json_body=_live_evidence_payload(phase=phase))
-        )
-    )
-    with pytest.raises(PrismaAuctionNotFinishedError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "62756895", timeout_ms=10_000)
-
-
-def test_fetcher_rejects_missing_phase() -> None:
-    payload = _live_evidence_payload()
-    del payload["phase"]
-    page = FakePage(FakeApiRequestContext(FakeApiResponse(json_body=payload)))
-    with pytest.raises(PrismaAuctionNotFinishedError):
-        PlaywrightAuctionDetailFetcher().fetch(page, "62756895", timeout_ms=10_000)
-
-
-def test_fetcher_extracts_only_the_explicit_auction_end_field() -> None:
-    page = FakePage(
-        FakeApiRequestContext(FakeApiResponse(json_body=_live_evidence_payload()))
-    )
-    raw_fields = PlaywrightAuctionDetailFetcher().fetch(
-        page, "62756895", timeout_ms=10_000
-    )
-    assert raw_fields[FIELD_AUCTION_END] == "2026-08-01T15:00:23.589Z"
-
-
-def test_transport_error_never_includes_headers_or_cookies() -> None:
-    page = FakePage(FakeApiRequestContext(FakeApiResponse(status=500, ok=False)))
-    with pytest.raises(PrismaAuctionDetailTransportError) as excinfo:
-        PlaywrightAuctionDetailFetcher().fetch(page, "1", timeout_ms=10_000)
-    message = str(excinfo.value)
-    assert "cookie" not in message.lower()
-    assert "authorization" not in message.lower()
-    assert "token" not in message.lower()
-
-
-def test_lookup_end_to_end_with_the_live_evidenced_payload() -> None:
-    page = FakePage(
-        FakeApiRequestContext(FakeApiResponse(json_body=_live_evidence_payload()))
-    )
-    lookup = PrismaAuctionLookup(PlaywrightAuctionDetailFetcher())
-    record = lookup.lookup(page, "62756895")
-    assert record.auction_id == "62756895"
-    assert record.end_at == datetime(
-        2026, 8, 1, 15, 0, 23, 589000, tzinfo=timezone.utc
-    )
-    # 15:00:23.589 UTC is 17:00:23.589 CEST (Europe/Berlin, UTC+2 in August),
-    # still calendar date 2026-08-01, matching the live-verified example.
-    assert authoritative_end_date(record) == date(2026, 8, 1)
-
-
-def test_lookup_never_substitutes_auction_start_or_runtime_fields() -> None:
-    # `auctionStart` and `runtime.start`/`runtime.end` in this fixture are
-    # deliberately different from `auctionEnd`; if any were substituted the
-    # resulting instant would not match the one asserted below.
-    page = FakePage(
-        FakeApiRequestContext(FakeApiResponse(json_body=_live_evidence_payload()))
-    )
-    lookup = PrismaAuctionLookup(PlaywrightAuctionDetailFetcher())
-    record = lookup.lookup(page, "62756895")
-    assert record.end_at.isoformat() == "2026-08-01T15:00:23.589000+00:00"
-
-
-def test_lookup_default_uses_the_production_playwright_transport() -> None:
-    # A bare object() has no `.request` attribute, so the production
-    # fetcher's own request call fails with a sanitized transport error
-    # rather than silently returning a placeholder result.
+def test_lookup_fails_closed_when_no_fetcher_is_configured() -> None:
     lookup = PrismaAuctionLookup()
     with pytest.raises(PrismaAuctionDetailTransportError):
         lookup.lookup(page=object(), auction_id="998877")
-
-
-def test_lookup_fails_when_only_prohibited_dates_are_present_without_auction_end() -> None:
-    # A fixture with valid prohibited dates (auctionStart, runtime) but a
-    # missing `auctionEnd` must fail, never fall back to a prohibited field.
-    payload = _live_evidence_payload()
-    del payload["auctionEnd"]
-    page = FakePage(FakeApiRequestContext(FakeApiResponse(json_body=payload)))
-    lookup = PrismaAuctionLookup(PlaywrightAuctionDetailFetcher())
-    with pytest.raises(PrismaAuctionEndFieldMissingError):
-        lookup.lookup(page, "62756895")

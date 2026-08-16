@@ -51,11 +51,10 @@ __all__ = [
 
 # Europe/Berlin is this project's already-established, live-verified
 # authoritative timezone for PRISMA local date/time interpretation (see
-# `prisma_download.py`'s date-filter fill and `prisma_auction_lookup.py`'s
-# auction-end resolution, both already live-verified across the CET/CEST DST
-# boundary). Resolved via the standard-library `zoneinfo`, backed by the
-# `tzdata` package already present in this project's environment; no new
-# dependency is introduced.
+# `prisma_auction_lookup.py`'s auction-end resolution, live-verified across
+# the CET/CEST DST boundary). Resolved via the standard-library `zoneinfo`,
+# backed by the `tzdata` package already present in this project's
+# environment; no new dependency is introduced.
 PRISMA_LOCAL_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 PRISMA_LOCAL_INPUT_FORMAT = "%d.%m.%Y %H:%M"

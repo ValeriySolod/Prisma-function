@@ -2,20 +2,19 @@
 
 ## Overview
 
-Prisma Function is a desktop application that automates the retrieval and
-transformation of capacity auction data from the official Prisma Capacity
-platform. The user launches the app, opens the Prisma website in a new
-browser tab via the **Open Prisma** button, selects the desired dates on the
-Prisma site, and downloads the resulting CSV export. All processing of the
-downloaded file happens exclusively inside Prisma Function, which parses the
-CSV and outputs it according to the mapping described below. When finished,
-the user closes the session with the **Close Prisma** button.
+Prisma Function is a desktop application that transforms capacity auction
+data exported from the official Prisma Capacity platform. Prisma Function
+does not open, control, or download anything from the Prisma website itself:
+the user downloads the official CSV export independently, then selects that
+local file inside Prisma Function using the **Select CSV** control. All
+processing of the selected file happens exclusively inside Prisma Function,
+which parses the CSV and outputs it according to the mapping described
+below.
 
 ## 1. Data Source
 
-- Data is downloaded from the official auction platform via the provided link.
-- The user navigates to the auctions section and sets the starting date of
-  the month.
+- Data is downloaded independently by the user from the official auction
+  platform, then selected as a local file inside Prisma Function.
 - Filtering is applied so that only auctions with at least the minimum
   booked capacity (**≥ 1 MWh**) are retained.
 

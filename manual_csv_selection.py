@@ -177,9 +177,9 @@ def validate_manual_csv(candidate: str | Path) -> ManualCsvValidationResult:
 class ManualCsvSelection:
     """Tracks the single most recently accepted manual PRISMA Export CSV file.
 
-    Session-scoped only, matching `DownloadDirectorySelection`'s P.36.3
-    persistence decision: there is no active selection until the user
-    validates one, and a rejected candidate never changes ``current``.
+    Session-scoped only, per the P.36.3 persistence decision: there is no
+    active selection until the user validates one, and a rejected candidate
+    never changes ``current``.
     """
 
     def __init__(self) -> None:

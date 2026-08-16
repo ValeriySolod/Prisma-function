@@ -15,19 +15,31 @@ The newest explicitly approved customer requirements supersede older roadmap tex
 
 ## Product direction
 
-`Prisma Function.odt` is the authoritative business specification. The customer clarifications recorded on 2026-08-02 establish this current workflow:
+`Prisma Function.odt` is the authoritative business specification.
 
-1. The user opens PRISMA from Prisma Function.
-2. The user selects a start date and an end date inside Prisma Function. There is no first-day-of-month restriction.
-3. The user initiates the official PRISMA CSV download through Prisma Function.
-4. Prisma Function uses a download directory created under the user's Documents directory or another existing directory explicitly selected by the user.
-5. Prisma Function validates and processes the downloaded CSV inside the application.
-6. As a fallback only, the user may explicitly select a previously downloaded CSV through the completed P.36.4 path.
-7. Prisma Function transforms accepted rows into the exact 12-column output CSV contract defined below.
-8. Prisma Function publishes the processed result using a publication mechanism that must be explicitly approved before P.36.16 implementation.
-9. The user closes the application-owned PRISMA session with the Close Prisma control when finished. Manual browser closure must also be detected safely.
+**Current workflow (P.38, 2026-08-16 customer-approved revision — supersedes the P.36 managed-download workflow below):**
 
-The new workflow replaces the live-monitoring dashboard, scheduler, and automated monitoring product flow. Their completed records remain historical evidence; their removal is planned separately.
+1. The user downloads the official PRISMA Export CSV independently, outside Prisma Function. Prisma Function never opens, controls, or downloads anything from the PRISMA website.
+2. The user selects that local CSV inside Prisma Function (Select CSV, the completed P.36.4 path — now the sole and primary acquisition path, not a fallback).
+3. Prisma Function validates and processes the selected CSV inside the application.
+4. Prisma Function transforms accepted rows into the exact 12-column output CSV contract defined below.
+5. Prisma Function publishes the processed result into the approved Documents-directory default (P.36.3), cumulatively and deduplicated, updating the displayed Mapping table.
+
+**Historical workflow (P.36.2–P.36.22, customer clarifications recorded 2026-08-02 — removed by P.38):**
+
+1. ~~The user opens PRISMA from Prisma Function.~~
+2. ~~The user selects a start date and an end date inside Prisma Function. There is no first-day-of-month restriction.~~
+3. ~~The user initiates the official PRISMA CSV download through Prisma Function.~~
+4. ~~Prisma Function uses a download directory created under the user's Documents directory or another existing directory explicitly selected by the user.~~
+5. Prisma Function validates and processes the downloaded CSV inside the application. *(retained, now applied to a manually selected CSV — see current workflow above)*
+6. ~~As a fallback only, the user may explicitly select a previously downloaded CSV through the completed P.36.4 path.~~ *(P.36.4 is now the primary and only path, not a fallback)*
+7. Prisma Function transforms accepted rows into the exact 12-column output CSV contract defined below. *(retained, unchanged)*
+8. Prisma Function publishes the processed result using a publication mechanism that must be explicitly approved before P.36.16 implementation. *(retained; P.36.16's approved cumulative-publication mechanism is unchanged)*
+9. ~~The user closes the application-owned PRISMA session with the Close Prisma control when finished. Manual browser closure must also be detected safely.~~
+
+This historical numbered list is preserved verbatim (struck through where removed) as the record of what P.36.2–P.36.22 implemented; see the "P.38" section below for the full removal scope and disposition of every superseded sub-increment.
+
+The P.36 workflow itself replaced the live-monitoring dashboard, scheduler, and automated monitoring product flow. Their completed records remain historical evidence; their removal is recorded under P.36.10.
 
 ## Authoritative output CSV contract
 
@@ -240,9 +252,20 @@ their dependencies below are satisfied and must use the 12-column contract.
   the real UI button, including that the published file lands in the approved directory and Open
   Result opens it. The separate PRISMA 5000-row large-export defect (P.36.14) was not touched.
 
+## Current blockers and risks — note on P.38/P.39
+
+P.38 (2026-08-16) removed the entire managed PRISMA browser/download workflow (see its own section above). Every outstanding real-Windows/real-PRISMA validation item recorded above against P.36.2, P.36.3's managed-download support, P.36.8's managed-download trigger path, P.36.13, P.36.14 (including the 5,000-row large-export defect and its P.36.22 fix), and P.36.20 is now moot: that code no longer exists and cannot be validated or shipped. Their historical implementation and validation records remain below and in CHANGELOG.md as evidence of what was built and tested at the time, per the Maintenance note's preservation rule — they are not instructions for further work. P.36.4 (manual CSV selection), P.36.8's mapping-display UI itself, P.36.15, P.36.16, P.36.19, and P.36.21 are unaffected in scope by P.38/P.39 and their own outstanding real-Windows validation items (real-PRISMA CSV, real ECB data) remain live and current. P.39 (same day) further removed the "Import PRISMA Export"/"Open Result" buttons and the export-date picker; see its own section below. Any earlier text below still describing the two-step Select-CSV-then-Import-PRISMA-Export flow, the export-date control, or Open Result reflects pre-P.39 history, not current behavior.
+
+## P.39 — Select CSV as the single processing action
+
+**Status:** ✅ Implemented and automated-tested (2026-08-16) on branch `feature/remove-managed-prisma-download`, same day as and following P.38.
+
+**Correction:** P.38 removed managed PRISMA acquisition but left a two-step local flow: Select CSV only previewed the Mapping table, and a separate "Import PRISMA Export" button (with its own file dialog and an "PRISMA EXPORT DATE" picker) actually processed and published. This is withdrawn: Select CSV is now the single user action. `app.py`'s `_select_manual_csv()` validates the chosen file, refreshes the Mapping preview, and — only if that preview succeeded — immediately calls `_process_selected_csv()` on a background thread, which merges the file into cumulative persistent storage (deduplicated, exact-retry-safe, unchanged rules) and publishes the confirmed-EUR 12-column output, then refreshes the Mapping table again as part of that same flow. The "Import PRISMA Export" button, the "Open Result" button, `PrismaMonitorApp._last_output_path`, and the export-date `QDateEdit`/label are removed; `source_date` is now always today's date (the same fallback the pre-P.39 code already used when no UI date was supplied), so no CSV transformation, filtering, market-mapping, currency-conversion, datetime-normalization, or deduplication rule changed. Select CSV is disabled while a selection's processing is still in flight. See its own dated section in CHANGELOG.md for the full removal scope and evidence.
+
 ## Next recommended increment
 
-1. Complete and review the documentation correction across `ROADMAP.md`, `AGENTS.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
+1. Obtain real-Windows manual validation of P.38/P.39 together: launch the packaged or source application, confirm no PRISMA-website access of any kind occurs, select a local PRISMA Export CSV, confirm it is processed and published automatically, and confirm the Mapping table reflects it.
+2. Complete and review the documentation correction across `ROADMAP.md`, `AGENTS.md`, and the auto-loaded `CLAUDE.md` so all active instructions agree on the 12-column contract and dependency order.
 2. P.36.13 is implemented and merged to `main` via PR #59 (merge commit `ff07b68`); it is completed.
 3. P.36.14's decision gate is resolved and it is implemented, automated-tested, and merged to `main` via
    PR #61 (merge commit `36b7615`); obtain the required real-Windows/real-PRISMA validation before it can be
@@ -310,9 +333,15 @@ their dependencies below are satisfied and must use the 12-column contract.
 
 The obsolete 14-column P.36.6 prompt must not be executed.
 
+## P.38 — Remove managed PRISMA browser/download workflow
+
+**Status:** ✅ Implemented and automated-tested (2026-08-16) on branch `feature/remove-managed-prisma-download`. Merged to `main`: pending. Real-Windows manual validation: outstanding.
+
+**Customer decision (2026-08-16):** the managed PRISMA browser/download workflow is withdrawn. PrismaFunction must never open, control, or download anything from the PRISMA website; the user downloads the official CSV export independently and Prisma Function's workflow starts from selecting that local CSV. This supersedes the P.36.2/P.36.3/P.36.8/P.36.13/P.36.14/P.36.20/P.36.22 managed-acquisition design recorded above; those entries' historical implementation and validation records are preserved, not erased, but must not guide further implementation. `browser.py`, `prisma_lifecycle.py`, `prisma_download.py`, `prisma_page.py`, and `date_range_selection.py` (and their dedicated tests) are deleted; `app.py`'s Open Prisma/Close Prisma/Date Range/Download Folder UI and controller wiring are removed; `download_directory.py` is trimmed to only the Documents-directory default; `prisma_auction_lookup.PrismaAuctionLookup` fails closed with no live transport instead of defaulting to a Playwright fetcher; `playwright` is removed from dependencies and packaging. Local CSV validation, the 12-column transformation, EUR normalization, CET/CEST handling, cumulative persistence/deduplication, and the Mapping table are all unaffected. See its own dated section in CHANGELOG.md for the full removal scope, the known fail-closed consequence for never-before-resolved Finished auctions (an inherent result of removing all PRISMA-website access, not a defect), and exact validation evidence (606 passed, 1 skipped; compileall, `git diff --check`, PyInstaller build, and `validate_package.py` all passed).
+
 ## Release target
 
-- **Minimum usable P.36 version:** user selects dates, initiates a managed official CSV download, receives a correct published 12-column result, and can close/reopen the owned PRISMA session safely.
+- **Minimum usable version:** user selects a locally downloaded PRISMA Export CSV, which is immediately processed and merged into a correct published 12-column cumulative result — with no PRISMA-website access of any kind and no separate import step.
 - **Stable Windows release:** completed mapping display, obsolete-code removal, final dependency packaging, installer validation, full regression suite, and real clean-Windows acceptance evidence.
 
 ## Maintenance note

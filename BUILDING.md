@@ -32,10 +32,10 @@ The windowed application and its supporting files are written to
 `dist\PrismaFunction\`. The executable is expected at
 `dist\PrismaFunction\PrismaFunction.exe`.
 
-The Playwright Python modules needed by the application are included. The
-application uses an installed system-default Chrome or Edge browser; browser
-binaries are not bundled. A successful build does not replace the manual
-release-readiness checks in `RELEASE_CHECKLIST.md`.
+PrismaFunction does not open, control, or download anything from the PRISMA
+website; it has no browser-automation dependency to bundle. A successful
+build does not replace the manual release-readiness checks in
+`RELEASE_CHECKLIST.md`.
 
 Verify the Windows executable metadata in PowerShell:
 
@@ -123,14 +123,14 @@ set QT_QPA_PLATFORM=offscreen
 set PYTHONUTF8=1
 python -m pytest -q tests\test_packaging.py
 python -m pytest -q
-python -m compileall -q app.py browser.py csv_contracts.py date_range_selection.py download_directory.py ecb_rates.py manual_csv_selection.py mapping_presentation.py price_normalization.py prisma_auction_lookup.py prisma_datetime.py prisma_download.py prisma_import_workflow.py prisma_lifecycle.py prisma_output.py prisma_page.py prisma_publication.py prisma_references.py prisma_source_updates.py processor.py rate_resolution.py runtime_logging.py runtime_paths.py storage.py ui_components.py validate_package.py version.py tests
+python -m compileall -q app.py csv_contracts.py download_directory.py ecb_rates.py manual_csv_selection.py mapping_presentation.py price_normalization.py prisma_auction_lookup.py prisma_datetime.py prisma_import_workflow.py prisma_output.py prisma_publication.py prisma_references.py prisma_source_updates.py processor.py rate_resolution.py runtime_logging.py runtime_paths.py storage.py ui_components.py validate_package.py version.py tests
 python -m PyInstaller --clean --noconfirm PrismaFunction.spec
 python validate_package.py
 ```
 
 The packaging command validates the checked-in PyInstaller configuration and
 writes an unarchived build to `dist\PrismaFunction\`; CI does not publish or
-upload it. Playwright browser binaries are not required by these checks.
+upload it.
 
 Source and packaged runs write application-owned data only below
 `%LOCALAPPDATA%\PrismaFunction`; they do not require the repository or install

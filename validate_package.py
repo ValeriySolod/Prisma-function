@@ -12,8 +12,6 @@ REQUIRED_PATHS = (
     "_internal/PySide6/Qt6Gui.dll",
     "_internal/PySide6/Qt6Widgets.dll",
     "_internal/PySide6/plugins/platforms/qwindows.dll",
-    "_internal/playwright/driver/node.exe",
-    "_internal/playwright/driver/package/package.json",
 )
 FORBIDDEN_SUFFIXES = (".py", ".pyc", ".log", ".csv")
 FORBIDDEN_PARTS = {".venv", "tests", "__pycache__", ".pytest_cache"}

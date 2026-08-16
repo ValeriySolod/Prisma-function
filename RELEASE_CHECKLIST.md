@@ -15,16 +15,12 @@ Complete and record the following manual checks before tagging or publishing.
 - [ ] Run `build.bat` and confirm the PyInstaller build succeeds.
 - [ ] Launch `dist\PrismaFunction\PrismaFunction.exe` without a console window.
 - [ ] Confirm the title displays `PRISMA Monitor v1.0.0`.
-- [ ] Select a start and end date and confirm date-range validation behaves as documented.
-- [ ] Open Prisma, confirm the application-managed PRISMA CSV download completes into the
-      configured Documents-based or user-selected directory, and confirm Close Prisma ends
-      the session cleanly.
-- [ ] As a fallback path, manually select a previously downloaded CSV and confirm it is
-      validated against the official PRISMA export contract.
+- [ ] Select a locally downloaded official PRISMA Export CSV and confirm it is validated
+      against the official PRISMA export contract.
 - [ ] Confirm the accepted CSV is transformed and published as the exact 12-column output
       contract, and that the mapping presentation shows only the approved columns.
-- [ ] Confirm unrelated Chrome or Edge windows remain open when the application-managed
-      browser session ends.
+- [ ] Confirm the application never opens, controls, or downloads anything from the PRISMA
+      website (no browser window is launched).
 - [ ] Confirm a runtime log is created in the documented runtime log location.
 
 ## Archive and clean-PC validation
@@ -36,7 +32,7 @@ Complete and record the following manual checks before tagging or publishing.
       development-only files, or generated local output are present.
 - [ ] Verify the ZIP against its SHA-256 checksum using `BUILDING.md`.
 - [ ] Copy the verified package to a second 64-bit Windows PC and repeat launch,
-      CSV, browser, monitoring, stop, result, and logging checks.
+      CSV selection, processing, result, and logging checks.
 
 ## Manual post-merge publication
 
