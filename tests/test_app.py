@@ -43,9 +43,24 @@ def _build_app(monkeypatch, tmp_path):
 
 
 def _close_app(widget) -> None:
+    """Tear down `widget`, guaranteeing every processing worker has fully
+    returned first.
+
+    Deleting the widget (and its `WorkerSignals`) while a worker thread is
+    still alive races that thread's `processing_finished.emit()`/storage
+    calls against the widget's own destruction, which is the Windows access
+    violation this lifecycle fix addresses — so this waits for a genuine
+    `is_alive()` boundary (pumping the event loop so any pending queued
+    signal still gets delivered) instead of a bounded `join(timeout=...)`
+    that could silently give up and let teardown proceed anyway.
+    """
     widget._is_closing = True
-    for worker in widget._processing_threads:
-        worker.join(timeout=2)
+    deadline = time.monotonic() + 5.0
+    for worker in list(widget._processing_threads):
+        while worker.is_alive() and time.monotonic() < deadline:
+            QApplication.processEvents()
+            worker.join(timeout=0.05)
+        assert not worker.is_alive(), "processing worker did not finish before test teardown"
     widget._processing_threads.clear()
     widget.close()
 
@@ -718,6 +733,7 @@ def test_import_processing_success_and_error_restore_controls(window, monkeypatc
         def __init__(self, **kwargs): self.kwargs = kwargs
         def start(self): pass
         def is_alive(self): return False
+        def join(self, timeout=None): pass
 
     monkeypatch.setattr(app.threading, "Thread", FakeThread)
     widget._select_manual_csv()
