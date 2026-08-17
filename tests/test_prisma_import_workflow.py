@@ -101,8 +101,8 @@ def test_new_repeat_and_next_daily_export_are_cumulative_and_enriched(tmp_path):
     assert (initial.processed, initial.inserted, initial.updated, initial.unchanged) == (1, 1, 0, 0)
     repeated = run(first, tmp_path, date(2025, 1, 1))
     assert repeated.source_status.value == "unchanged"
-    # Exact retry reports the persisted historical import summary.
-    assert (repeated.inserted, repeated.updated) == (1, 0)
+    assert repeated.deduplicated == 1
+    assert (repeated.inserted, repeated.updated, repeated.unchanged) == (0, 0, 1)
     _, records_after_retry = read_published(tmp_path)
     assert len(records_after_retry) == 1  # retry republishes, never duplicates
 
@@ -116,8 +116,9 @@ def test_new_repeat_and_next_daily_export_are_cumulative_and_enriched(tmp_path):
         {**BASE, "Auction ID": "A-3", "Network Point ID Entry": "ENTRY-3", "Marketed Capacity": "3000"},
     ]
     second = write_export(tmp_path / "second.csv", next_rows)
-    daily = run(second, tmp_path, date(2025, 1, 2))
+    daily = run(second, tmp_path, date(2025, 1, 1))
     assert (daily.processed, daily.inserted, daily.updated, daily.unchanged) == (3, 2, 1, 0)
+    assert daily.deduplicated == 1
     header, records = read_published(tmp_path)
     assert tuple(header) == prisma_output.OUTPUT_CSV_COLUMNS
     # A-1 deduplicates against its own already-published row (exact 12-field
@@ -126,6 +127,51 @@ def test_new_repeat_and_next_daily_export_are_cumulative_and_enriched(tmp_path):
     assert len(records) == 3
     assert {record["Entry Market"] for record in records} == {"VGS Storage Hub"}
     assert sorted(record["Booked Capacity"] for record in records) == ["1000.0", "2000.0", "3000.0"]
+
+
+def test_same_date_partially_overlapping_csv_adds_only_new_distinct_rows(tmp_path):
+    run(write_export(tmp_path / "first.csv", [BASE]), tmp_path, date(2025, 1, 1))
+    second_rows = [
+        BASE,
+        {**BASE, "Auction ID": "A-2", "Network Point ID Entry": "ENTRY-2", "Marketed Capacity": "2000"},
+    ]
+
+    result = run(write_export(tmp_path / "second.csv", second_rows), tmp_path, date(2025, 1, 1))
+    _, records = read_published(tmp_path)
+
+    assert result.source_status.value == "applied"
+    assert result.total_source_rows == 2
+    assert result.accepted == 2
+    assert result.deduplicated == 1
+    assert result.inserted == 1
+    assert len(records) == 2
+    assert sorted(record["Booked Capacity"] for record in records) == ["1000.0", "2000.0"]
+
+
+def test_manual_csv_workflow_processes_and_publishes_more_than_5000_rows(tmp_path):
+    rows = [
+        {
+            **BASE,
+            "Auction ID": f"A-{index:05d}",
+            "Network Point ID Entry": f"ENTRY-{index:05d}",
+            "Marketed Capacity": str(1000 + index),
+        }
+        for index in range(5001)
+    ]
+
+    result = run(write_export(tmp_path / "large.csv", rows), tmp_path, date(2025, 1, 1))
+    header, records = read_published(tmp_path)
+
+    assert tuple(header) == prisma_output.OUTPUT_CSV_COLUMNS
+    assert len(records) == 5001
+    assert result.total_source_rows == 5001
+    assert result.accepted == 5001
+    assert result.filtered == 0
+    assert result.rejected == 0
+    assert result.deduplicated == 0
+    assert "Source rows: 5001" in result.summary()
+    assert "accepted: 5001" in result.summary()
+    assert "deduplicated: 0" in result.summary()
 
 
 def test_normal_import_never_runs_historical_backfill(tmp_path, monkeypatch):
@@ -288,7 +334,8 @@ def test_exact_retry_republishes_missing_output_but_detects_corruption(tmp_path,
 
     retried = run(source, tmp_path, date(2025, 1, 1))
     assert retried.source_status is workflow.SourceUpdateStatus.UNCHANGED
-    assert retried.inserted == initial.inserted == 1
+    assert initial.inserted == 1
+    assert (retried.inserted, retried.unchanged) == (0, 1)
     _, records = read_published(tmp_path)
     assert len(records) == 1
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
@@ -388,8 +435,10 @@ def test_legacy_json_migrates_with_unavailable_metadata_and_repairs_output(tmp_p
     }]}), encoding="utf-8")
     result = run(source, tmp_path, date(2025, 1, 1))
     assert result.source_status is workflow.SourceUpdateStatus.UNCHANGED
-    assert result.processed is result.filtered is result.rejected is None
-    assert "unavailable" in result.summary()
+    assert result.total_source_rows == result.accepted == 1
+    assert (result.filtered, result.rejected) == (0, 0)
+    assert result.deduplicated == 0
+    assert result.inserted == 0
     _, records = read_published(tmp_path)
     assert len(records) == 1
 

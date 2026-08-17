@@ -63,6 +63,27 @@ def test_detailed_result_classifies_every_row_and_preserves_id(tmp_path: Path) -
         assert "000123456789012345" not in issue.message
 
 
+def test_import_prisma_export_reads_past_5000_rows_until_end_of_file(tmp_path: Path) -> None:
+    rows = [
+        {
+            **BASE,
+            "Auction ID": f"A-{index:05d}",
+            "Network Point ID Entry": f"ENTRY-{index:05d}",
+            "Marketed Capacity": str(1000 + index),
+        }
+        for index in range(5001)
+    ]
+
+    result = import_prisma_export(write_csv(tmp_path, rows))
+
+    assert result.total_source_rows == 5001
+    assert result.imported_count == 5001
+    assert result.filtered_count == 0
+    assert result.rejected_count == 0
+    assert len(result.rows) == 5001
+    assert result.rows[-1]["auction_id"] == "A-05000"
+
+
 @pytest.mark.parametrize(("direction", "normalized", "point", "point_id"), [
     ("Entry", "entry", "VGS Storage Hub (4290)", "ENTRY-ID"),
     ("Exit", "exit", "VGS Storage Hub (4290)", "EXIT-ID"),

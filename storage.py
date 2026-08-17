@@ -434,15 +434,22 @@ class AuctionStorage:
         """Create `prisma_source_operations`, migrating a pre-P.40-correction
         database in place.
 
-        A database created before this correction has `UNIQUE(source_date)`
-        baked into the table itself; `CREATE TABLE IF NOT EXISTS` is a no-op
-        against an already-existing table, so it alone cannot lift that
-        constraint on an existing installation — exactly the database state
-        that reproduced the real-Windows regression this corrects. When the
-        old constraint is detected, the table is losslessly rebuilt under
-        `SOURCE_OPERATIONS_SQL`'s `UNIQUE(sha256)` identity within the same
-        transaction `_create_schema` already holds, so this either fully
-        applies or leaves the database completely unchanged.
+        A database created before this correction has a unique constraint
+        that still includes `source_date` baked into the table itself —
+        either the original `UNIQUE(source_date)` alone, or the
+        `UNIQUE(source_date, sha256)` shape an earlier, independent fix for
+        the same real-Windows regression used before this correction's
+        `UNIQUE(sha256)`-only design was adopted. `CREATE TABLE IF NOT
+        EXISTS` is a no-op against an already-existing table, so it alone
+        cannot lift either constraint on an existing installation. Detection
+        uses `PRAGMA index_list`/`PRAGMA index_info` (via `_indexes()`)
+        rather than matching the stored `CREATE TABLE` text, so both legacy
+        shapes are recognized structurally instead of by a brittle string
+        pattern. When the table does not already have exactly the required
+        `UNIQUE(sha256)` index, it is losslessly rebuilt under
+        `SOURCE_OPERATIONS_SQL`'s identity within the same transaction
+        `_create_schema` already holds, so this either fully applies or
+        leaves the database completely unchanged.
         """
         existing_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='prisma_source_operations'"
@@ -450,8 +457,12 @@ class AuctionStorage:
         if existing_sql is None:
             connection.execute(cls.SOURCE_OPERATIONS_SQL)
             return
-        normalized = "".join((existing_sql[0] or "").split())
-        if "UNIQUE(source_date)" not in normalized:
+        indexes = cls._indexes(connection, "prisma_source_operations")
+        has_sha256_only_unique = any(
+            unique and columns == ("sha256",)
+            for _name, unique, _origin, columns in indexes
+        )
+        if has_sha256_only_unique:
             return
         connection.execute(
             "ALTER TABLE prisma_source_operations RENAME TO prisma_source_operations_pre_p40"
@@ -708,7 +719,7 @@ class AuctionStorage:
     def operations(self) -> list[sqlite3.Row]:
         with self._connection() as connection, connection:
             return list(connection.execute(
-                "SELECT * FROM prisma_source_operations ORDER BY source_date"
+                "SELECT * FROM prisma_source_operations ORDER BY source_date, created_at, operation_id"
             ))
 
     def import_legacy_operation(

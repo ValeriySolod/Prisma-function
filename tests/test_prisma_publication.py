@@ -215,6 +215,7 @@ def test_duplicate_against_existing_rows_is_not_appended(tmp_path: Path) -> None
     )
     assert second.succeeded
     assert second.appended_row_count == 0
+    assert second.deduplicated_row_count == 1
     assert second.total_row_count == 1
     _, records = _read_published(second.output_path)
     assert len(records) == 1
@@ -226,6 +227,7 @@ def test_duplicates_within_one_import_are_written_once(tmp_path: Path) -> None:
     result = _publish(import_result_for(tmp_path, [BASE, BASE]), out_dir, tmp_path)
     assert result.succeeded
     assert result.appended_row_count == 1
+    assert result.deduplicated_row_count == 1
     assert result.total_row_count == 1
     _, records = _read_published(result.output_path)
     assert len(records) == 1

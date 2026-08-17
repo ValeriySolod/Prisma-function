@@ -140,14 +140,21 @@ class PrismaWorkflowResult:
     source_status: SourceUpdateStatus
     message: str
     audit_issue_count: int | None = None
+    total_source_rows: int | None = None
+    accepted: int | None = None
+    deduplicated: int | None = None
 
     def summary(self) -> str:
         value = lambda item: "unavailable" if item is None else str(item)
         audit = self.audit_issue_count if self.audit_issue_count is not None else len(self.issues)
+        source_rows = self.total_source_rows if self.total_source_rows is not None else self.processed
+        accepted = self.accepted if self.accepted is not None else self.processed
+        deduplicated = self.deduplicated if self.deduplicated is not None else 0
         return (
-            f"{self.message} Processed: {value(self.processed)}; inserted: {value(self.inserted)}; "
-            f"updated: {value(self.updated)}; unchanged: {value(self.unchanged)}; "
+            f"{self.message} Source rows: {value(source_rows)}; accepted: {value(accepted)}; "
             f"filtered: {value(self.filtered)}; rejected: {value(self.rejected)}; "
+            f"deduplicated: {value(deduplicated)}; inserted: {value(self.inserted)}; "
+            f"updated: {value(self.updated)}; unchanged: {value(self.unchanged)}; "
             f"audit issues: {value(audit)}. Output: {self.output_path}"
         )
 
@@ -189,12 +196,38 @@ def _migrate_legacy_json_state(storage: AuctionStorage, legacy_path: Path) -> No
         )
 
 
-def _result_from_operation(row, output_path: Path, status: SourceUpdateStatus, message: str,
-                            issues: tuple[PrismaImportIssue, ...] = ()) -> PrismaWorkflowResult:
+def _result_from_operation(
+    row,
+    output_path: Path,
+    status: SourceUpdateStatus,
+    message: str,
+    issues: tuple[PrismaImportIssue, ...] = (),
+    *,
+    processed: int | None = None,
+    inserted: int | None = None,
+    updated: int | None = None,
+    unchanged: int | None = None,
+    filtered: int | None = None,
+    rejected: int | None = None,
+    audit_issue_count: int | None = None,
+    total_source_rows: int | None = None,
+    accepted: int | None = None,
+    deduplicated: int | None = None,
+) -> PrismaWorkflowResult:
     summary = json.loads(row["summary_json"] or "{}")
     get = lambda key: int(summary[key]) if key in summary else None
-    return PrismaWorkflowResult(get("processed"), get("inserted"), get("updated"), get("unchanged"),
-        get("filtered"), get("rejected"), issues, output_path, status, message, get("audit_issues"))
+    return PrismaWorkflowResult(
+        processed if processed is not None else get("processed"),
+        inserted if inserted is not None else get("inserted"),
+        updated if updated is not None else get("updated"),
+        unchanged if unchanged is not None else get("unchanged"),
+        filtered if filtered is not None else get("filtered"),
+        rejected if rejected is not None else get("rejected"),
+        issues, output_path, status, message,
+        audit_issue_count if audit_issue_count is not None else get("audit_issues"),
+        total_source_rows if total_source_rows is not None else get("total_source_rows"),
+        accepted if accepted is not None else get("accepted"),
+        deduplicated if deduplicated is not None else get("deduplicated"))
 
 
 def run_prisma_import_workflow(
@@ -271,6 +304,7 @@ def run_prisma_import_workflow(
         already_accepted = operation["status"] == "accepted"
         if operation["status"] == "pending":
             summary = {"total_source_rows": imported.total_source_rows,
+                       "accepted": imported.imported_count,
                        "filtered": imported.filtered_count, "rejected": imported.rejected_count,
                        "audit_issues": len(imported.issues)}
             storage.apply_operation(operation["operation_id"], imported.rows, summary)
@@ -297,8 +331,25 @@ def run_prisma_import_workflow(
             if already_accepted else
             "The PRISMA source was validated, confirmed in EUR, published, and accepted."
         )
+        current_stats = (
+            {
+                "processed": imported.imported_count,
+                "inserted": 0,
+                "updated": 0,
+                "unchanged": imported.imported_count,
+                "filtered": imported.filtered_count,
+                "rejected": imported.rejected_count,
+                "audit_issue_count": len(imported.issues),
+            }
+            if already_accepted else
+            {}
+        )
         return _result_from_operation(
-            final, publication.output_path, status, message, tuple(imported.issues)
+            final, publication.output_path, status, message, tuple(imported.issues),
+            **current_stats,
+            total_source_rows=imported.total_source_rows,
+            accepted=imported.imported_count,
+            deduplicated=publication.deduplicated_row_count,
         )
     except (AuctionStorageError, sqlite3.Error, OSError) as exc:
         raise PrismaWorkflowError(str(exc)) from exc

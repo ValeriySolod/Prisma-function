@@ -659,6 +659,107 @@ def test_commit_primary_survives_rollback_close_and_broken_add_note(
         ).fetchone()[0] == 0
 
 
+def test_source_operations_allow_multiple_distinct_sources_for_same_date(tmp_path):
+    storage = AuctionStorage(tmp_path / "test.db")
+
+    first = storage.begin_operation("2025-01-01", "first.csv", "a" * 64)
+    second = storage.begin_operation("2025-01-01", "second.csv", "b" * 64)
+    repeated = storage.begin_operation("2025-01-01", "first.csv", "a" * 64)
+
+    assert first["operation_id"] != second["operation_id"]
+    assert repeated["operation_id"] == first["operation_id"]
+    assert sorted(
+        (row["source_date"], row["source_name"], row["sha256"])
+        for row in storage.operations()
+    ) == [
+        ("2025-01-01", "first.csv", "a" * 64),
+        ("2025-01-01", "second.csv", "b" * 64),
+    ]
+
+
+def test_source_operations_schema_migrates_legacy_unique_source_date(tmp_path):
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE prisma_source_operations (
+                operation_id TEXT PRIMARY KEY,
+                source_date TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+                summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_date)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status) "
+            "VALUES ('legacy', '2025-01-01', 'legacy.csv', ?, 'accepted')",
+            ("a" * 64,),
+        )
+
+    storage = AuctionStorage(database)
+    added = storage.begin_operation("2025-01-01", "new.csv", "b" * 64)
+
+    assert added["source_name"] == "new.csv"
+    assert sorted(
+        (row["source_name"], row["sha256"])
+        for row in storage.operations()
+    ) == [
+        ("legacy.csv", "a" * 64),
+        ("new.csv", "b" * 64),
+    ]
+
+
+def test_source_operations_schema_migrates_legacy_unique_source_date_and_sha256(tmp_path):
+    """A database created under an earlier, independent fix for the same
+    real-Windows regression used `UNIQUE(source_date, sha256)` instead of
+    this correction's `UNIQUE(sha256)`-only identity; that shape must also
+    migrate (structural `_indexes()` detection, not a stored-SQL-text
+    match), not merely be treated as already-current."""
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE prisma_source_operations (
+                operation_id TEXT PRIMARY KEY,
+                source_date TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+                summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_date, sha256)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status) "
+            "VALUES ('legacy', '2025-01-01', 'legacy.csv', ?, 'accepted')",
+            ("a" * 64,),
+        )
+
+    storage = AuctionStorage(database)
+    first = storage.begin_operation("2025-01-01", "first.csv", "b" * 64)
+    second = storage.begin_operation("2025-01-01", "second.csv", "c" * 64)
+
+    assert first["operation_id"] != second["operation_id"]
+    assert sorted(
+        (row["source_name"], row["sha256"])
+        for row in storage.operations()
+    ) == [
+        ("first.csv", "b" * 64),
+        ("legacy.csv", "a" * 64),
+        ("second.csv", "c" * 64),
+    ]
+
+
 def test_begin_immediate_prevents_concurrent_lost_update(tmp_path, monkeypatch):
     storage = AuctionStorage(tmp_path / "test.db")
     storage.upsert([historical_row()])

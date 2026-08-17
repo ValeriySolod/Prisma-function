@@ -240,6 +240,7 @@ class PrismaPublicationResult:
     import_result: PrismaImportResult | None = None
     price_normalization: PriceNormalizationResult | None = None
     appended_row_count: int = 0
+    deduplicated_row_count: int = 0
     total_row_count: int | None = None
     error: str | None = None
 
@@ -512,6 +513,7 @@ def publish_cumulative_output(
     new_rows: list[tuple[str, ...]] = []
     new_keys: list[tuple[str, str, str]] = []
     seen_keys_in_import: set[tuple[str, str, str]] = set()
+    deduplicated_row_count = 0
     for index, row in enumerate(import_result.rows):
         # P.40 composite key: Auction ID + Network Point Name + Capacity
         # Type is the sole persistent row identity — never full-row content.
@@ -526,6 +528,7 @@ def publish_cumulative_output(
         # key is the only identity that matters.
         key = (row["auction_id"], row["network_point"], row["direction"])
         if key in blocking_keys or key in seen_keys_in_import:
+            deduplicated_row_count += 1
             continue
         seen_keys_in_import.add(key)
 
@@ -542,6 +545,7 @@ def publish_cumulative_output(
             import_result=import_result,
             price_normalization=normalization,
             appended_row_count=0,
+            deduplicated_row_count=deduplicated_row_count,
             total_row_count=len(existing_rows),
         )
 
@@ -580,5 +584,6 @@ def publish_cumulative_output(
         import_result=import_result,
         price_normalization=normalization,
         appended_row_count=len(new_rows),
+        deduplicated_row_count=deduplicated_row_count,
         total_row_count=len(all_rows),
     )

@@ -1,43 +1,47 @@
 # PrismaFunction v1.0.0 release-readiness checklist
 
-Repository-side metadata, scripts, tests, and documentation are complete.
-Complete and record the following manual checks before tagging or publishing.
+## Source validation
 
-## Source and automated validation
-
-- [ ] Confirm the working tree is clean before the release build.
+- [ ] Confirm the release commit is on main and the working tree is clean.
 - [ ] Run the full pytest suite successfully.
-- [ ] Run the documented Python compile checks successfully.
-- [ ] Run `git diff --check` successfully before merge.
+- [ ] Run the documented Python compilation check successfully.
+- [ ] Run git diff --check successfully.
+- [ ] Build and validate the PyInstaller package.
 
-## Windows package validation
+## Windows application acceptance
 
-- [ ] Run `build.bat` and confirm the PyInstaller build succeeds.
-- [ ] Launch `dist\PrismaFunction\PrismaFunction.exe` without a console window.
-- [ ] Confirm the title displays `PRISMA Monitor v1.0.0`.
-- [ ] Select a locally downloaded official PRISMA Export CSV and confirm it is validated
-      against the official PRISMA export contract.
-- [ ] Confirm the accepted CSV is transformed and published as the exact 12-column output
-      contract, and that the mapping presentation shows only the approved columns.
-- [ ] Confirm the application never opens, controls, or downloads anything from the PRISMA
-      website (no browser window is launched).
-- [ ] Confirm a runtime log is created in the documented runtime log location.
+- [ ] Launch the packaged PrismaFunction.exe without a console window.
+- [ ] Confirm Prisma Function never opens or controls the PRISMA website.
+- [ ] Select a valid Windows-1252 official PRISMA Export CSV.
+- [ ] Confirm the complete file is processed to EOF without a 5,000-row application limit.
+- [ ] Validate a representative CSV containing more than 5,000 rows.
+- [ ] Select two distinct CSV files for the same date and confirm both are accepted.
+- [ ] Re-import an identical CSV and confirm no duplicate Mapping rows are created.
+- [ ] Import a partially overlapping CSV and confirm only new distinct rows are added.
+- [ ] Confirm only rows meeting the normalized 1 MWh threshold are retained.
+- [ ] Confirm Mapping contains exactly the authoritative 12 columns.
+- [ ] Confirm all cumulative accepted rows remain visible after restart.
+- [ ] Confirm vertical and horizontal Mapping scrolling works with a large dataset.
+- [ ] Confirm Tariff Price and Premium Price are EUR/MWh/h.
+- [ ] Validate a non-EUR row, mixed-currency bundle, ECB cache reuse, and prior-reference-date fallback.
+- [ ] Validate CET/CEST output, including DST boundary behavior.
+- [ ] Confirm published output is UTF-8, semicolon-delimited, and contains exactly the same ordered 12 columns.
+- [ ] Confirm runtime data is written only under %LOCALAPPDATA%\PrismaFunction\.
+- [ ] Confirm user-facing output is written only to the approved Documents directory.
+- [ ] Confirm retry and application shutdown do not hang or leave a worker active.
 
 ## Archive and clean-PC validation
 
-- [ ] Run `release.bat` and inspect the ZIP contents.
-- [ ] Confirm `PrismaFunction\` is the only top-level archive directory.
-- [ ] Confirm the archive contains `PrismaFunction\PrismaFunction.exe`.
-- [ ] Confirm no caches, temporary files, logs, CSV data, virtual environments,
-      development-only files, or generated local output are present.
-- [ ] Verify the ZIP against its SHA-256 checksum using `BUILDING.md`.
-- [ ] Copy the verified package to a second 64-bit Windows PC and repeat launch,
-      CSV selection, processing, result, and logging checks.
+- [ ] Run release.bat and inspect the ZIP contents.
+- [ ] Confirm PrismaFunction is the only top-level archive directory.
+- [ ] Confirm the archive contains PrismaFunction.exe.
+- [ ] Confirm no caches, temporary files, logs, CSV data, virtual environments, local databases, or generated output are present.
+- [ ] Verify the ZIP against its SHA-256 checksum using BUILDING.md.
+- [ ] Repeat launch, CSV processing, persistence, Mapping, output, and logging checks on a second 64-bit Windows PC.
 
-## Manual post-merge publication
+## Publication
 
-- [ ] Merge the approved P.30 change to `main`.
-- [ ] Create the `v1.0.0` Git tag from the intended `main` commit and push it.
-- [ ] Create the GitHub Release, attach the ZIP and checksum, and use
-      `RELEASE_NOTES_v1.0.0.md` as the release notes.
-- [ ] Download the published artifacts and verify the checksum once more.
+- [ ] Create the intended version tag from the approved main commit.
+- [ ] Push the tag.
+- [ ] Create the GitHub Release and attach the verified ZIP and checksum.
+- [ ] Download the published artifacts and verify the checksum again.
