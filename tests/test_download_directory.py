@@ -3,13 +3,13 @@ from types import SimpleNamespace
 
 import pytest
 
-import download_directory as download_directory_module
-from download_directory import (
+import prisma_function.download_directory as download_directory_module
+from prisma_function.download_directory import (
     DownloadDirectoryError,
     default_download_directory,
     validate_download_directory,
 )
-from runtime_paths import runtime_paths
+from prisma_function.runtime_paths import runtime_paths
 
 
 class RegistryKey:

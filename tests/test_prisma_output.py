@@ -7,10 +7,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from csv_contracts import PRISMA_EXPORT_COLUMNS
-from download_directory import DownloadDirectoryError
-from ecb_rates import EcbRateNotFoundError
-from prisma_output import (
+from prisma_function.csv_contracts import PRISMA_EXPORT_COLUMNS
+from prisma_function.download_directory import DownloadDirectoryError
+from prisma_function.ecb_rates import EcbRateNotFoundError
+from prisma_function.prisma_output import (
     OUTPUT_CSV_COLUMNS,
     PrismaOutputOutcome,
     build_output_filename,
@@ -18,15 +18,15 @@ from prisma_output import (
     transform_row,
     write_prisma_output,
 )
-from prisma_references import (
+from prisma_function.prisma_references import (
     PrismaReference,
     PrismaReferenceCatalog,
     ReferenceAlias,
     ReferenceClassification,
     ReferenceSide,
 )
-from price_normalization import NormalizedPrice
-from storage import AuctionStorage
+from prisma_function.price_normalization import NormalizedPrice
+from prisma_function.storage import AuctionStorage
 
 BASE = {
     "Auction ID": "000123456789012345", "Start of Auction": "01.01.2025 09:00",
@@ -371,7 +371,7 @@ def test_non_writable_output_directory_is_rejected(tmp_path: Path, monkeypatch: 
             return False
         return real_access(path, mode)
 
-    monkeypatch.setattr("prisma_output.os.access", fake_access)
+    monkeypatch.setattr("prisma_function.prisma_output.os.access", fake_access)
     result = _output(source, out_dir, tmp_path)
     assert result.outcome is PrismaOutputOutcome.INVALID_OUTPUT_DIRECTORY
     assert list(out_dir.iterdir()) == []
@@ -441,7 +441,7 @@ def test_reservation_failure_returns_write_failed_with_the_completed_import_resu
     def failing_reserve(*_args, **_kwargs):
         raise OSError("simulated reservation failure")
 
-    monkeypatch.setattr("prisma_output.reserve_unique_download_path", failing_reserve)
+    monkeypatch.setattr("prisma_function.prisma_output.reserve_unique_download_path", failing_reserve)
     result = _output(source, out_dir, tmp_path)
 
     assert result.outcome is PrismaOutputOutcome.WRITE_FAILED
@@ -470,7 +470,7 @@ def test_write_failure_leaves_no_partial_final_output_and_cleans_temp_files(
     def failing_replace(*_args, **_kwargs):
         raise OSError("simulated disk failure")
 
-    monkeypatch.setattr("prisma_output.os.replace", failing_replace)
+    monkeypatch.setattr("prisma_function.prisma_output.os.replace", failing_replace)
     result = _output(source, out_dir, tmp_path)
 
     assert result.outcome is PrismaOutputOutcome.WRITE_FAILED

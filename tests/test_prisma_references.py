@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from csv_contracts import PRISMA_EXPORT_COLUMNS
-from prisma_references import (
+from prisma_function.csv_contracts import PRISMA_EXPORT_COLUMNS
+from prisma_function.prisma_references import (
     DEFAULT_PRISMA_REFERENCES,
     PrismaReference,
     PrismaReferenceCatalog,
@@ -15,7 +15,7 @@ from prisma_references import (
     ReferenceClassification,
     ReferenceSide,
 )
-from processor import (
+from prisma_function.processor import (
     MIN_MARKETED_CAPACITY_KWH_H,
     PrismaEnrichmentReasonCode,
     PrismaImportStatus,

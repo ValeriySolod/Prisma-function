@@ -4,7 +4,7 @@ import csv
 
 import pytest
 
-from csv_contracts import (
+from prisma_function.csv_contracts import (
     MONITORING_CSV_COLUMNS,
     PRISMA_EXPORT_COLUMNS,
     CsvFormat,

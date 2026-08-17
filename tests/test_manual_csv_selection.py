@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-import manual_csv_selection as manual_csv_selection_module
-from csv_contracts import PRISMA_EXPORT_COLUMNS
-from manual_csv_selection import (
+import prisma_function.manual_csv_selection as manual_csv_selection_module
+from prisma_function.csv_contracts import PRISMA_EXPORT_COLUMNS
+from prisma_function.manual_csv_selection import (
     ManualCsvOutcome,
     ManualCsvSelection,
     describe_rejection,

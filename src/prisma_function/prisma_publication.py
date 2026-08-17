@@ -148,17 +148,17 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from download_directory import DownloadDirectoryError, validate_download_directory
-from ecb_rates import EcbRateSource
-from price_normalization import (
+from prisma_function.download_directory import DownloadDirectoryError, validate_download_directory
+from prisma_function.ecb_rates import EcbRateSource
+from prisma_function.price_normalization import (
     PriceNormalizationResult,
     compute_batch_binding,
     describe_price_normalization_failure,
     normalize_prices_for_output,
 )
-from processor import PrismaImportResult
-from prisma_output import OUTPUT_CSV_COLUMNS, transform_row
-from storage import AuctionStorage, AuctionStorageError
+from prisma_function.processor import PrismaImportResult
+from prisma_function.prisma_output import OUTPUT_CSV_COLUMNS, transform_row
+from prisma_function.storage import AuctionStorage, AuctionStorageError
 
 __all__ = [
     "LEGACY_PUBLISHED_OUTPUT_FILENAME",

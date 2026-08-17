@@ -49,19 +49,19 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from csv_contracts import CsvFormatError
-from download_directory import DownloadDirectoryError, validate_download_directory
-from ecb_rates import EcbRateSource
-from price_normalization import (
+from prisma_function.csv_contracts import CsvFormatError
+from prisma_function.download_directory import DownloadDirectoryError, validate_download_directory
+from prisma_function.ecb_rates import EcbRateSource
+from prisma_function.price_normalization import (
     NormalizedPrice,
     PriceNormalizationResult,
     describe_price_normalization_failure,
     format_price,
     normalize_prices_for_output,
 )
-from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
-from processor import PrismaImportError, PrismaImportResult, import_prisma_export
-from storage import AuctionStorage
+from prisma_function.prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
+from prisma_function.processor import PrismaImportError, PrismaImportResult, import_prisma_export
+from prisma_function.storage import AuctionStorage
 
 __all__ = [
     "OUTPUT_CSV_COLUMNS",

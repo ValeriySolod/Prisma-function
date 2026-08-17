@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from csv_contracts import PRISMA_EXPORT_COLUMNS
+from prisma_function.csv_contracts import PRISMA_EXPORT_COLUMNS
 
 __all__ = [
     "ManualCsvOutcome",

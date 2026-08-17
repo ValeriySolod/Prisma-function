@@ -7,6 +7,6 @@ data/result/*.xlsx
 dist/
 build/
 release/
-installer/
+*.egg-info/
 
 .pytest_tmp/

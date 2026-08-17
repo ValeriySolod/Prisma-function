@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from prisma_datetime import (
+from prisma_function.prisma_datetime import (
     PRISMA_LOCAL_TIMEZONE,
     PrismaLocalTimestampAmbiguousError,
     PrismaLocalTimestampFormatError,

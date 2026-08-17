@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from prisma_output import OUTPUT_CSV_COLUMNS
+from prisma_function.prisma_output import OUTPUT_CSV_COLUMNS
 
 __all__ = [
     "MAPPING_DISPLAY_FIELDS",

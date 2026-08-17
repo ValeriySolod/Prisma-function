@@ -27,20 +27,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from csv_contracts import CsvFormatError
-from download_directory import default_download_directory, validate_download_directory
-from manual_csv_selection import ManualCsvSelection, describe_rejection
-from mapping_presentation import load_mapping_rows_from_output_csv
-from prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
-from processor import PrismaImportError, import_prisma_export
-from runtime_logging import (
+from prisma_function.csv_contracts import CsvFormatError
+from prisma_function.download_directory import default_download_directory, validate_download_directory
+from prisma_function.manual_csv_selection import ManualCsvSelection, describe_rejection
+from prisma_function.mapping_presentation import load_mapping_rows_from_output_csv
+from prisma_function.prisma_import_workflow import PrismaWorkflowResult, run_prisma_import_workflow
+from prisma_function.processor import PrismaImportError, import_prisma_export
+from prisma_function.runtime_logging import (
     LOGGER_NAME,
     initialize_runtime_logging,
     safe_log,
 )
-from runtime_paths import RuntimePathError, RuntimePaths, migrate_legacy_runtime_data, runtime_paths
-from ui_components import APP_STYLE, MappingTableModel
-from version import APP_DISPLAY_NAME, __version__
+from prisma_function.runtime_paths import RuntimePathError, RuntimePaths, migrate_legacy_runtime_data, runtime_paths
+from prisma_function.ui_components import APP_STYLE, MappingTableModel
+from prisma_function.version import APP_DISPLAY_NAME, __version__
 
 # Sensible initial pixel widths for the Mapping table, one per
 # `mapping_presentation.MAPPING_DISPLAY_FIELDS` column in the same order, wide

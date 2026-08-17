@@ -12,16 +12,16 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QWidget
 
-import app
-import prisma_output
-import prisma_publication
-from csv_contracts import PRISMA_EXPORT_COLUMNS
-from mapping_presentation import MAPPING_DISPLAY_FIELDS
-from processor import PrismaImportError
-from prisma_import_workflow import SourceUpdateStatus
-from storage import AuctionStorage, RateResolutionRecord
-from version import APP_DISPLAY_NAME, __version__
-from ui_components import APP_STYLE
+import prisma_function.app as app
+import prisma_function.prisma_output as prisma_output
+import prisma_function.prisma_publication as prisma_publication
+from prisma_function.csv_contracts import PRISMA_EXPORT_COLUMNS
+from prisma_function.mapping_presentation import MAPPING_DISPLAY_FIELDS
+from prisma_function.processor import PrismaImportError
+from prisma_function.prisma_import_workflow import SourceUpdateStatus
+from prisma_function.storage import AuctionStorage, RateResolutionRecord
+from prisma_function.version import APP_DISPLAY_NAME, __version__
+from prisma_function.ui_components import APP_STYLE
 
 
 @pytest.fixture(scope="session")
@@ -150,7 +150,7 @@ def _seed_ecb_date_rate(
     directly exercises the exact same read path a previously resolved pair
     uses in production, without any network access.
     """
-    from storage import EcbAuctionDateRateRecord
+    from prisma_function.storage import EcbAuctionDateRateRecord
 
     AuctionStorage(widget._runtime_paths.database).save_ecb_auction_date_rate(
         EcbAuctionDateRateRecord(
@@ -169,12 +169,12 @@ def _block_live_ecb_access(monkeypatch) -> None:
     network access, since `app.py`'s real processing call graph never
     injects a fake `ecb_source` of its own.
     """
-    from ecb_rates import EcbRateNotFoundError
+    from prisma_function.ecb_rates import EcbRateNotFoundError
 
     def fail(self, currency, *, on_or_before, timeout_seconds):
         raise EcbRateNotFoundError(f"no rate for {currency} (test double)")
 
-    monkeypatch.setattr("ecb_rates.EcbSdwHttpRateSource.fetch", fail)
+    monkeypatch.setattr("prisma_function.ecb_rates.EcbSdwHttpRateSource.fetch", fail)
 
 
 def test_initial_dashboard_state_and_accessibility(window):
@@ -1168,17 +1168,14 @@ def test_reselecting_the_same_csv_does_not_duplicate_cumulative_rows(window, mon
 
 
 def test_active_modules_are_reachable_from_apps_own_import_graph():
-    """PyInstaller's `Analysis(["app.py"])` bundles exactly the modules
-    reachable through Python's real import graph starting at `app.py`. This
-    file already imports `app` at module load, so if `app.py` ->
+    """This file already imports `app` at module load, so if `app.py` ->
     `prisma_import_workflow.py` -> `prisma_publication.py`/
     `price_normalization.py` (which in turn imports `prisma_output.py`) is a
     real, live import chain, every one of these names is already in
-    `sys.modules` by the time this test runs — proving the packaged
-    executable will include them without requiring a full PyInstaller build
-    just to check this."""
+    `sys.modules` by the time this test runs, proving the import graph
+    starting at `app.py` really reaches each of them."""
     import sys
 
     for name in ("prisma_import_workflow", "prisma_publication", "price_normalization", "prisma_output"):
-        assert name in sys.modules, f"{name} is not reachable from app.py's import graph"
-    assert app.run_prisma_import_workflow.__module__ == "prisma_import_workflow"
+        assert f"prisma_function.{name}" in sys.modules, f"{name} is not reachable from app.py's import graph"
+    assert app.run_prisma_import_workflow.__module__ == "prisma_function.prisma_import_workflow"

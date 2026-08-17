@@ -1,6 +1,6 @@
 # Prisma-function roadmap
 
-This file contains only the current product direction and active work. Historical implementation records are preserved in CHANGELOG.md.
+This file contains only the current product direction and active work. Historical implementation records are preserved in `docs/CHANGELOG.md`.
 
 ## Current authoritative workflow
 

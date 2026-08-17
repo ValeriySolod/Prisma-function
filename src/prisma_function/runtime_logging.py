@@ -6,7 +6,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from runtime_paths import LOG_FILENAME, runtime_paths
+from prisma_function.runtime_paths import LOG_FILENAME, runtime_paths
 
 
 LOGGER_NAME = "prisma_function"
