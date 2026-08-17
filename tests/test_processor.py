@@ -7,14 +7,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvFormatError
-from processor import (
+from prisma_function.csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvFormatError
+from prisma_function.processor import (
     PrismaImportError,
     PrismaImportStatus,
     import_prisma_export,
     process_csv,
 )
-from prisma_references import (
+from prisma_function.prisma_references import (
     PrismaReference,
     PrismaReferenceCatalog,
     ReferenceAlias,

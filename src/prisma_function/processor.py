@@ -9,8 +9,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from csv_contracts import CsvFormat, PRISMA_EXPORT_COLUMNS, require_csv_format
-from prisma_datetime import (
+from prisma_function.csv_contracts import CsvFormat, PRISMA_EXPORT_COLUMNS, require_csv_format
+from prisma_function.prisma_datetime import (
     PrismaLocalTimestampAmbiguousError,
     PrismaLocalTimestampFormatError,
     PrismaLocalTimestampNonexistentError,
@@ -20,7 +20,7 @@ from prisma_datetime import (
     local_wall_clock_hours,
     parse_prisma_local_timestamp,
 )
-from prisma_references import (
+from prisma_function.prisma_references import (
     DEFAULT_PRISMA_REFERENCES,
     PrismaReferenceCatalog,
     ReferenceClassification,

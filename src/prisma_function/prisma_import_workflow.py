@@ -76,17 +76,17 @@ from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
-from csv_contracts import CsvFormat, detect_csv_format
-from ecb_rates import EcbRateSource
-from price_normalization import (
+from prisma_function.csv_contracts import CsvFormat, detect_csv_format
+from prisma_function.ecb_rates import EcbRateSource
+from prisma_function.price_normalization import (
     PriceNormalizationResult,
     describe_price_normalization_failure,
     normalize_prices_for_output,
 )
-from prisma_publication import describe_publication_failure, publish_cumulative_output
-from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
-from processor import PrismaImportIssue, import_prisma_export
-from storage import AuctionStorage, AuctionStorageError
+from prisma_function.prisma_publication import describe_publication_failure, publish_cumulative_output
+from prisma_function.prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
+from prisma_function.processor import PrismaImportIssue, import_prisma_export
+from prisma_function.storage import AuctionStorage, AuctionStorageError
 
 __all__ = [
     "PrismaWorkflowError",

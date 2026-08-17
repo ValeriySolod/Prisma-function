@@ -297,8 +297,8 @@ def _storage_catalog_entries() -> tuple[PrismaReference, ...]:
     )
 
 
-# Market aliases are the exact side-specific network-point mappings checked into
-# mapping.csv or accepted through an authoritative evidence manifest.
+# Market aliases are the exact side-specific network-point mappings accepted
+# through an authoritative evidence manifest.
 # Storage aliases are the exact side-specific network-point names explicitly
 # classified as RESERVOIR in the checked-in Auction_overview.csv export. Add
 # entries only from confirmed source data; the constructor rejects every

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from ecb_rates import (
+from prisma_function.ecb_rates import (
     EUR,
     EcbRateError,
     EcbRateNotFoundError,
@@ -127,7 +127,7 @@ def test_explicit_timeout_is_forwarded_to_source() -> None:
 
 
 def test_csv_parsing_ignores_empty_result_as_not_found() -> None:
-    from ecb_rates import _parse_csv_observation
+    from prisma_function.ecb_rates import _parse_csv_observation
 
     header_only = (
         "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\n"
@@ -136,7 +136,7 @@ def test_csv_parsing_ignores_empty_result_as_not_found() -> None:
 
 
 def test_csv_parsing_extracts_last_row() -> None:
-    from ecb_rates import _parse_csv_observation
+    from prisma_function.ecb_rates import _parse_csv_observation
 
     payload = (
         "KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE\n"
@@ -147,14 +147,14 @@ def test_csv_parsing_extracts_last_row() -> None:
 
 
 def test_csv_parsing_rejects_missing_columns() -> None:
-    from ecb_rates import _parse_csv_observation
+    from prisma_function.ecb_rates import _parse_csv_observation
 
     with pytest.raises(EcbRateSourceError, match="required"):
         _parse_csv_observation("A,B\n1,2\n")
 
 
 def test_csv_parsing_rejects_malformed_date() -> None:
-    from ecb_rates import _parse_csv_observation
+    from prisma_function.ecb_rates import _parse_csv_observation
 
     payload = "TIME_PERIOD,OBS_VALUE\nnot-a-date,1.09\n"
     with pytest.raises(EcbRateSourceError, match="publication date"):
@@ -162,7 +162,7 @@ def test_csv_parsing_rejects_malformed_date() -> None:
 
 
 def test_csv_parsing_rejects_non_numeric_rate() -> None:
-    from ecb_rates import _parse_csv_observation
+    from prisma_function.ecb_rates import _parse_csv_observation
 
     payload = "TIME_PERIOD,OBS_VALUE\n2026-08-03,not-a-number\n"
     with pytest.raises(EcbRateSourceError, match="non-numeric"):
@@ -175,7 +175,7 @@ def test_no_unit_test_performs_real_network_access() -> None:
     injects FakeSource. This test documents that contract for future readers."""
     import inspect
 
-    import ecb_rates
+    import prisma_function.ecb_rates as ecb_rates
 
     source = inspect.signature(ecb_rates.resolve_rate_to_eur).parameters["source"]
     assert source.default is None

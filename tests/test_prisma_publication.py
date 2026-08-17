@@ -7,26 +7,26 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from csv_contracts import PRISMA_EXPORT_COLUMNS
-from download_directory import DownloadDirectoryError
-from prisma_references import (
+from prisma_function.csv_contracts import PRISMA_EXPORT_COLUMNS
+from prisma_function.download_directory import DownloadDirectoryError
+from prisma_function.prisma_references import (
     PrismaReference,
     PrismaReferenceCatalog,
     ReferenceAlias,
     ReferenceClassification,
     ReferenceSide,
 )
-from price_normalization import normalize_prices_for_output
-from processor import PrismaImportResult, import_prisma_export
-from prisma_output import OUTPUT_CSV_COLUMNS
-from prisma_publication import (
+from prisma_function.price_normalization import normalize_prices_for_output
+from prisma_function.processor import PrismaImportResult, import_prisma_export
+from prisma_function.prisma_output import OUTPUT_CSV_COLUMNS
+from prisma_function.prisma_publication import (
     LEGACY_PUBLISHED_OUTPUT_FILENAME,
     PUBLISHED_OUTPUT_FILENAME,
     PrismaPublicationOutcome,
     describe_publication_failure,
     publish_cumulative_output,
 )
-from storage import AuctionStorage
+from prisma_function.storage import AuctionStorage
 
 BASE = {
     "Auction ID": "000123456789012345", "Start of Auction": "01.01.2025 09:00",
@@ -646,7 +646,7 @@ def test_reservation_or_staging_failure_preserves_prior_file_and_import_result(
     def failing_mkstemp(*_args, **_kwargs):
         raise OSError("simulated reservation failure")
 
-    monkeypatch.setattr("prisma_publication.tempfile.mkstemp", failing_mkstemp)
+    monkeypatch.setattr("prisma_function.prisma_publication.tempfile.mkstemp", failing_mkstemp)
     mixed_import = import_result_for(tmp_path, _MIXED_OUTCOME_ROWS, name="other.csv")
     result = _publish(mixed_import, out_dir, tmp_path, storage=storage)
 
@@ -682,7 +682,7 @@ def test_replace_failure_preserves_prior_file_and_cleans_staging_artifact(
     def failing_replace(*_args, **_kwargs):
         raise OSError("simulated disk failure")
 
-    monkeypatch.setattr("prisma_publication.os.replace", failing_replace)
+    monkeypatch.setattr("prisma_function.prisma_publication.os.replace", failing_replace)
     other = {**BASE, "Marketed Capacity": "5000"}
     result = _publish(
         import_result_for(tmp_path, [other], name="other.csv"), out_dir, tmp_path, storage=storage,
@@ -729,7 +729,7 @@ def test_write_failure_mid_stream_cleans_staged_file_and_preserves_prior_file(
     def failing_writer_factory(*args, **kwargs):
         return _FailingWriter(original_writer(*args, **kwargs))
 
-    monkeypatch.setattr("prisma_publication.csv.writer", failing_writer_factory)
+    monkeypatch.setattr("prisma_function.prisma_publication.csv.writer", failing_writer_factory)
     result = _publish(other_import, out_dir, tmp_path, storage=storage)
 
     assert result.outcome is PrismaPublicationOutcome.WRITE_FAILED
@@ -747,7 +747,7 @@ def test_first_publication_write_failure_leaves_no_file_at_all(
     def failing_replace(*_args, **_kwargs):
         raise OSError("simulated disk failure")
 
-    monkeypatch.setattr("prisma_publication.os.replace", failing_replace)
+    monkeypatch.setattr("prisma_function.prisma_publication.os.replace", failing_replace)
     result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
 
     assert result.outcome is PrismaPublicationOutcome.WRITE_FAILED
@@ -854,7 +854,7 @@ def test_non_writable_publication_directory_is_rejected(
             return False
         return real_access(path, mode)
 
-    monkeypatch.setattr("prisma_publication.os.access", fake_access)
+    monkeypatch.setattr("prisma_function.prisma_publication.os.access", fake_access)
     result = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path)
     assert result.outcome is PrismaPublicationOutcome.INVALID_PUBLICATION_DIRECTORY
     assert list(out_dir.iterdir()) == []
@@ -873,7 +873,7 @@ def test_describe_publication_failure_returns_stable_messages() -> None:
 def test_unresolved_ecb_rate_blocks_publication_and_leaves_existing_file_untouched(
     tmp_path: Path,
 ) -> None:
-    from ecb_rates import EcbRateNotFoundError
+    from prisma_function.ecb_rates import EcbRateNotFoundError
 
     class UnavailableEcbSource:
         def fetch(self, currency, *, on_or_before, timeout_seconds):
@@ -945,7 +945,7 @@ def test_precomputed_normalization_is_reused_without_a_second_normalization_pass
             "precomputed result is supplied."
         )
 
-    monkeypatch.setattr("prisma_publication.normalize_prices_for_output", fail_if_called)
+    monkeypatch.setattr("prisma_function.prisma_publication.normalize_prices_for_output", fail_if_called)
     result = publish_cumulative_output(
         import_result, out_dir, storage=storage,        precomputed_normalization=normalization,
     )
@@ -978,7 +978,7 @@ def test_mismatched_precomputed_normalization_is_rejected(tmp_path: Path) -> Non
 def test_blocked_precomputed_normalization_is_honored_without_a_second_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ecb_rates import EcbRateNotFoundError
+    from prisma_function.ecb_rates import EcbRateNotFoundError
 
     class UnavailableEcbSource:
         def fetch(self, currency, *, on_or_before, timeout_seconds):
@@ -1000,7 +1000,7 @@ def test_blocked_precomputed_normalization_is_honored_without_a_second_pass(
     def fail_if_called(*_a, **_k):
         pytest.fail("normalize_prices_for_output must not run again for a precomputed BLOCKED result.")
 
-    monkeypatch.setattr("prisma_publication.normalize_prices_for_output", fail_if_called)
+    monkeypatch.setattr("prisma_function.prisma_publication.normalize_prices_for_output", fail_if_called)
     result = publish_cumulative_output(
         blocked_import_result, out_dir, storage=storage,
         ecb_source=UnavailableEcbSource(), precomputed_normalization=blocked,
@@ -1145,7 +1145,7 @@ def test_precomputed_normalization_for_the_exact_original_batch_is_still_reused(
             "original batch."
         )
 
-    monkeypatch.setattr("prisma_publication.normalize_prices_for_output", fail_if_called)
+    monkeypatch.setattr("prisma_function.prisma_publication.normalize_prices_for_output", fail_if_called)
     result = publish_cumulative_output(
         import_result, out_dir, storage=storage,        precomputed_normalization=normalization,
     )

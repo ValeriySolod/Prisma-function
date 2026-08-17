@@ -1,8 +1,8 @@
 import logging
 from pathlib import Path
 
-import runtime_logging
-import runtime_paths
+import prisma_function.runtime_logging as runtime_logging
+import prisma_function.runtime_paths as runtime_paths
 
 
 def reset_logger():

@@ -57,4 +57,4 @@ The published file is UTF-8 and semicolon-delimited. Decimal values use a dot.
 - Prices are normalized to EUR/MWh/h using the calendar date from Start of Auction and official ECB reference rates.
 - Market/storage resolution uses exact, side-specific, Auction-ID-linked approved evidence only.
 
-See AGENTS.md for repository rules, ROADMAP.md for active work, and CHANGELOG.md for historical implementation records.
+See CLAUDE.md for repository rules, ROADMAP.md for active work, and docs/CHANGELOG.md for historical implementation records.

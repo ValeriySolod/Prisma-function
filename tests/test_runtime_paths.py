@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import Mock
 
-import runtime_paths
+import prisma_function.runtime_paths as runtime_paths
 
 
 @pytest.fixture

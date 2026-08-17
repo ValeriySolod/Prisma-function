@@ -5,8 +5,8 @@ from decimal import Decimal
 
 import pytest
 
-from ecb_rates import EcbRateNotFoundError, EcbRateObservation, EcbRateSourceError
-from price_normalization import (
+from prisma_function.ecb_rates import EcbRateNotFoundError, EcbRateObservation, EcbRateSourceError
+from prisma_function.price_normalization import (
     PRICE_DECIMAL_PLACES,
     EcbDateRateResolution,
     EcbRateResolutionOutcome,
@@ -17,7 +17,7 @@ from price_normalization import (
     normalize_prices_for_output,
     resolve_ecb_rates_for_rows,
 )
-from storage import AuctionStorage, EcbAuctionDateRateConflictError
+from prisma_function.storage import AuctionStorage, EcbAuctionDateRateConflictError
 
 
 class FakeEcbSource:

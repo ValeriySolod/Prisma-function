@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mapping_presentation import (
+from prisma_function.mapping_presentation import (
     MAPPING_DISPLAY_FIELDS,
     MappingDisplayRow,
     build_mapping_rows_from_output_records,
     load_mapping_rows_from_output_csv,
 )
-from prisma_output import OUTPUT_CSV_COLUMNS
+from prisma_function.prisma_output import OUTPUT_CSV_COLUMNS
 
 
 def _record(**overrides: str) -> dict[str, str]:

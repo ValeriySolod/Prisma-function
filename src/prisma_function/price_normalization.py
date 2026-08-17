@@ -110,8 +110,8 @@ from decimal import Decimal, DecimalException, ROUND_HALF_UP
 from enum import Enum
 from typing import Mapping, Sequence
 
-from ecb_rates import EcbRateNotFoundError, EcbRateSource, EcbRateSourceError, resolve_rate_to_eur
-from storage import AuctionStorage, EcbAuctionDateRateConflictError, EcbAuctionDateRateRecord
+from prisma_function.ecb_rates import EcbRateNotFoundError, EcbRateSource, EcbRateSourceError, resolve_rate_to_eur
+from prisma_function.storage import AuctionStorage, EcbAuctionDateRateConflictError, EcbAuctionDateRateRecord
 
 __all__ = [
     "PRICE_DECIMAL_PLACES",

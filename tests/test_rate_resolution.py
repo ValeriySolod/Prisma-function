@@ -5,21 +5,21 @@ from decimal import Decimal
 
 import pytest
 
-from ecb_rates import EcbRateNotFoundError, EcbRateObservation
-from prisma_auction_lookup import AuctionEndRecord, PrismaAuctionLookupError
-from prisma_references import (
+from prisma_function.ecb_rates import EcbRateNotFoundError, EcbRateObservation
+from prisma_function.prisma_auction_lookup import AuctionEndRecord, PrismaAuctionLookupError
+from prisma_function.prisma_references import (
     PrismaReference,
     PrismaReferenceCatalog,
     ReferenceAlias,
     ReferenceClassification,
     ReferenceSide,
 )
-from rate_resolution import (
+from prisma_function.rate_resolution import (
     RateResolutionOutcome,
     resolve_auction_rate,
     resolve_rates_for_rows,
 )
-from storage import AuctionStorage, RateResolutionConflictError
+from prisma_function.storage import AuctionStorage, RateResolutionConflictError
 
 
 class FakeAuctionLookup:

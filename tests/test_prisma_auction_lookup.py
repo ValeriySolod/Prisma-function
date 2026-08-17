@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from prisma_auction_lookup import (
+from prisma_function.prisma_auction_lookup import (
     FIELD_AUCTION_END,
     FIELD_AUCTION_ID,
     FIELD_STATE,

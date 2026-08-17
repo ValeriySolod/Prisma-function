@@ -10,21 +10,21 @@ import pandas as pd
 import pytest
 import sqlite3
 
-import prisma_import_workflow as workflow
-import prisma_output
-import prisma_publication
-from csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvDetectionResult, CsvFormat
-from ecb_rates import EcbRateNotFoundError
-from prisma_import_workflow import PrismaWorkflowError, run_prisma_import_workflow
-from prisma_references import (
+import prisma_function.prisma_import_workflow as workflow
+import prisma_function.prisma_output as prisma_output
+import prisma_function.prisma_publication as prisma_publication
+from prisma_function.csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvDetectionResult, CsvFormat
+from prisma_function.ecb_rates import EcbRateNotFoundError
+from prisma_function.prisma_import_workflow import PrismaWorkflowError, run_prisma_import_workflow
+from prisma_function.prisma_references import (
     PrismaReference,
     PrismaReferenceCatalog,
     ReferenceAlias,
     ReferenceClassification,
     ReferenceSide,
 )
-from processor import import_prisma_export
-from storage import AuctionStorage, AuctionStorageError
+from prisma_function.processor import import_prisma_export
+from prisma_function.storage import AuctionStorage, AuctionStorageError
 
 
 BASE = {
@@ -501,7 +501,7 @@ def test_mixed_resolved_and_unresolved_batch_publishes_nothing(tmp_path):
 def test_retry_succeeds_once_the_ecb_rate_becomes_available(tmp_path):
     from decimal import Decimal
 
-    from ecb_rates import EcbRateObservation
+    from prisma_function.ecb_rates import EcbRateObservation
 
     source = write_export(tmp_path / "source.csv", [_unresolved_entry_tariff_row()])
     with pytest.raises(workflow.PrismaPriceNormalizationError):
@@ -525,7 +525,7 @@ def test_price_normalization_runs_exactly_once_per_processing_operation(tmp_path
     (`publish_cumulative_output(..., precomputed_normalization=...)`), never
     call `price_normalization.normalize_prices_for_output` a second time for
     the same batch."""
-    import price_normalization
+    import prisma_function.price_normalization as price_normalization
 
     calls: list[int] = []
     original = price_normalization.normalize_prices_for_output

@@ -7,7 +7,7 @@ import pytest
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from storage import (
+from prisma_function.storage import (
     AuctionStorage,
     AuctionStorageError,
     EcbAuctionDateRateConflictError,

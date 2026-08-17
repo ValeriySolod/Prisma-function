@@ -7,7 +7,7 @@ from PySide6.QtCore import (
     Qt,
 )
 
-from mapping_presentation import MAPPING_DISPLAY_FIELDS, MappingDisplayRow
+from prisma_function.mapping_presentation import MAPPING_DISPLAY_FIELDS, MappingDisplayRow
 
 
 APP_STYLE = """
