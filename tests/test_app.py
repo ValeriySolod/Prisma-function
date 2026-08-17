@@ -24,6 +24,11 @@ from prisma_function.version import APP_DISPLAY_NAME, __version__
 from prisma_function.ui_components import APP_STYLE
 
 
+# Generous hang backstop for `_close_app`'s worker join — not a "settle
+# quickly" budget, see that function's docstring.
+_WORKER_JOIN_TIMEOUT_S = 30.0
+
+
 @pytest.fixture(scope="session")
 def qt_app() -> QApplication:
     return QApplication.instance() or QApplication([])
@@ -49,18 +54,26 @@ def _close_app(widget) -> None:
     Deleting the widget (and its `WorkerSignals`) while a worker thread is
     still alive races that thread's `processing_finished.emit()`/storage
     calls against the widget's own destruction, which is the Windows access
-    violation this lifecycle fix addresses — so this waits for a genuine
-    `is_alive()` boundary (pumping the event loop so any pending queued
-    signal still gets delivered) instead of a bounded `join(timeout=...)`
-    that could silently give up and let teardown proceed anyway.
+    violation this lifecycle fix addresses. A single bounded `join(timeout=
+    _WORKER_JOIN_TIMEOUT_S)` call per worker blocks without holding the GIL
+    and without polling `QApplication.processEvents()`, so it never contends
+    with the worker thread for the GIL/CPU the way the previous busy loop
+    (interleaving `processEvents()` with short `join(timeout=...)` calls) did
+    on a loaded CI runner — that contention was what let the worker miss a
+    tight deadline. The bound here is generous purely as a hang backstop: a
+    worker that is actually still running finishes almost immediately, so
+    hitting the timeout means something is genuinely stuck, and the
+    subsequent `is_alive()` assertion still fails loudly with a clear message
+    instead of silently proceeding into a teardown race. Only after every
+    worker has actually returned do we drain the event loop once, flushing
+    its now-queued `processing_finished` signal before the widget is
+    destroyed.
     """
     widget._is_closing = True
-    deadline = time.monotonic() + 5.0
     for worker in list(widget._processing_threads):
-        while worker.is_alive() and time.monotonic() < deadline:
-            QApplication.processEvents()
-            worker.join(timeout=0.05)
+        worker.join(timeout=_WORKER_JOIN_TIMEOUT_S)
         assert not worker.is_alive(), "processing worker did not finish before test teardown"
+    QApplication.processEvents()
     widget._processing_threads.clear()
     widget.close()
 
