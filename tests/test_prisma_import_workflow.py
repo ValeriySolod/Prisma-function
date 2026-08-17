@@ -100,7 +100,7 @@ def test_new_repeat_and_next_daily_export_are_cumulative_and_enriched(tmp_path):
     initial = run(first, tmp_path, date(2025, 1, 1))
     assert (initial.processed, initial.inserted, initial.updated, initial.unchanged) == (1, 1, 0, 0)
     repeated = run(first, tmp_path, date(2025, 1, 1))
-    assert repeated.source_status.value == "applied"
+    assert repeated.source_status.value == "unchanged"
     assert repeated.deduplicated == 1
     assert (repeated.inserted, repeated.updated, repeated.unchanged) == (0, 0, 1)
     _, records_after_retry = read_published(tmp_path)
@@ -260,12 +260,13 @@ def test_csv_publication_failure_preserves_previous_bytes_and_retry_recovers(tmp
         tmp_path / "other.csv",
         [{**BASE, "Auction ID": "A-2", "Network Point ID Entry": "E-2", "Marketed Capacity": "2000"}],
     )
+    other_digest = hashlib.sha256(other.read_bytes()).hexdigest()
     with pytest.raises(PrismaWorkflowError):
         run(other, tmp_path, date(2025, 1, 2))
     assert published_path.read_bytes() == previous
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
         assert connection.execute(
-            "SELECT status FROM prisma_source_operations WHERE source_date='2025-01-02'"
+            "SELECT status FROM prisma_source_operations WHERE sha256=?", (other_digest,)
         ).fetchone()[0] == "data_committed"
 
     monkeypatch.setattr(workflow.publish_cumulative_output.__globals__["os"], "replace", real_replace)
@@ -275,21 +276,41 @@ def test_csv_publication_failure_preserves_previous_bytes_and_retry_recovers(tmp
     assert len(records) == 2
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
         assert connection.execute(
-            "SELECT status FROM prisma_source_operations WHERE source_date='2025-01-02'"
+            "SELECT status FROM prisma_source_operations WHERE sha256=?", (other_digest,)
         ).fetchone()[0] == "accepted"
 
 
-def test_different_same_date_source_is_blocked_while_operation_unresolved(tmp_path, monkeypatch):
+def test_different_same_date_source_is_accepted_while_another_operation_is_unresolved(tmp_path, monkeypatch):
+    """P.40 correction regression test: a real-Windows validation failure
+    showed a second, distinct CSV import for a source date that already had
+    an operation in flight was incorrectly rejected ("Accepted sources must
+    have unique source dates in ascending order."). Source-date uniqueness
+    is no longer any part of the ledger's identity (see
+    `prisma_import_workflow`'s module docstring), so a different file for
+    the same date must always be accepted independently, even while an
+    earlier, unrelated operation for that same date is still unresolved."""
     first = write_export(tmp_path / "first.csv", [BASE])
+    original_publish = workflow.publish_cumulative_output
     monkeypatch.setattr(
         workflow, "publish_cumulative_output",
         lambda *_a, **_k: (_ for _ in ()).throw(AuctionStorageError("stage failed")),
     )
     with pytest.raises(PrismaWorkflowError, match="stage failed"):
         run(first, tmp_path, date(2025, 1, 1))
-    changed = write_export(tmp_path / "changed.csv", [{**BASE, "Marketed Capacity": "5000"}])
-    with pytest.raises(PrismaWorkflowError, match="Another PRISMA source operation is unresolved"):
-        run(changed, tmp_path, date(2025, 1, 1))
+    with sqlite3.connect(tmp_path / "auctions.db") as connection:
+        assert connection.execute(
+            "SELECT status FROM prisma_source_operations"
+        ).fetchone()[0] == "data_committed"
+
+    monkeypatch.setattr(workflow, "publish_cumulative_output", original_publish)
+    changed = write_export(
+        tmp_path / "changed.csv",
+        [{**BASE, "Auction ID": "A-9", "Network Point ID Entry": "ENTRY-9", "Marketed Capacity": "5000"}],
+    )
+    result = run(changed, tmp_path, date(2025, 1, 1))
+    assert result.inserted == 1
+    _, records = read_published(tmp_path)
+    assert len(records) == 1
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
@@ -312,7 +333,7 @@ def test_exact_retry_republishes_missing_output_but_detects_corruption(tmp_path,
         return
 
     retried = run(source, tmp_path, date(2025, 1, 1))
-    assert retried.source_status is workflow.SourceUpdateStatus.APPLIED
+    assert retried.source_status is workflow.SourceUpdateStatus.UNCHANGED
     assert initial.inserted == 1
     assert (retried.inserted, retried.unchanged) == (0, 1)
     _, records = read_published(tmp_path)
@@ -413,7 +434,7 @@ def test_legacy_json_migrates_with_unavailable_metadata_and_repairs_output(tmp_p
         "source_date": "2025-01-01", "source_name": source.name, "sha256": digest,
     }]}), encoding="utf-8")
     result = run(source, tmp_path, date(2025, 1, 1))
-    assert result.source_status is workflow.SourceUpdateStatus.APPLIED
+    assert result.source_status is workflow.SourceUpdateStatus.UNCHANGED
     assert result.total_source_rows == result.accepted == 1
     assert (result.filtered, result.rejected) == (0, 0)
     assert result.deduplicated == 0

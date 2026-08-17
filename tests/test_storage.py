@@ -715,6 +715,51 @@ def test_source_operations_schema_migrates_legacy_unique_source_date(tmp_path):
     ]
 
 
+def test_source_operations_schema_migrates_legacy_unique_source_date_and_sha256(tmp_path):
+    """A database created under an earlier, independent fix for the same
+    real-Windows regression used `UNIQUE(source_date, sha256)` instead of
+    this correction's `UNIQUE(sha256)`-only identity; that shape must also
+    migrate (structural `_indexes()` detection, not a stored-SQL-text
+    match), not merely be treated as already-current."""
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE prisma_source_operations (
+                operation_id TEXT PRIMARY KEY,
+                source_date TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+                summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_date, sha256)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status) "
+            "VALUES ('legacy', '2025-01-01', 'legacy.csv', ?, 'accepted')",
+            ("a" * 64,),
+        )
+
+    storage = AuctionStorage(database)
+    first = storage.begin_operation("2025-01-01", "first.csv", "b" * 64)
+    second = storage.begin_operation("2025-01-01", "second.csv", "c" * 64)
+
+    assert first["operation_id"] != second["operation_id"]
+    assert sorted(
+        (row["source_name"], row["sha256"])
+        for row in storage.operations()
+    ) == [
+        ("first.csv", "b" * 64),
+        ("legacy.csv", "a" * 64),
+        ("second.csv", "c" * 64),
+    ]
+
+
 def test_begin_immediate_prevents_concurrent_lost_update(tmp_path, monkeypatch):
     storage = AuctionStorage(tmp_path / "test.db")
     storage.upsert([historical_row()])
@@ -997,6 +1042,82 @@ def test_rate_resolution_table_created_idempotently(tmp_path) -> None:
     storage = AuctionStorage(path)
     storage.save_rate_resolution(_rate_resolution())
     assert storage.get_rate_resolution("62333921") is not None
+
+
+# --- P.40 composite-key publication row index -------------------------------
+
+
+def test_published_output_row_keys_starts_empty(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    assert storage.published_output_row_keys() == set()
+
+
+def test_record_published_output_row_keys_persists_and_is_readable(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([
+        ("A-1", "VGS Storage Hub (4290)", "entry"),
+        ("A-2", "Another Point", "exit"),
+    ])
+    assert storage.published_output_row_keys() == {
+        ("A-1", "VGS Storage Hub (4290)", "entry"),
+        ("A-2", "Another Point", "exit"),
+    }
+
+
+def test_record_published_output_row_keys_with_empty_list_is_a_no_op(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([])
+    assert storage.published_output_row_keys() == set()
+
+
+def test_recording_an_already_recorded_key_raises_without_corrupting_state(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([("A-1", "Point", "entry")])
+    with pytest.raises(AuctionStorageError):
+        storage.record_published_output_row_keys([("A-1", "Point", "entry")])
+    assert storage.published_output_row_keys() == {("A-1", "Point", "entry")}
+
+
+def test_recording_a_batch_with_an_internal_duplicate_key_persists_nothing(tmp_path) -> None:
+    """A batch that would violate the composite-key uniqueness constraint on
+    its own must fail atomically: the second `INSERT` for the repeated key
+    raises inside the same transaction, which is rolled back in full,
+    including the first, otherwise-valid key in the batch."""
+    storage = AuctionStorage(tmp_path / "test.db")
+    with pytest.raises(AuctionStorageError):
+        storage.record_published_output_row_keys([
+            ("A-1", "Point", "entry"),
+            ("A-1", "Point", "entry"),
+        ])
+    assert storage.published_output_row_keys() == set()
+
+
+def test_different_capacity_types_for_the_same_auction_and_point_are_distinct_keys(
+    tmp_path,
+) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([
+        ("A-1", "Point", "entry"),
+        ("A-1", "Point", "exit"),
+        ("A-1", "Point", "bundle"),
+    ])
+    assert storage.published_output_row_keys() == {
+        ("A-1", "Point", "entry"),
+        ("A-1", "Point", "exit"),
+        ("A-1", "Point", "bundle"),
+    }
+
+
+def test_published_output_row_keys_table_created_idempotently_and_preserves_data(
+    tmp_path,
+) -> None:
+    path = tmp_path / "test.db"
+    AuctionStorage(path).record_published_output_row_keys([("A-1", "Point", "entry")])
+    # Reopening (simulating a new session against the same database file, or
+    # an old database file predating this table) must not fail and must
+    # never reset already-recorded keys.
+    reopened = AuctionStorage(path)
+    assert reopened.published_output_row_keys() == {("A-1", "Point", "entry")}
 
 
 def _ecb_auction_date_rate(**overrides) -> EcbAuctionDateRateRecord:

@@ -11,15 +11,61 @@ see `ROADMAP.md`'s P.36.16 entry for the full record):
   downloaded/published user-facing files, never `%LOCALAPPDATA%`).
 - The file uses the exact ordered 12-column `prisma_output.OUTPUT_CSV_COLUMNS`
   contract, UTF-8 encoded, `;`-delimited, with exactly one header row.
-- Deduplication compares the complete, exact 12-field canonical output row
-  (see `prisma_output.transform_row`) for equality only. There is no
-  narrower business key (e.g. Auction ID, which is not one of the 12 output
-  fields), no fuzzy/substring matching, and no update-in-place semantics.
-- Exact duplicates are removed both between the existing published rows and
-  the current completed import, and within the current completed import
-  itself.
 - Ordering is deterministic: existing unique rows keep their original order;
   new unique rows are appended in their current import order.
+
+P.40 composite-key deduplication (customer decision, 2026-08-17 — supersedes
+P.36.16's original exact-full-row-equality dedup rule below).
+
+- The persistent row boundary is the exact composite key **Auction ID +
+  Network Point Name + Capacity Type** (`row["auction_id"]`,
+  `row["network_point"]`, `row["direction"]` — the same source values
+  `prisma_output.transform_row` places into the `Network Point Name`/
+  `Capacity Type` output columns). A row is a duplicate of an
+  already-published row only when all three components match; the other
+  nine output fields (including `Booked Capacity`, `Flow Start`/`Flow End`,
+  and the confirmed EUR prices) are never part of the identity.
+- PRISMA data is immutable by customer decision. When an incoming row's
+  composite key already has a durably recorded counterpart — whether
+  published in an earlier call/session or earlier in the very same import
+  batch (a partial-overlap import) — the already-stored row is kept
+  unchanged and the incoming row is skipped outright, even if its non-key
+  values differ. There is no update-in-place, no conflict error, and no
+  merge.
+- Different rows sharing the same source file, source date, product period,
+  filename, or file hash remain independently acceptable: none of that
+  metadata is part of the identity.
+- The composite-key index is durable, cross-session storage
+  (`storage.AuctionStorage.published_output_row_keys()`/
+  `record_published_output_row_keys()`, table `published_output_row_keys`),
+  never derived by re-reading the CSV file (which does not itself carry
+  Auction ID). It only ever grows: a key is recorded exactly once, the first
+  time its row is accepted for publication, and is never removed or
+  rewritten.
+- Backward compatibility / migration: `storage.AuctionStorage`'s schema
+  migration is purely additive (`CREATE TABLE IF NOT EXISTS
+  published_output_row_keys`, run every time `AuctionStorage` opens an
+  existing database), so an older database file opens safely under the new
+  code without any destructive rewrite. A cumulative *CSV* file already
+  populated under the pre-P.40 exact-full-row-equality rule keeps its rows
+  exactly as published — nothing in it is rewritten, reinterpreted, or
+  deleted — but those pre-existing rows have no recorded composite key
+  (Auction ID cannot be recovered from the CSV alone, which never carried
+  that column). This is a deliberate, documented, one-time transitional
+  limit, the same kind of "never reconcile old data against a new identity
+  contract, just stop conflating them" choice already made for the
+  unrelated pre-P.36.21 legacy-currency file (see `LEGACY_PUBLISHED_
+  OUTPUT_FILENAME` below): if a source file whose rows were already
+  published *before* this feature shipped is re-selected again afterward,
+  those specific rows are not yet key-tracked and are evaluated fresh,
+  exactly like any other incoming row. Every row a session actually
+  processes through this function — old auction data included — has its
+  key recorded on that first pass, so every import from that point onward,
+  in this or any later session, is a genuine exact-retry/partial-overlap
+  duplicate and is correctly skipped.
+- Exact duplicates (by composite key only, never by content) are removed
+  both between the existing published rows and the current completed
+  import, and within the current completed import itself.
 - If the cumulative file does not exist, it is created from the current
   completed import (even an import with zero accepted rows still produces a
   valid header-only file, matching `prisma_output.write_prisma_output`'s own
@@ -45,6 +91,13 @@ see `ROADMAP.md`'s P.36.16 entry for the full record):
 - No path outside the validated publication directory is ever read or
   written: the cumulative file's name is fixed, and the staging file is
   always created inside the same directory.
+- If the cumulative CSV file itself does not currently exist (deleted, never
+  created, or otherwise absent — as opposed to present-but-malformed, which
+  is the typed failure above), any composite keys already durably recorded
+  no longer correspond to real content in a file that is gone, so they never
+  block this call: the file is rebuilt from the current import exactly like
+  the pre-P.40 recovery contract, instead of silently staying empty forever
+  because its rows' keys are still "known" in storage.
 
 This module performs no parsing, filtering, normalization, or side-specific
 Market/Storage resolution of its own: it operates on an already-completed
@@ -89,6 +142,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
@@ -104,7 +158,7 @@ from price_normalization import (
 )
 from processor import PrismaImportResult
 from prisma_output import OUTPUT_CSV_COLUMNS, transform_row
-from storage import AuctionStorage
+from storage import AuctionStorage, AuctionStorageError
 
 __all__ = [
     "LEGACY_PUBLISHED_OUTPUT_FILENAME",
@@ -142,6 +196,7 @@ class PrismaPublicationOutcome(str, Enum):
     INVALID_EXISTING_FILE = "invalid_existing_file"
     PRICE_NORMALIZATION_FAILED = "price_normalization_failed"
     WRITE_FAILED = "write_failed"
+    STORAGE_FAILED = "storage_failed"
 
 
 _FAILURE_MESSAGES: dict[PrismaPublicationOutcome, str] = {
@@ -155,12 +210,16 @@ _FAILURE_MESSAGES: dict[PrismaPublicationOutcome, str] = {
     ),
     PrismaPublicationOutcome.PRICE_NORMALIZATION_FAILED: (
         "One or more auctions could not be confirmed in EUR/MWh/h, so "
-        "nothing was published. Resolve the missing currency, auction-end, "
-        "or ECB rate evidence, then retry."
+        "nothing was published. Resolve the missing ECB rate evidence for "
+        "the required auction date and currency, then retry."
     ),
     PrismaPublicationOutcome.WRITE_FAILED: (
         "The transformed output could not be published to the selected "
         "folder."
+    ),
+    PrismaPublicationOutcome.STORAGE_FAILED: (
+        "The composite-key publication index could not be updated, so "
+        "nothing was published."
     ),
 }
 
@@ -365,9 +424,11 @@ def publish_cumulative_output(
     (parsing, filtering, and enrichment already happened there and are not
     repeated here); this function only formats accepted rows via
     `prisma_output.transform_row` and merges them into the cumulative file
-    under the approved exact-full-row deduplication rule. See the module
-    docstring for the complete approved contract, including the P.36.21/P.37
-    strict EUR gate and legacy-file compatibility decision.
+    under the P.40 composite-key ("Auction ID + Network Point Name +
+    Capacity Type") deduplication rule. See the module docstring for the
+    complete approved contract, including the immutable-row policy, the
+    legacy-file transitional limit, the P.36.21/P.37 strict EUR gate, and the
+    separate pre-P.36.21 legacy-filename compatibility decision.
 
     ``storage``/``ecb_source`` are forwarded unchanged to
     `price_normalization.normalize_prices_for_output`, which reuses P.37's
@@ -429,18 +490,52 @@ def publish_cumulative_output(
 
     file_previously_existed = existing_rows is not None
     existing_rows = existing_rows or []
-    existing_set = set(existing_rows)
+
+    try:
+        known_keys = storage.published_output_row_keys()
+    except (AuctionStorageError, sqlite3.Error) as exc:
+        return PrismaPublicationResult(
+            PrismaPublicationOutcome.STORAGE_FAILED,
+            import_result=import_result,
+            price_normalization=normalization,
+            error=str(exc),
+        )
+
+    # If the cumulative file itself does not currently exist, any composite
+    # keys already recorded no longer correspond to real content in a file
+    # that is gone, so they must not block this rebuild: a missing output
+    # file self-heals from the next import, exactly like the pre-P.40
+    # contract, instead of silently staying empty forever because its rows'
+    # keys are still "known". `known_keys` is still consulted afterward so
+    # a stale key is recorded again only if genuinely absent from storage.
+    blocking_keys = known_keys if file_previously_existed else set()
 
     new_rows: list[tuple[str, ...]] = []
-    seen_in_import: set[tuple[str, ...]] = set()
+    new_keys: list[tuple[str, str, str]] = []
+    seen_keys_in_import: set[tuple[str, str, str]] = set()
     deduplicated_row_count = 0
     for index, row in enumerate(import_result.rows):
-        formatted = transform_row(row, normalization.prices_by_row_index[index])
-        as_tuple = tuple(formatted[column] for column in OUTPUT_CSV_COLUMNS)
-        if as_tuple in existing_set or as_tuple in seen_in_import:
+        # P.40 composite key: Auction ID + Network Point Name + Capacity
+        # Type is the sole persistent row identity — never full-row content.
+        # PRISMA data is immutable by customer decision, so a key already
+        # recorded — durably (`blocking_keys`) or earlier in this same
+        # partial-overlap batch (`seen_keys_in_import`) — always wins: the
+        # stored row is kept unchanged and this incoming row is skipped
+        # outright, regardless of whether its other field values differ. A
+        # row whose key is genuinely new is always appended, even if its
+        # formatted content happens to coincide with another row's, since
+        # "different rows ... must remain independently acceptable" and the
+        # key is the only identity that matters.
+        key = (row["auction_id"], row["network_point"], row["direction"])
+        if key in blocking_keys or key in seen_keys_in_import:
             deduplicated_row_count += 1
             continue
-        seen_in_import.add(as_tuple)
+        seen_keys_in_import.add(key)
+
+        formatted = transform_row(row, normalization.prices_by_row_index[index])
+        as_tuple = tuple(formatted[column] for column in OUTPUT_CSV_COLUMNS)
+        if key not in known_keys:
+            new_keys.append(key)
         new_rows.append(as_tuple)
 
     if file_previously_existed and not new_rows:
@@ -464,6 +559,24 @@ def publish_cumulative_output(
             price_normalization=normalization,
             error=str(exc),
         )
+
+    if new_keys:
+        # Recorded only after the CSV write above has already succeeded: if
+        # persisting the keys themselves then fails, the CSV already
+        # reflects the new content, so a later republish would only ever
+        # re-derive/re-record the same keys, never lose or duplicate a row.
+        try:
+            storage.record_published_output_row_keys(new_keys)
+        except (AuctionStorageError, sqlite3.Error) as exc:
+            return PrismaPublicationResult(
+                PrismaPublicationOutcome.STORAGE_FAILED,
+                output_path=target,
+                import_result=import_result,
+                price_normalization=normalization,
+                appended_row_count=len(new_rows),
+                total_row_count=len(all_rows),
+                error=str(exc),
+            )
 
     return PrismaPublicationResult(
         PrismaPublicationOutcome.SUCCESS,

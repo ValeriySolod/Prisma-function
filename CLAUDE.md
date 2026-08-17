@@ -10,7 +10,7 @@ The user downloads CSV files independently and selects them with Select CSV. Sel
 
 ## Data contracts
 
-Input is the official 34-column PRISMA Export CSV: Windows-1252, semicolon-delimited, and detected by headers. Read every row to end-of-file; never impose a 5,000-row application limit. Accept multiple files for the same date or period. Deduplicate persisted records at row level, not by filename, file hash, or source date.
+Input is the official 34-column PRISMA Export CSV: Windows-1252, semicolon-delimited, and detected by headers. Read every row to end-of-file; never impose a 5,000-row application limit. Accept multiple files for the same date or period. Deduplicate persisted records at row level (see the exact composite key below), never by filename, file hash, or source date.
 
 After booked-capacity normalization, retain auctions with at least 1 MWh.
 
@@ -34,6 +34,8 @@ Mapping must show all cumulative accepted rows and support unrestricted vertical
 Dates and times follow the approved Europe/Berlin CET/CEST contract. Prices are EUR/MWh/h. Resolve currency conversion by the calendar date from Start of Auction, use the official ECB reference rate with the latest prior available reference date for weekends and holidays, and handle quotation direction explicitly.
 
 Market/storage mapping is exact, Auction-ID-linked, side-specific, and evidence-based. Never infer it from geography, TSO, EIC, substrings, names, or the opposite side.
+
+Deduplication of persisted, published rows uses the exact composite key **Auction ID + Network Point Name + Capacity Type**; PRISMA data is immutable, so a row whose key already has a recorded counterpart is skipped outright, never updated or merged, even if its other field values differ. Source provenance (source date, filename, or whole-file sha256) never gates or deduplicates an import: distinct CSV files sharing a source date are always independently accepted, and exact-retry/partial-overlap idempotence is provided exclusively by the composite key.
 
 PDF input, managed browser/download automation, Playwright, live monitoring, scheduling, and notifications are excluded.
 

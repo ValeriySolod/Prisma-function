@@ -18,7 +18,7 @@ import prisma_publication
 from csv_contracts import PRISMA_EXPORT_COLUMNS
 from mapping_presentation import MAPPING_DISPLAY_FIELDS
 from processor import PrismaImportError
-from prisma_source_updates import SourceUpdateStatus
+from prisma_import_workflow import SourceUpdateStatus
 from storage import AuctionStorage, RateResolutionRecord
 from version import APP_DISPLAY_NAME, __version__
 from ui_components import APP_STYLE

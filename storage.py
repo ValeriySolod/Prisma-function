@@ -239,6 +239,49 @@ class AuctionStorage:
         "tariff_entry_source_mwh_h", "tariff_entry_currency",
         "premium_currency",
     )
+    # P.40 correction (2026-08-17, real-Windows validation finding): the
+    # source-operation ledger's identity moved from `UNIQUE(source_date)` to
+    # `UNIQUE(sha256)`. Rejecting a second distinct import for a date that
+    # already has an accepted source was the exact regression this corrects;
+    # row-level idempotence is provided exclusively by
+    # `published_output_row_keys` below, never by this ledger, so multiple
+    # genuinely different CSV files sharing a source date must never
+    # conflict here. `sha256` is still consulted (never source_date) so a
+    # literal exact-content retry of a still in-flight or already-accepted
+    # operation resumes/short-circuits instead of creating a redundant
+    # duplicate ledger row for identical bytes.
+    SOURCE_OPERATIONS_SQL = """CREATE TABLE IF NOT EXISTS prisma_source_operations (
+        operation_id TEXT PRIMARY KEY,
+        source_date TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+        summary_json TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(sha256)
+    )"""
+    # P.40 composite-key cumulative-publication identity boundary: "Auction
+    # ID + Network Point Name + Capacity Type" is the exact, sole persistent
+    # row key `prisma_publication.publish_cumulative_output` uses to decide
+    # whether an incoming row already has a durably published counterpart,
+    # across sessions and across otherwise-unrelated source files/dates. The
+    # PRIMARY KEY enforces this at the database level for every row this
+    # table ever records; there is no separate content-based key. This table
+    # is created additively (`CREATE TABLE IF NOT EXISTS`) so an existing
+    # database predating this increment opens safely with no rewrite of any
+    # other table; rows already published under the pre-P.40 exact-full-row
+    # rule have no key here until the next time their source is processed
+    # (a documented, one-time transitional limit — see
+    # `prisma_publication.py`'s module docstring for the full contract,
+    # including the immutable-row, never-update-only-skip policy).
+    PUBLISHED_OUTPUT_KEYS_SQL = """CREATE TABLE IF NOT EXISTS published_output_row_keys (
+        auction_id TEXT NOT NULL,
+        network_point_name TEXT NOT NULL,
+        capacity_type TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (auction_id, network_point_name, capacity_type)
+    )"""
 
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,57 +371,13 @@ class AuctionStorage:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (auction_id, network_point_id, direction, flow_start, flow_end)
                 )""",
-                    """
-                CREATE TABLE IF NOT EXISTS prisma_source_operations (
-                    operation_id TEXT PRIMARY KEY,
-                    source_date TEXT NOT NULL,
-                    source_name TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
-                    summary_json TEXT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(source_date, sha256)
-                )""",
                     self.RATE_RESOLUTIONS_SQL,
                     self.ECB_AUCTION_DATE_RATES_SQL,
+                    self.PUBLISHED_OUTPUT_KEYS_SQL,
             ):
                 connection.execute(statement)
-            self._ensure_prisma_source_operations_schema(connection)
+            self._ensure_source_operations_schema(connection)
             self._ensure_historical_schema(connection)
-
-    @classmethod
-    def _ensure_prisma_source_operations_schema(cls, connection: sqlite3.Connection) -> None:
-        indexes = cls._indexes(connection, "prisma_source_operations")
-        has_date_only_unique = any(
-            unique and columns == ("source_date",)
-            for _name, unique, _origin, columns in indexes
-        )
-        if not has_date_only_unique:
-            return
-        connection.execute("ALTER TABLE prisma_source_operations RENAME TO prisma_source_operations_legacy")
-        connection.execute(
-            """
-            CREATE TABLE prisma_source_operations (
-                operation_id TEXT PRIMARY KEY,
-                source_date TEXT NOT NULL,
-                source_name TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
-                summary_json TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(source_date, sha256)
-            )
-            """
-        )
-        connection.execute(
-            "INSERT INTO prisma_source_operations "
-            "(operation_id, source_date, source_name, sha256, status, summary_json, created_at, updated_at) "
-            "SELECT operation_id, source_date, source_name, sha256, status, summary_json, created_at, updated_at "
-            "FROM prisma_source_operations_legacy"
-        )
-        connection.execute("DROP TABLE prisma_source_operations_legacy")
 
     @staticmethod
     def _table_columns(connection: sqlite3.Connection, table: str) -> tuple[tuple[Any, ...], ...]:
@@ -429,6 +428,54 @@ class AuctionStorage:
             expected.execute("CREATE TABLE auctions (id INTEGER PRIMARY KEY)")
             cls._create_historical_tables(expected)
             return cls._schema_fingerprint(expected)
+
+    @classmethod
+    def _ensure_source_operations_schema(cls, connection: sqlite3.Connection) -> None:
+        """Create `prisma_source_operations`, migrating a pre-P.40-correction
+        database in place.
+
+        A database created before this correction has a unique constraint
+        that still includes `source_date` baked into the table itself —
+        either the original `UNIQUE(source_date)` alone, or the
+        `UNIQUE(source_date, sha256)` shape an earlier, independent fix for
+        the same real-Windows regression used before this correction's
+        `UNIQUE(sha256)`-only design was adopted. `CREATE TABLE IF NOT
+        EXISTS` is a no-op against an already-existing table, so it alone
+        cannot lift either constraint on an existing installation. Detection
+        uses `PRAGMA index_list`/`PRAGMA index_info` (via `_indexes()`)
+        rather than matching the stored `CREATE TABLE` text, so both legacy
+        shapes are recognized structurally instead of by a brittle string
+        pattern. When the table does not already have exactly the required
+        `UNIQUE(sha256)` index, it is losslessly rebuilt under
+        `SOURCE_OPERATIONS_SQL`'s identity within the same transaction
+        `_create_schema` already holds, so this either fully applies or
+        leaves the database completely unchanged.
+        """
+        existing_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='prisma_source_operations'"
+        ).fetchone()
+        if existing_sql is None:
+            connection.execute(cls.SOURCE_OPERATIONS_SQL)
+            return
+        indexes = cls._indexes(connection, "prisma_source_operations")
+        has_sha256_only_unique = any(
+            unique and columns == ("sha256",)
+            for _name, unique, _origin, columns in indexes
+        )
+        if has_sha256_only_unique:
+            return
+        connection.execute(
+            "ALTER TABLE prisma_source_operations RENAME TO prisma_source_operations_pre_p40"
+        )
+        connection.execute(cls.SOURCE_OPERATIONS_SQL)
+        connection.execute(
+            "INSERT OR IGNORE INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status, summary_json, "
+            "created_at, updated_at) "
+            "SELECT operation_id, source_date, source_name, sha256, status, summary_json, "
+            "created_at, updated_at FROM prisma_source_operations_pre_p40"
+        )
+        connection.execute("DROP TABLE prisma_source_operations_pre_p40")
 
     @classmethod
     def _ensure_historical_schema(cls, connection: sqlite3.Connection) -> None:
@@ -675,9 +722,6 @@ class AuctionStorage:
                 "SELECT * FROM prisma_source_operations ORDER BY source_date, created_at, operation_id"
             ))
 
-    def unresolved_operations(self) -> list[sqlite3.Row]:
-        return [row for row in self.operations() if row["status"] != "accepted"]
-
     def import_legacy_operation(
         self, operation_id: str, source_date: str, source_name: str, digest: str
     ) -> None:
@@ -689,30 +733,27 @@ class AuctionStorage:
                 (operation_id, source_date, source_name, digest),
             )
 
-    def operation_for_date(self, source_date: str) -> sqlite3.Row | None:
+    def operation_for_digest(self, digest: str) -> sqlite3.Row | None:
         with self._connection() as connection, connection:
             return connection.execute(
-                "SELECT * FROM prisma_source_operations WHERE source_date = ? "
-                "ORDER BY created_at DESC, operation_id DESC",
-                (source_date,),
-            ).fetchone()
-
-    def operation_for_source(self, source_date: str, digest: str) -> sqlite3.Row | None:
-        with self._connection() as connection, connection:
-            return connection.execute(
-                "SELECT * FROM prisma_source_operations WHERE source_date = ? AND sha256 = ?",
-                (source_date, digest),
-            ).fetchone()
-
-    def operation_by_id(self, operation_id: str) -> sqlite3.Row | None:
-        with self._connection() as connection, connection:
-            return connection.execute(
-                "SELECT * FROM prisma_source_operations WHERE operation_id = ?",
-                (operation_id,),
+                "SELECT * FROM prisma_source_operations WHERE sha256 = ?", (digest,)
             ).fetchone()
 
     def begin_operation(self, source_date: str, source_name: str, digest: str) -> sqlite3.Row:
-        existing = self.operation_for_source(source_date, digest)
+        """Begin (or resume) the source-operation ledger entry for one CSV's
+        exact byte content.
+
+        P.40 correction: identity is `sha256` only, never `source_date` — a
+        different file for a date that already has an accepted or
+        in-progress operation is always its own independent operation, never
+        rejected or blocked. Resuming by digest is purely an internal
+        bookkeeping optimization for crash recovery (an interrupted retry of
+        the exact same bytes continues the same ledger row instead of
+        creating a redundant duplicate); it provides no row-level dedup
+        guarantee of its own — that is `prisma_publication`'s composite-key
+        responsibility exclusively.
+        """
+        existing = self.operation_for_digest(digest)
         if existing is not None:
             return existing
         operation_id = uuid.uuid4().hex
@@ -722,7 +763,7 @@ class AuctionStorage:
                 "(operation_id, source_date, source_name, sha256, status) VALUES (?, ?, ?, ?, 'pending')",
                 (operation_id, source_date, source_name, digest),
             )
-        return self.operation_by_id(operation_id)  # type: ignore[return-value]
+        return self.operation_for_digest(digest)  # type: ignore[return-value]
 
     @classmethod
     def _translate_legacy_price_fields(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -960,6 +1001,52 @@ class AuctionStorage:
                 ),
             )
         return record
+
+    def published_output_row_keys(self) -> set[tuple[str, str, str]]:
+        """Return every P.40 composite key ("Auction ID + Network Point Name
+        + Capacity Type") ever durably recorded as published, across every
+        prior call and every prior session. An incoming row whose key is in
+        this set already has a stored, immutable counterpart and must be
+        skipped, never replaced, by the caller."""
+        with self._connection() as connection:
+            return {
+                (row["auction_id"], row["network_point_name"], row["capacity_type"])
+                for row in connection.execute(
+                    "SELECT auction_id, network_point_name, capacity_type "
+                    "FROM published_output_row_keys"
+                )
+            }
+
+    def record_published_output_row_keys(
+        self, keys: list[tuple[str, str, str]]
+    ) -> None:
+        """Atomically record newly published P.40 composite keys.
+
+        Each ``(auction_id, network_point_name, capacity_type)`` tuple must
+        not already be recorded; the caller (`prisma_publication.
+        publish_cumulative_output`) always pre-checks against
+        `published_output_row_keys()` before calling this, so a collision
+        here indicates a caller ordering defect, not stale/racing data, and
+        is raised as `AuctionStorageError` rather than silently ignored or
+        overwritten.
+        """
+        if not keys:
+            return
+        with self._connection() as connection, self._transaction(connection):
+            connection.execute("BEGIN IMMEDIATE")
+            for auction_id, network_point_name, capacity_type in keys:
+                try:
+                    connection.execute(
+                        "INSERT INTO published_output_row_keys "
+                        "(auction_id, network_point_name, capacity_type) "
+                        "VALUES (?, ?, ?)",
+                        (auction_id, network_point_name, capacity_type),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise AuctionStorageError(
+                        "A P.40 composite publication key was already "
+                        "recorded; the stored row is never replaced."
+                    ) from exc
 
     @staticmethod
     def apply_excel_widths(path: Path) -> None:

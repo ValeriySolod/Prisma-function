@@ -183,7 +183,10 @@ def test_appending_new_unique_rows_to_existing_valid_file(tmp_path: Path) -> Non
     first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
 
-    other = {**BASE, "Marketed Capacity": "2000"}
+    # A different Auction ID is a different P.40 composite key even though
+    # every other field, including Booked Capacity, could coincide; here it
+    # also differs so this row is unambiguously new either way.
+    other = {**BASE, "Auction ID": "000123456789099999", "Marketed Capacity": "2000"}
     second = _publish(
         import_result_for(tmp_path, [other], name="Auction_overview_2.csv"), out_dir, tmp_path,
         storage=storage,
@@ -230,7 +233,13 @@ def test_duplicates_within_one_import_are_written_once(tmp_path: Path) -> None:
     assert len(records) == 1
 
 
-def test_row_differing_in_any_single_field_remains_distinct(tmp_path: Path) -> None:
+def test_row_differing_only_in_a_non_key_field_is_skipped_as_a_duplicate(tmp_path: Path) -> None:
+    """P.40: the composite key is Auction ID + Network Point Name + Capacity
+    Type only. PRISMA data is immutable by customer decision, so once a key
+    is recorded, a later row sharing that exact key is always skipped — even
+    though its `Booked Capacity` (not part of the key) differs. The
+    already-stored row's values are kept unchanged; this is not a conflict
+    error and not a merge, just a skip."""
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
     storage = AuctionStorage(tmp_path / "auctions.db")
@@ -243,8 +252,133 @@ def test_row_differing_in_any_single_field_remains_distinct(tmp_path: Path) -> N
         out_dir, tmp_path, storage=storage,
     )
     assert second.succeeded
-    assert second.appended_row_count == 1
-    assert second.total_row_count == 2
+    assert second.appended_row_count == 0
+    assert second.total_row_count == 1
+    _, records = _read_published(second.output_path)
+    assert len(records) == 1
+    assert records[0]["Booked Capacity"] == "1000.0"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"auction_id": "ZZZ999999999999999"},
+        {"network_point": "A Different Network Point"},
+        {"direction": "exit"},
+    ],
+    ids=["auction_id", "network_point_name", "capacity_type"],
+)
+def test_row_differing_in_any_composite_key_field_remains_distinct(
+    tmp_path: Path, override: dict
+) -> None:
+    """Each of the three key components — Auction ID, Network Point Name,
+    Capacity Type — independently makes a row a distinct P.40 identity, even
+    when every other field (including Booked Capacity) is unchanged. Uses the
+    already-enriched row shape directly (see `_import_row`) so this exercises
+    only the composite-key contract itself, not catalog alias resolution."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    storage = AuctionStorage(tmp_path / "auctions.db")
+    row_a = _import_row()
+    row_b = _import_row(**override)
+    result = _publish(make_import_result([row_a, row_b]), out_dir, tmp_path, storage=storage)
+    assert result.succeeded
+    assert result.appended_row_count == 2
+    assert result.total_row_count == 2
+
+
+def test_partial_overlap_within_one_import_keeps_only_the_first_occurrence(
+    tmp_path: Path,
+) -> None:
+    """Two rows sharing one composite key inside the *same* import batch
+    (a partial-overlap import) must resolve exactly like two separate
+    publish calls would: the first occurrence is kept, the later one is
+    skipped, never merged or reported as a conflict."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    row_first = _import_row(booked_capacity_kwh_h=1000.0)
+    row_later = _import_row(booked_capacity_kwh_h=9999.0)
+    result = _publish(make_import_result([row_first, row_later]), out_dir, tmp_path)
+    assert result.succeeded
+    assert result.appended_row_count == 1
+    assert result.total_row_count == 1
+    _, records = _read_published(result.output_path)
+    assert len(records) == 1
+    assert records[0]["Booked Capacity"] == "1000.0"
+
+
+def test_composite_key_dedup_persists_across_separate_storage_instances(
+    tmp_path: Path,
+) -> None:
+    """The composite-key index is durable, cross-session storage: a brand
+    new `AuctionStorage` opened against the same database file must still
+    recognize a key recorded by an earlier, now-closed instance."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    db_path = tmp_path / "auctions.db"
+    first = _publish(
+        import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=AuctionStorage(db_path)
+    )
+    assert first.succeeded
+
+    reopened_storage = AuctionStorage(db_path)
+    assert (BASE["Auction ID"], "VGS Storage Hub (4290)", "entry") in (
+        reopened_storage.published_output_row_keys()
+    )
+
+    conflicting = {**BASE, "Marketed Capacity": "2000"}
+    second = _publish(
+        import_result_for(tmp_path, [conflicting], name="Auction_overview_2.csv"),
+        out_dir, tmp_path, storage=reopened_storage,
+    )
+    assert second.succeeded
+    assert second.appended_row_count == 0
+    assert second.total_row_count == 1
+
+
+def test_legacy_file_row_is_key_tracked_from_its_first_post_upgrade_publish(
+    tmp_path: Path,
+) -> None:
+    """Backward compatibility / migration: a cumulative file already
+    populated before this composite-key table existed has no recorded keys
+    for its rows (Auction ID cannot be recovered from the CSV alone). This
+    is a deliberate, documented, one-time transitional limit — see the
+    module docstring — so the very first post-upgrade publish that touches
+    such a row (here, against a *fresh* storage simulating an older
+    database) still appends it once more; but from that point on its key is
+    recorded, so any further row sharing that key — even with different
+    non-key values — is correctly skipped as a duplicate, never appended
+    again."""
+    out_dir = tmp_path / "pub"
+    out_dir.mkdir()
+    legacy_import = import_result_for(tmp_path, [BASE])
+    legacy_storage = AuctionStorage(tmp_path / "legacy_auctions.db")
+    seed = _publish(legacy_import, out_dir, tmp_path, storage=legacy_storage)
+    assert seed.succeeded
+    # Simulate a pre-P.40 database: this storage's composite-key table has
+    # never recorded this row's key.
+    fresh_storage = AuctionStorage(tmp_path / "fresh_auctions.db")
+    assert fresh_storage.published_output_row_keys() == set()
+
+    republished = _publish(
+        import_result_for(tmp_path, [BASE], name="Auction_overview_repeat.csv"),
+        out_dir, tmp_path, storage=fresh_storage,
+    )
+    assert republished.succeeded
+    assert republished.appended_row_count == 1
+    assert republished.total_row_count == 2
+    assert (BASE["Auction ID"], "VGS Storage Hub (4290)", "entry") in (
+        fresh_storage.published_output_row_keys()
+    )
+
+    changed_capacity = {**BASE, "Marketed Capacity": "7000"}
+    now_skipped = _publish(
+        import_result_for(tmp_path, [changed_capacity], name="Auction_overview_changed.csv"),
+        out_dir, tmp_path, storage=fresh_storage,
+    )
+    assert now_skipped.succeeded
+    assert now_skipped.appended_row_count == 0
+    assert now_skipped.total_row_count == 2
 
 
 def test_cumulative_deduplication_operates_on_final_normalized_price_values(tmp_path: Path) -> None:
@@ -268,10 +402,12 @@ def test_existing_and_new_row_order_is_preserved(tmp_path: Path) -> None:
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
     storage = AuctionStorage(tmp_path / "auctions.db")
-    row_a = {**BASE, "Marketed Capacity": "1000"}
-    row_b = {**BASE, "Marketed Capacity": "1100"}
-    row_c = {**BASE, "Marketed Capacity": "1200"}
-    row_d = {**BASE, "Marketed Capacity": "1300"}
+    # Distinct Auction IDs so all four rows are genuinely distinct P.40
+    # composite keys, not just distinct by Booked Capacity.
+    row_a = {**BASE, "Auction ID": "000000000000000001", "Marketed Capacity": "1000"}
+    row_b = {**BASE, "Auction ID": "000000000000000002", "Marketed Capacity": "1100"}
+    row_c = {**BASE, "Auction ID": "000000000000000003", "Marketed Capacity": "1200"}
+    row_d = {**BASE, "Auction ID": "000000000000000004", "Marketed Capacity": "1300"}
 
     first = _publish(import_result_for(tmp_path, [row_a, row_b]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
@@ -499,7 +635,11 @@ def test_reservation_or_staging_failure_preserves_prior_file_and_import_result(
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
     storage = AuctionStorage(tmp_path / "auctions.db")
-    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
+    # A distinct Auction ID from `_MIXED_OUTCOME_ROWS`'s accepted row below,
+    # so that row's P.40 composite key is genuinely new and a write is
+    # actually attempted (not short-circuited as an already-known key).
+    seed = {**BASE, "Auction ID": "000000000000000000"}
+    first = _publish(import_result_for(tmp_path, [seed]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_content = first.output_path.read_bytes()
 
@@ -533,7 +673,9 @@ def test_replace_failure_preserves_prior_file_and_cleans_staging_artifact(
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
     storage = AuctionStorage(tmp_path / "auctions.db")
-    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
+    # Distinct Auction ID so `other` below is a genuinely new P.40 key.
+    seed = {**BASE, "Auction ID": "000000000000000000"}
+    first = _publish(import_result_for(tmp_path, [seed]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_content = first.output_path.read_bytes()
 
@@ -560,7 +702,9 @@ def test_write_failure_mid_stream_cleans_staged_file_and_preserves_prior_file(
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
     storage = AuctionStorage(tmp_path / "auctions.db")
-    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
+    # Distinct Auction ID so `other` below is a genuinely new P.40 key.
+    seed = {**BASE, "Auction ID": "000000000000000000"}
+    first = _publish(import_result_for(tmp_path, [seed]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     before_content = first.output_path.read_bytes()
 
@@ -616,7 +760,9 @@ def test_target_never_shows_partial_content_during_publication(tmp_path: Path) -
     out_dir = tmp_path / "pub"
     out_dir.mkdir()
     storage = AuctionStorage(tmp_path / "auctions.db")
-    first = _publish(import_result_for(tmp_path, [BASE]), out_dir, tmp_path, storage=storage)
+    # Distinct Auction ID so `other` below is a genuinely new P.40 key.
+    seed = {**BASE, "Auction ID": "000000000000000000"}
+    first = _publish(import_result_for(tmp_path, [seed]), out_dir, tmp_path, storage=storage)
     assert first.succeeded
     _, initial_records = _read_published(first.output_path)
     assert len(initial_records) == 1

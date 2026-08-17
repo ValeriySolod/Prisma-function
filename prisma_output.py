@@ -116,8 +116,8 @@ _FAILURE_MESSAGES: dict[PrismaOutputOutcome, str] = {
     ),
     PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED: (
         "One or more auctions could not be confirmed in EUR/MWh/h, so no "
-        "output was created. Resolve the missing currency, auction-end, or "
-        "ECB rate evidence, then retry."
+        "output was created. Resolve the missing ECB rate evidence for the "
+        "required auction date and currency, then retry."
     ),
     PrismaOutputOutcome.WRITE_FAILED: (
         "The transformed output could not be written to the selected folder."

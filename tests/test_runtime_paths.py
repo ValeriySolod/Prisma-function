@@ -129,6 +129,42 @@ def test_stale_interrupted_migration_lock_is_recovered(tmp_path, user_data):
     assert not lock.exists()
 
 
+def test_lock_from_terminated_process_is_recovered_immediately_on_restart(tmp_path, user_data, monkeypatch):
+    """Reproduces the real-Windows finding: closing the app and relaunching it
+    immediately must not surface "busy in another process" merely because the
+    dead owner's lock is younger than LOCK_STALE_SECONDS."""
+    paths = runtime_paths.runtime_paths()
+    lock = paths.root / runtime_paths.LOCK_FILENAME
+    lock.mkdir(parents=True)
+    (lock / runtime_paths.LOCK_OWNER_FILENAME).write_text("999999:closed-process", encoding="ascii")
+    monkeypatch.setattr(runtime_paths, "_process_is_running", lambda pid: False)
+
+    assert runtime_paths.migrate_legacy_runtime_data(
+        app_directory=tmp_path / "missing", temp_directory=tmp_path / "missing-temp",
+        lock_stale_seconds=300,
+    ) == []
+    assert not lock.exists()
+
+
+def test_lock_from_live_process_is_never_recovered_regardless_of_age(tmp_path, user_data, monkeypatch):
+    paths = runtime_paths.runtime_paths()
+    lock = paths.root / runtime_paths.LOCK_FILENAME
+    lock.mkdir(parents=True)
+    (lock / runtime_paths.LOCK_OWNER_FILENAME).write_text("4242:still-running", encoding="ascii")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(runtime_paths, "_process_is_running", lambda pid: True)
+
+    with pytest.raises(runtime_paths.RuntimePathError, match="busy"):
+        runtime_paths.migrate_legacy_runtime_data(
+            app_directory=tmp_path / "missing", temp_directory=tmp_path / "missing-temp",
+            lock_timeout=0.1, lock_stale_seconds=300,
+        )
+    assert lock.is_dir()
+    (lock / runtime_paths.LOCK_OWNER_FILENAME).unlink()
+    lock.rmdir()
+
+
 @pytest.mark.parametrize(
     ("handle", "error", "wait_result", "expected"),
     (

@@ -4,6 +4,31 @@ SQLite is authoritative for source lifecycle. Legacy JSON is read only when the
 ledger is empty. A pending ledger row precedes auction mutation; auction changes
 and summary metadata share one transaction with the data_committed transition.
 
+P.40 correction (2026-08-17, real-Windows validation finding). The prior
+source-operation lifecycle rejected a second distinct CSV import for a
+source date that already had an accepted source ("Accepted sources must have
+unique source dates in ascending order."), which blocked legitimate
+same-day/same-period re-imports. That whole source-date uniqueness invariant
+— along with `prisma_source_updates.py`'s `evaluate_prisma_source_update`/
+`PrismaSourceState`, which enforced it — is removed from this active path.
+Source provenance (source date, filename, or whole-file sha256) is never used
+to deduplicate or reject an import here; `storage.AuctionStorage.
+begin_operation` now keys the ledger by sha256 alone (see its docstring), so
+distinct files sharing a source date are always independently accepted. The
+only content-level idempotence guarantee in this workflow is
+`prisma_publication.publish_cumulative_output`'s P.40 composite row key
+("Auction ID + Network Point Name + Capacity Type"); exact-retry and
+partial-overlap imports rely on that, and on `apply_operation`'s own
+identity-keyed upsert, exclusively — never on a source-provenance comparison
+performed before processing. A digest match against an already in-flight or
+already-accepted ledger row still short-circuits re-processing the exact same
+bytes, but this is an internal resume/bookkeeping optimization, not a
+rejection path: it never blocks a distinct file, and every processing
+attempt — new content or a resumed retry — leaves the ledger in a resolved
+terminal state (`accepted`) on success, or an inert, non-blocking row on
+failure, so the next Select CSV attempt (any file, any date) is never blocked
+by a previous attempt's outcome.
+
 P.36.21/P.37 correction. This is `app.py`'s only active completed-processing
 path (the "Select CSV" action), so it is also where the strict EUR/MWh/h
 invariant must be enforced for the application to ever present a result as
@@ -43,10 +68,12 @@ place that check happens, so a directory that has since become unavailable
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 
 from csv_contracts import CsvFormat, detect_csv_format
@@ -58,16 +85,28 @@ from price_normalization import (
 )
 from prisma_publication import describe_publication_failure, publish_cumulative_output
 from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
-from prisma_source_updates import AcceptedPrismaSource, PrismaSourceState, SourceUpdateStatus, evaluate_prisma_source_update
-from processor import PrismaImportIssue, PrismaImportResult, import_prisma_export
+from processor import PrismaImportIssue, import_prisma_export
 from storage import AuctionStorage, AuctionStorageError
 
 __all__ = [
     "PrismaWorkflowError",
     "PrismaPriceNormalizationError",
     "PrismaWorkflowResult",
+    "SourceUpdateStatus",
     "run_prisma_import_workflow",
 ]
+
+
+class SourceUpdateStatus(str, Enum):
+    """Whether one processing operation's source content was new (`APPLIED`)
+    or an exact-content retry of a previously accepted operation
+    (`UNCHANGED`), keyed by sha256 alone (P.40 correction — never source
+    date, filename, or any cross-operation date comparison). Row-level
+    idempotence is provided exclusively by `prisma_publication`'s composite
+    key, independent of this status."""
+
+    APPLIED = "applied"
+    UNCHANGED = "unchanged"
 
 
 class PrismaWorkflowError(RuntimeError):
@@ -120,32 +159,41 @@ class PrismaWorkflowResult:
         )
 
 
-def _legacy_state(path: Path) -> PrismaSourceState:
-    if not path.exists():
-        return PrismaSourceState()
+def _migrate_legacy_json_state(storage: AuctionStorage, legacy_path: Path) -> None:
+    """One-time migration of a pre-SQLite accepted-source ledger, if present.
+
+    Only runs while the SQLite ledger is still empty. P.40 correction: each
+    valid entry is migrated as-is, with no ordering or per-date uniqueness
+    invariant imposed across entries — multiple entries may legitimately
+    share a source date, exactly like any other operation now.
+    """
+    if storage.operations() or not legacy_path.exists():
+        return
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return PrismaSourceState(tuple(AcceptedPrismaSource(
-            date.fromisoformat(item["source_date"]), item["source_name"], item["sha256"]
-        ) for item in payload["accepted_sources"]))
+        payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+        entries = payload["accepted_sources"]
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise PrismaWorkflowError("The legacy PRISMA import state could not be read safely.") from exc
-
-
-def _state(storage: AuctionStorage, legacy_path: Path) -> PrismaSourceState:
-    rows = storage.operations()
-    if not rows:
-        legacy = _legacy_state(legacy_path)
-        for accepted in legacy.accepted_sources:
-            storage.import_legacy_operation(
-                f"legacy-{accepted.source_date.isoformat()}-{accepted.sha256[:12]}",
-                accepted.source_date.isoformat(), accepted.source_name, accepted.sha256,
+    for item in entries:
+        try:
+            source_date_value = date.fromisoformat(item["source_date"])
+            source_name = item["source_name"]
+            digest = item["sha256"]
+            valid_name = (
+                type(source_name) is str and source_name and Path(source_name).name == source_name
             )
-        rows = storage.operations()
-    accepted = tuple(AcceptedPrismaSource(
-        date.fromisoformat(row["source_date"]), row["source_name"], row["sha256"]
-    ) for row in rows if row["status"] == "accepted")
-    return PrismaSourceState(accepted)
+            valid_digest = (
+                type(digest) is str and len(digest) == 64
+                and all(character in "0123456789abcdef" for character in digest)
+            )
+            if not valid_name or not valid_digest:
+                raise ValueError("Invalid legacy accepted source entry.")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PrismaWorkflowError("The legacy PRISMA import state could not be read safely.") from exc
+        storage.import_legacy_operation(
+            f"legacy-{source_date_value.isoformat()}-{digest[:12]}",
+            source_date_value.isoformat(), source_name, digest,
+        )
 
 
 def _result_from_operation(
@@ -200,7 +248,17 @@ def run_prisma_import_workflow(
     resolves on demand (from ECB) instead of permanently blocking. A
     previously resolved pair is served from `storage.AuctionStorage`'s
     durable cache. This function never touches a browser itself.
+
+    P.40 correction: ``source_date``/the source file's name/its whole-file
+    sha256 are never compared against any other operation to accept, reject,
+    or deduplicate this import — see the module docstring. ``source_date``
+    is used only to (a) reject an evaluation-clock-relative future date and
+    (b) record provenance on the ledger row; it never gates acceptance
+    against other operations.
     """
+    if source_date > evaluated_at.date():
+        raise PrismaWorkflowError("The source date is later than the evaluation date.")
+
     detection = detect_csv_format(source_path)
     if detection.format is CsvFormat.MONITORING:
         raise PrismaWorkflowError(
@@ -211,28 +269,25 @@ def run_prisma_import_workflow(
     if detection.format is not CsvFormat.PRISMA_EXPORT:
         raise PrismaWorkflowError(detection.message)
 
-    storage = AuctionStorage(database_path)
-    unresolved = storage.unresolved_operations()
-    source_date_text = source_date.isoformat()
-    if any(row["source_date"] != source_date_text for row in unresolved):
+    path = Path(source_path)
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
         raise PrismaWorkflowError(
-            "Another PRISMA source operation is unresolved. Retry that source before importing a new date."
-        )
-    captured: list[PrismaImportResult] = []
-    def importer(path):
-        result = import_prisma_export(path, reference_catalog=reference_catalog)
-        captured.append(result)
-        return result
-    update = evaluate_prisma_source_update(source_path, source_date=source_date, evaluated_at=evaluated_at,
-        prior_state=_state(storage, state_path), importer=importer)
-    if update.status is SourceUpdateStatus.REJECTED:
-        raise PrismaWorkflowError(update.message)
-    if any(row["sha256"] != update.sha256 for row in unresolved):
-        raise PrismaWorkflowError(
-            "Another PRISMA source operation is unresolved. Retry that source before importing a new source."
-        )
+            "The PRISMA source did not pass authoritative import validation."
+        ) from exc
 
-    imported = captured[0] if captured else import_prisma_export(source_path, reference_catalog=reference_catalog)
+    storage = AuctionStorage(database_path)
+    _migrate_legacy_json_state(storage, state_path)
+
+    try:
+        imported = import_prisma_export(path, reference_catalog=reference_catalog)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError("The PRISMA source changed while it was being validated.")
+    except Exception as exc:
+        raise PrismaWorkflowError(
+            "The PRISMA source did not pass authoritative import validation."
+        ) from exc
 
     # P.36.21/P.37 strict EUR gate: resolved once, before any operation-state
     # transition or output write. A blocked normalization never begins,
@@ -245,7 +300,7 @@ def run_prisma_import_workflow(
         raise PrismaPriceNormalizationError(normalization)
 
     try:
-        operation = storage.begin_operation(source_date_text, update.source_name, update.sha256)
+        operation = storage.begin_operation(source_date.isoformat(), path.name, digest)
         already_accepted = operation["status"] == "accepted"
         if operation["status"] == "pending":
             summary = {"total_source_rows": imported.total_source_rows,
@@ -253,7 +308,7 @@ def run_prisma_import_workflow(
                        "filtered": imported.filtered_count, "rejected": imported.rejected_count,
                        "audit_issues": len(imported.issues)}
             storage.apply_operation(operation["operation_id"], imported.rows, summary)
-            operation = storage.operation_by_id(operation["operation_id"])
+            operation = storage.operation_for_digest(digest)
 
         publication = publish_cumulative_output(
             imported, publication_directory, storage=storage,
@@ -269,7 +324,8 @@ def run_prisma_import_workflow(
 
         if not already_accepted:
             storage.finalize_operation(operation["operation_id"])
-        final = storage.operation_by_id(operation["operation_id"])
+        final = storage.operation_for_digest(digest)
+        status = SourceUpdateStatus.UNCHANGED if already_accepted else SourceUpdateStatus.APPLIED
         message = (
             "Exact retry: the accepted PRISMA source and confirmed EUR output are valid."
             if already_accepted else
@@ -289,7 +345,7 @@ def run_prisma_import_workflow(
             {}
         )
         return _result_from_operation(
-            final, publication.output_path, update.status, message, tuple(imported.issues),
+            final, publication.output_path, status, message, tuple(imported.issues),
             **current_stats,
             total_source_rows=imported.total_source_rows,
             accepted=imported.imported_count,
