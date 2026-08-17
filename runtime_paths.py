@@ -285,10 +285,16 @@ def _process_is_running(pid: int, *, platform: str | None = None,
         return True
 
 
-def _lock_owner_is_running(owner: str) -> bool:
+def _parse_lock_owner_pid(owner: str) -> int | None:
     try:
-        pid = int(owner.split(":", 1)[0])
+        return int(owner.split(":", 1)[0])
     except ValueError:
+        return None
+
+
+def _lock_owner_is_running(owner: str) -> bool:
+    pid = _parse_lock_owner_pid(owner)
+    if pid is None:
         return False
     return _process_is_running(pid)
 
@@ -394,19 +400,27 @@ def _path_identity(path: Path) -> tuple[int, ...]:
 
 
 def _inspect_stale_lock(lock: Path, *, stale_seconds: float) -> LockInspection | None:
+    """A lock is stale once its recorded owner is confirmed dead; a lock whose
+    owner cannot be positively identified (missing/malformed metadata, e.g. a
+    write interrupted mid-acquisition) instead falls back to the conservative
+    age threshold so it is never permanently blocked, but also never reclaimed
+    the instant it appears."""
     try:
         stat = lock.stat()
         age = time.time() - stat.st_mtime
         identity = _path_identity(lock)
     except FileNotFoundError:
         return None
-    if age < stale_seconds:
-        return None
     try:
         owner = (lock / LOCK_OWNER_FILENAME).read_text(encoding="ascii").strip()
     except (OSError, UnicodeError):
         owner = None
-    if owner is not None and _lock_owner_is_running(owner):
+    pid = _parse_lock_owner_pid(owner) if owner is not None else None
+    if pid is not None:
+        if _process_is_running(pid):
+            return None
+        return LockInspection(identity, owner)
+    if age < stale_seconds:
         return None
     return LockInspection(identity, owner)
 

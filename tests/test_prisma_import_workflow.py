@@ -14,7 +14,7 @@ import prisma_import_workflow as workflow
 import prisma_output
 import prisma_publication
 from csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvDetectionResult, CsvFormat
-from prisma_auction_lookup import AuctionEndRecord
+from ecb_rates import EcbRateNotFoundError
 from prisma_import_workflow import PrismaWorkflowError, run_prisma_import_workflow
 from prisma_references import (
     PrismaReference,
@@ -37,29 +37,16 @@ BASE = {
     "Surcharge": "0.5", "Unit Surcharge": "cent/kWh/h/Runtime", "State": "Finished",
 }
 
-# P.36.21: every default row above is `State: Finished`, so it is eligible
-# for strict EUR resolution. `eur_catalog()` grants EUR currency evidence for
-# "VGS Storage Hub (4290)" on both sides (a test-only catalog, distinct from
-# the real EXIT-only-evidenced `DEFAULT_PRISMA_REFERENCES`), and
-# `FakeAuctionLookup` supplies a deterministic auction-end instant for any
-# requested Auction ID, so these tests never perform real PRISMA/ECB network
-# access. See `tests/test_price_normalization.py` for EUR-conversion-specific
-# coverage (non-EUR rates, blocking, Decimal precision) and
-# `tests/test_app.py` for the real, unmocked `app.py` → `run_prisma_import_workflow`
-# call-graph proof.
-_AUCTION_END = datetime(2025, 1, 3, 12, 0, tzinfo=timezone.utc)
-
-
-class FakeAuctionLookup:
-    def __init__(self, end_at=None):
-        self.end_at = end_at or _AUCTION_END
-        self.calls: list[str] = []
-
-    def lookup(self, page, auction_id):
-        self.calls.append(auction_id)
-        return AuctionEndRecord(auction_id, self.end_at, "Finished")
-
-
+# P.37: every default row above uses `cent/kWh/h/Runtime` units, which
+# `processor.py` resolves to currency EUR -- `ecb_rates.resolve_rate_to_eur`
+# short-circuits EUR to the identity rate with zero ECB access, so these
+# tests never perform real ECB network access. `eur_catalog()` grants market/
+# storage name resolution for "VGS Storage Hub (4290)" (a test-only catalog,
+# distinct from the real `DEFAULT_PRISMA_REFERENCES`); its currency-evidence
+# fields are no longer read by P.37's pricing path. See
+# `tests/test_price_normalization.py` for EUR-conversion-specific coverage
+# (non-EUR rates, blocking, Decimal precision) and `tests/test_app.py` for
+# the real, unmocked `app.py` → `run_prisma_import_workflow` call-graph proof.
 def eur_catalog() -> PrismaReferenceCatalog:
     return PrismaReferenceCatalog((
         PrismaReference(
@@ -85,7 +72,6 @@ def run(source: Path, root: Path, day: date, **overrides):
         database_path=root / "auctions.db", state_path=root / "state.json",
         publication_directory=root / "published",
         reference_catalog=eur_catalog(),
-        auction_lookup=FakeAuctionLookup(),
     )
     kwargs.update(overrides)
     # `run_prisma_import_workflow()` no longer creates `publication_directory`
@@ -228,12 +214,13 @@ def test_csv_publication_failure_preserves_previous_bytes_and_retry_recovers(tmp
         tmp_path / "other.csv",
         [{**BASE, "Auction ID": "A-2", "Network Point ID Entry": "E-2", "Marketed Capacity": "2000"}],
     )
+    other_digest = hashlib.sha256(other.read_bytes()).hexdigest()
     with pytest.raises(PrismaWorkflowError):
         run(other, tmp_path, date(2025, 1, 2))
     assert published_path.read_bytes() == previous
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
         assert connection.execute(
-            "SELECT status FROM prisma_source_operations WHERE source_date='2025-01-02'"
+            "SELECT status FROM prisma_source_operations WHERE sha256=?", (other_digest,)
         ).fetchone()[0] == "data_committed"
 
     monkeypatch.setattr(workflow.publish_cumulative_output.__globals__["os"], "replace", real_replace)
@@ -243,21 +230,41 @@ def test_csv_publication_failure_preserves_previous_bytes_and_retry_recovers(tmp
     assert len(records) == 2
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
         assert connection.execute(
-            "SELECT status FROM prisma_source_operations WHERE source_date='2025-01-02'"
+            "SELECT status FROM prisma_source_operations WHERE sha256=?", (other_digest,)
         ).fetchone()[0] == "accepted"
 
 
-def test_different_same_date_source_is_blocked_while_operation_unresolved(tmp_path, monkeypatch):
+def test_different_same_date_source_is_accepted_while_another_operation_is_unresolved(tmp_path, monkeypatch):
+    """P.40 correction regression test: a real-Windows validation failure
+    showed a second, distinct CSV import for a source date that already had
+    an operation in flight was incorrectly rejected ("Accepted sources must
+    have unique source dates in ascending order."). Source-date uniqueness
+    is no longer any part of the ledger's identity (see
+    `prisma_import_workflow`'s module docstring), so a different file for
+    the same date must always be accepted independently, even while an
+    earlier, unrelated operation for that same date is still unresolved."""
     first = write_export(tmp_path / "first.csv", [BASE])
+    original_publish = workflow.publish_cumulative_output
     monkeypatch.setattr(
         workflow, "publish_cumulative_output",
         lambda *_a, **_k: (_ for _ in ()).throw(AuctionStorageError("stage failed")),
     )
     with pytest.raises(PrismaWorkflowError, match="stage failed"):
         run(first, tmp_path, date(2025, 1, 1))
-    changed = write_export(tmp_path / "changed.csv", [{**BASE, "Marketed Capacity": "5000"}])
-    with pytest.raises(PrismaWorkflowError, match="different PRISMA source.*unresolved"):
-        run(changed, tmp_path, date(2025, 1, 1))
+    with sqlite3.connect(tmp_path / "auctions.db") as connection:
+        assert connection.execute(
+            "SELECT status FROM prisma_source_operations"
+        ).fetchone()[0] == "data_committed"
+
+    monkeypatch.setattr(workflow, "publish_cumulative_output", original_publish)
+    changed = write_export(
+        tmp_path / "changed.csv",
+        [{**BASE, "Auction ID": "A-9", "Network Point ID Entry": "ENTRY-9", "Marketed Capacity": "5000"}],
+    )
+    result = run(changed, tmp_path, date(2025, 1, 1))
+    assert result.inserted == 1
+    _, records = read_published(tmp_path)
+    assert len(records) == 1
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
@@ -387,14 +394,30 @@ def test_legacy_json_migrates_with_unavailable_metadata_and_repairs_output(tmp_p
     assert len(records) == 1
 
 
-# --- P.36.21 strict EUR gate: the active workflow itself -------------------
+# --- P.36.21/P.37 strict EUR gate: the active workflow itself --------------
 
-def test_unresolved_currency_blocks_the_active_workflow_before_any_state_change(tmp_path):
-    from prisma_references import DEFAULT_PRISMA_REFERENCES
+class UnavailableEcbSource:
+    def fetch(self, currency, *, on_or_before, timeout_seconds):
+        raise EcbRateNotFoundError(f"no rate for {currency}")
 
-    source = write_export(tmp_path / "source.csv", [BASE])
+
+def _unresolved_entry_tariff_row(**overrides) -> dict:
+    """`BASE` with its entry tariff denominated in GBP (`pence/...`) instead
+    of EUR (`cent/...`), so it requires an ECB lookup -- combined with
+    `UnavailableEcbSource`, this reproduces P.37's fail-closed path without
+    real network access."""
+    return {
+        **BASE,
+        "Regulated Tariff Entry TSO": "1",
+        "Unit Regulated Entry Capacity Tariff": "pence/kWh/h/Runtime",
+        **overrides,
+    }
+
+
+def test_unresolved_ecb_rate_blocks_the_active_workflow_before_any_state_change(tmp_path):
+    source = write_export(tmp_path / "source.csv", [_unresolved_entry_tariff_row()])
     with pytest.raises(workflow.PrismaPriceNormalizationError) as caught:
-        run(source, tmp_path, date(2025, 1, 1), reference_catalog=DEFAULT_PRISMA_REFERENCES)
+        run(source, tmp_path, date(2025, 1, 1), ecb_source=UnavailableEcbSource())
     assert not caught.value.normalization.succeeded
     # `AuctionStorage(database_path)` always creates its schema on
     # construction, but no operation may have been begun and no auction row
@@ -410,30 +433,36 @@ def test_unresolved_currency_blocks_the_active_workflow_before_any_state_change(
 
 
 def test_mixed_resolved_and_unresolved_batch_publishes_nothing(tmp_path):
-    from prisma_references import DEFAULT_PRISMA_REFERENCES
-
     resolved_row = {
         **BASE, "Direction": "Exit", "Network Point Name Exit": "VGS Storage Hub (4290)",
         "Network Point Name Entry": "", "Network Point ID Exit": "EXIT-ID",
     }
-    unresolved_row = {**BASE, "Auction ID": "A-2", "Network Point ID Entry": "E-2"}
+    unresolved_row = _unresolved_entry_tariff_row(
+        **{"Auction ID": "A-2", "Network Point ID Entry": "E-2"}
+    )
     source = write_export(tmp_path / "mixed.csv", [resolved_row, unresolved_row])
 
     with pytest.raises(workflow.PrismaPriceNormalizationError):
-        run(source, tmp_path, date(2025, 1, 1), reference_catalog=DEFAULT_PRISMA_REFERENCES)
+        run(source, tmp_path, date(2025, 1, 1), ecb_source=UnavailableEcbSource())
     assert not (tmp_path / "published" / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
     with sqlite3.connect(tmp_path / "auctions.db") as connection:
         assert connection.execute("SELECT count(*) FROM auctions").fetchone()[0] == 0
 
 
-def test_retry_succeeds_once_currency_evidence_is_supplied(tmp_path):
-    from prisma_references import DEFAULT_PRISMA_REFERENCES
+def test_retry_succeeds_once_the_ecb_rate_becomes_available(tmp_path):
+    from decimal import Decimal
 
-    source = write_export(tmp_path / "source.csv", [BASE])
+    from ecb_rates import EcbRateObservation
+
+    source = write_export(tmp_path / "source.csv", [_unresolved_entry_tariff_row()])
     with pytest.raises(workflow.PrismaPriceNormalizationError):
-        run(source, tmp_path, date(2025, 1, 1), reference_catalog=DEFAULT_PRISMA_REFERENCES)
+        run(source, tmp_path, date(2025, 1, 1), ecb_source=UnavailableEcbSource())
 
-    retried = run(source, tmp_path, date(2025, 1, 1))  # default eur_catalog()
+    class WorkingEcbSource:
+        def fetch(self, currency, *, on_or_before, timeout_seconds):
+            return EcbRateObservation(on_or_before, Decimal("2"))
+
+    retried = run(source, tmp_path, date(2025, 1, 1), ecb_source=WorkingEcbSource())
     assert retried.inserted == 1
     _, records = read_published(tmp_path)
     assert len(records) == 1
@@ -478,6 +507,6 @@ def test_publication_directory_must_already_exist_and_is_never_silently_created(
             evaluated_at=datetime(2025, 1, 10, tzinfo=timezone.utc),
             database_path=tmp_path / "auctions.db", state_path=tmp_path / "state.json",
             publication_directory=missing,
-            reference_catalog=eur_catalog(), auction_lookup=FakeAuctionLookup(),
+            reference_catalog=eur_catalog(),
         )
     assert not missing.exists()

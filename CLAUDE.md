@@ -70,6 +70,10 @@ P.36.14, P.36.20, P.36.22).
   implemented and in active use; P.38 did not change their scope. P.36.5's
   PDF-scope decision (PDF input/processing excluded) still stands; its
   separate 14-column/four-field-split output decision remains withdrawn.
+  **P.37 (2026-08-16)** later corrected P.36.21's *resolution mechanism*
+  specifically for Tariff/Premium normalization (date/currency-keyed, no
+  PRISMA lookup needed) without changing its fail-closed *contract*; P.36.19's
+  Mapping-display mechanism is unaffected — see below.
 - P.36.6, P.36.7, and P.36.9 are suspended/superseded. The old 14-field
   P.36.6 prompt must not be executed.
 - P.36.10 (removal of the superseded monitoring/scheduler product flow and
@@ -84,25 +88,76 @@ P.36.14, P.36.20, P.36.22).
   `prisma_import_workflow.run_prisma_import_workflow`, which itself calls
   `prisma_publication.publish_cumulative_output` (P.36.16) to produce the
   active, EUR-confirmed 12-column result, merged into cumulative storage
-  without duplicates (`prisma_source_updates`/`storage.py`, unchanged).
-  `source_date` is always `datetime.now().date()` (today) now that there is
-  no UI date picker — the same fallback the pre-P.39 code already used when
-  no date was supplied. `prisma_output.write_prisma_output` (P.36.15, the
-  independent per-import single-file writer) is still not called from
-  `app.py` anywhere. Never assume a module is reachable from the running
-  application merely because it exists — verify the actual call graph before
-  relying on it.
+  without duplicates (`storage.py`). `source_date` is always
+  `datetime.now().date()` (today) now that there is no UI date picker — the
+  same fallback the pre-P.39 code already used when no date was supplied.
+  `prisma_output.write_prisma_output` (P.36.15, the independent per-import
+  single-file writer) is still not called from `app.py` anywhere. Never
+  assume a module is reachable from the running application merely because
+  it exists — verify the actual call graph before relying on it.
+- **P.40 (2026-08-17) correction:** cumulative-output row deduplication is
+  the composite key **Auction ID + Network Point Name + Capacity Type**
+  (`storage.AuctionStorage.published_output_row_keys`/
+  `record_published_output_row_keys`, consulted by
+  `prisma_publication.publish_cumulative_output`), never full-row content
+  equality. A real-Windows validation finding then showed a second,
+  independent invariant — `prisma_source_operations`' source-date
+  uniqueness, previously enforced by the now-deleted
+  `prisma_source_updates.py` (`evaluate_prisma_source_update`/
+  `PrismaSourceState`) and by a `UNIQUE(source_date)` table constraint —
+  still rejected a second, distinct CSV import sharing an already-accepted
+  source date ("Accepted sources must have unique source dates in ascending
+  order."). That invariant is removed from the active import path entirely:
+  `storage.AuctionStorage.begin_operation`/`operation_for_digest` key the
+  source-operation ledger by `sha256` alone (never `source_date`, filename,
+  or any cross-operation date comparison), so distinct files sharing a
+  source date are always independently accepted; a digest match against an
+  in-flight or already-accepted ledger row still resumes/short-circuits
+  reprocessing identical bytes, but this is an internal bookkeeping
+  optimization, never a rejection. Exact-retry and partial-overlap
+  idempotence are provided exclusively by the P.40 composite row key.
+  `AuctionStorage._ensure_source_operations_schema` migrates a database file
+  created before this correction (which still has the old
+  `UNIQUE(source_date)` constraint baked in) losslessly in place, since
+  `CREATE TABLE IF NOT EXISTS` alone cannot lift a constraint on an
+  already-existing table.
 - `price_normalization.py` is the one place a row's price is converted to
   EUR/MWh/h; never add a second conversion or rate-selection implementation.
-  A Finished auction's rate resolves only from `storage.AuctionStorage`'s
-  durable per-Auction-ID cache (`rate_resolution.py`): since P.38 removed all
-  browser/PRISMA-website access, there is no live transport left, and
-  `prisma_auction_lookup.PrismaAuctionLookup` fails closed
+  **P.37 (2026-08-16) correction:** the ECB rate is resolved by
+  `(auction_date, currency)` — the calendar date parsed directly from each
+  row's own `Start of Auction` (`row["auction_date"]`) and each price
+  field's own CSV-unit-derived ISO 4217 currency (`cent`→EUR, `pence`→GBP,
+  `halér`→CZK, `CHF/100`→CHF, parsed independently for the exit-side
+  tariff, entry-side tariff, and Premium/Surcharge in `processor.py`) —
+  never from a market/storage catalog and never via a live PRISMA
+  auction-detail lookup. This makes the pipeline fully self-sufficient from
+  the CSV alone, even though P.38 removed all browser/PRISMA-website
+  access: a never-before-cached `(auction_date, currency)` pair resolves on
+  demand from the public ECB endpoint the first time, then reuses
+  `storage.AuctionStorage`'s durable `(auction_date, currency)` cache
+  (`ecb_auction_date_rates`) thereafter — unlike the pre-P.37 mechanism, it
+  is never permanently blocked merely for being previously unseen. A
+  bundle row's exit and entry sides are resolved and converted
+  independently when their currencies differ, and only the two already-EUR
+  values are summed; the same independence applies to Premium/Surcharge.
+  Fails closed exactly as before (P.36.21's contract, unchanged): a row
+  whose currency/date pair has no confirmed ECB rate blocks the entire
+  batch, with no partial output.
+  `rate_resolution.py`/`prisma_auction_lookup.py` are unmodified by P.37 and
+  remain in active use, but *only* for the Mapping UI's own separate
+  `Currency`/`Rate to EUR`/`Rate Date` display columns
+  (`mapping_presentation.py`, `app.py`'s own `_refresh_mapping_display()`
+  call graph) — an entirely different, Auction-ID-keyed mechanism from the
+  Tariff/Premium output path above. That display path still resolves a
+  Finished auction's rate only from `storage.AuctionStorage`'s durable
+  per-Auction-ID cache (`auction_rate_resolutions`, distinct from
+  `ecb_auction_date_rates`): since P.38 removed all browser/PRISMA-website
+  access, `prisma_auction_lookup.PrismaAuctionLookup` still fails closed
   (`PrismaAuctionDetailTransportError`) whenever no explicit `fetcher` is
-  supplied — which is always true in the running application. A
-  never-before-resolved Finished auction therefore blocks EUR normalization
-  for its whole batch (P.36.21's existing fail-closed contract, unchanged);
-  a previously resolved auction keeps working from cache indefinitely. The
+  supplied — which is always true in the running application — so a
+  never-before-resolved Finished auction still shows "Unavailable" in
+  Mapping until a resolution is fixed some other way; this is documented,
+  accepted, pre-existing behavior that P.37 was not asked to change. The
   pre-P.36 Excel pipeline (`storage.export_excel`/
   `AuctionStorage.EXCEL_COLUMNS`) is dormant, intentionally unconverted,
   independently tested compatibility code — it is never called by the active
@@ -153,13 +208,14 @@ additionally show `Network Point Name`, `TSO Name Exit`, and `TSO Name Entry`,
 but must never add, remove, rename, or reorder the 12 output columns. Do not
 reuse the Prisma Function Mini contract by assumption.
 
-`Tariff Price`/`Premium Price` must be confirmed EUR/MWh/h (P.36.21) in every
-active processing path, including the real "Import PRISMA Export" button. A
-processing operation must fail closed — create, replace, or append nothing,
-and never finalize as accepted — when any otherwise-publishable row lacks a
-confirmed EUR conversion; never publish a source-currency value as if it
-were EUR, and never guess a currency. The pre-P.36 `auctions` SQLite
-table/Excel export (`storage.export_excel`/`AuctionStorage.EXCEL_COLUMNS`)
+`Tariff Price`/`Premium Price` must be confirmed EUR/MWh/h (P.36.21, resolution
+mechanism corrected by P.37 — see above) in every active processing path,
+including the real Select CSV action (P.39). A processing operation must fail
+closed — create, replace, or append nothing, and never finalize as accepted —
+when any otherwise-publishable row lacks a confirmed EUR conversion for its
+required auction date/currency pair; never publish a source-currency value as
+if it were EUR, and never guess a currency or unit. The pre-P.36 `auctions`
+SQLite table/Excel export (`storage.export_excel`/`AuctionStorage.EXCEL_COLUMNS`)
 is dormant, unreachable from the active workflow, explicitly out of this
 contract's scope, and still stores/labels the unconverted source-currency
 price under its unchanged legacy names.

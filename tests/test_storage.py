@@ -10,6 +10,8 @@ from openpyxl.utils import get_column_letter
 from storage import (
     AuctionStorage,
     AuctionStorageError,
+    EcbAuctionDateRateConflictError,
+    EcbAuctionDateRateRecord,
     HistoricalBackfillStatus,
     RateResolutionConflictError,
     RateResolutionRecord,
@@ -939,3 +941,201 @@ def test_rate_resolution_table_created_idempotently(tmp_path) -> None:
     storage = AuctionStorage(path)
     storage.save_rate_resolution(_rate_resolution())
     assert storage.get_rate_resolution("62333921") is not None
+
+
+# --- P.40 composite-key publication row index -------------------------------
+
+
+def test_published_output_row_keys_starts_empty(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    assert storage.published_output_row_keys() == set()
+
+
+def test_record_published_output_row_keys_persists_and_is_readable(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([
+        ("A-1", "VGS Storage Hub (4290)", "entry"),
+        ("A-2", "Another Point", "exit"),
+    ])
+    assert storage.published_output_row_keys() == {
+        ("A-1", "VGS Storage Hub (4290)", "entry"),
+        ("A-2", "Another Point", "exit"),
+    }
+
+
+def test_record_published_output_row_keys_with_empty_list_is_a_no_op(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([])
+    assert storage.published_output_row_keys() == set()
+
+
+def test_recording_an_already_recorded_key_raises_without_corrupting_state(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([("A-1", "Point", "entry")])
+    with pytest.raises(AuctionStorageError):
+        storage.record_published_output_row_keys([("A-1", "Point", "entry")])
+    assert storage.published_output_row_keys() == {("A-1", "Point", "entry")}
+
+
+def test_recording_a_batch_with_an_internal_duplicate_key_persists_nothing(tmp_path) -> None:
+    """A batch that would violate the composite-key uniqueness constraint on
+    its own must fail atomically: the second `INSERT` for the repeated key
+    raises inside the same transaction, which is rolled back in full,
+    including the first, otherwise-valid key in the batch."""
+    storage = AuctionStorage(tmp_path / "test.db")
+    with pytest.raises(AuctionStorageError):
+        storage.record_published_output_row_keys([
+            ("A-1", "Point", "entry"),
+            ("A-1", "Point", "entry"),
+        ])
+    assert storage.published_output_row_keys() == set()
+
+
+def test_different_capacity_types_for_the_same_auction_and_point_are_distinct_keys(
+    tmp_path,
+) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.record_published_output_row_keys([
+        ("A-1", "Point", "entry"),
+        ("A-1", "Point", "exit"),
+        ("A-1", "Point", "bundle"),
+    ])
+    assert storage.published_output_row_keys() == {
+        ("A-1", "Point", "entry"),
+        ("A-1", "Point", "exit"),
+        ("A-1", "Point", "bundle"),
+    }
+
+
+def test_published_output_row_keys_table_created_idempotently_and_preserves_data(
+    tmp_path,
+) -> None:
+    path = tmp_path / "test.db"
+    AuctionStorage(path).record_published_output_row_keys([("A-1", "Point", "entry")])
+    # Reopening (simulating a new session against the same database file, or
+    # an old database file predating this table) must not fail and must
+    # never reset already-recorded keys.
+    reopened = AuctionStorage(path)
+    assert reopened.published_output_row_keys() == {("A-1", "Point", "entry")}
+
+
+def _ecb_auction_date_rate(**overrides) -> EcbAuctionDateRateRecord:
+    fields = dict(
+        auction_date="2026-08-03",
+        currency="USD",
+        ecb_publication_date="2026-08-01",
+        rate_to_eur="0.9156670635",
+        resolved_at_utc="2026-08-04T09:00:00+00:00",
+        source_version="ecb_rates=1;price_normalization=2",
+    )
+    fields.update(overrides)
+    return EcbAuctionDateRateRecord(**fields)
+
+
+def test_get_ecb_auction_date_rate_returns_none_when_unresolved(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") is None
+
+
+def test_save_and_get_ecb_auction_date_rate_round_trips(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    record = _ecb_auction_date_rate()
+    saved = storage.save_ecb_auction_date_rate(record)
+    assert saved == record
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") == record
+
+
+def test_save_ecb_auction_date_rate_is_idempotent_for_identical_data(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    second = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(resolved_at_utc="2099-01-01T00:00:00+00:00")
+    )
+    # resolved_at_utc is excluded from the equality check: reuse is a no-op
+    # and returns the originally fixed record, never overwritten by a later
+    # resolution timestamp alone.
+    assert second == first
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD").resolved_at_utc == first.resolved_at_utc
+
+
+def test_save_ecb_auction_date_rate_rejects_contradicting_rate(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    with pytest.raises(EcbAuctionDateRateConflictError):
+        storage.save_ecb_auction_date_rate(_ecb_auction_date_rate(rate_to_eur="0.5"))
+    # The previously fixed record is untouched by the rejected attempt.
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD").rate_to_eur == "0.9156670635"
+
+
+def test_save_ecb_auction_date_rate_rejects_contradicting_publication_date(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    with pytest.raises(EcbAuctionDateRateConflictError):
+        storage.save_ecb_auction_date_rate(
+            _ecb_auction_date_rate(ecb_publication_date="2026-07-31")
+        )
+
+
+def test_two_distinct_auction_date_currency_pairs_are_resolved_independently(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-03", currency="USD")
+    )
+    second = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-03", currency="GBP", rate_to_eur="1.15")
+    )
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") == first
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "GBP") == second
+
+
+def test_same_currency_different_auction_dates_are_resolved_independently(tmp_path) -> None:
+    storage = AuctionStorage(tmp_path / "test.db")
+    first = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-01", rate_to_eur="0.9")
+    )
+    second = storage.save_ecb_auction_date_rate(
+        _ecb_auction_date_rate(auction_date="2026-08-04", rate_to_eur="0.91")
+    )
+    assert storage.get_ecb_auction_date_rate("2026-08-01", "USD") == first
+    assert storage.get_ecb_auction_date_rate("2026-08-04", "USD") == second
+
+
+def test_ecb_auction_date_rates_table_created_idempotently(tmp_path) -> None:
+    path = tmp_path / "test.db"
+    AuctionStorage(path)
+    AuctionStorage(path)  # second construction must not fail or reset data
+    storage = AuctionStorage(path)
+    storage.save_ecb_auction_date_rate(_ecb_auction_date_rate())
+    assert storage.get_ecb_auction_date_rate("2026-08-03", "USD") is not None
+
+
+def test_upsert_row_carrying_p37_only_fields_persists_only_legacy_columns(tmp_path) -> None:
+    """`processor.py` rows now also carry P.37's side-specific source-price/
+    currency breakdown fields, which are not `auctions` table columns.
+    `_translate_legacy_price_fields` must drop them before `_upsert_rows`
+    builds its INSERT column list from the row dict's own keys, or this
+    raises `sqlite3.OperationalError: no such column`."""
+    storage = AuctionStorage(tmp_path / "test.db")
+    row = {
+        "auction_id": "1", "auction_date": "2026-08-03", "exit_market": "",
+        "entry_market": "", "direction": "exit", "network_point": "Point",
+        "network_point_id": "NP-1", "tso_exit": "", "tso_entry": "",
+        "product_type": "WD", "flow_start": "2026-08-03 00:00",
+        "flow_end": "2026-08-04 00:00", "booked_capacity_kwh_h": 1000.0,
+        "runtime_hours": 24.0, "state": "Finished",
+        "tariff_exit_source_mwh_h": 10.0, "tariff_exit_currency": "EUR",
+        "tariff_entry_source_mwh_h": 0.0, "tariff_entry_currency": "",
+        "premium_source_mwh_h": 5.0, "premium_currency": "EUR",
+        "tariff_source_mwh_h": 10.0,
+    }
+    stats = storage.upsert([row])
+    assert stats["inserted"] == 1
+    with closing(sqlite3.connect(storage.database_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        stored = connection.execute("SELECT * FROM auctions").fetchone()
+    assert stored["tariff_eur_mwh_h"] == 10.0
+    assert stored["premium_eur_mwh_h"] == 5.0
+    assert set(stored.keys()).isdisjoint({
+        "tariff_exit_source_mwh_h", "tariff_exit_currency",
+        "tariff_entry_source_mwh_h", "tariff_entry_currency", "premium_currency",
+    })

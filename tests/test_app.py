@@ -18,7 +18,7 @@ import prisma_publication
 from csv_contracts import PRISMA_EXPORT_COLUMNS
 from mapping_presentation import MAPPING_DISPLAY_FIELDS
 from processor import PrismaImportError
-from prisma_source_updates import SourceUpdateStatus
+from prisma_import_workflow import SourceUpdateStatus
 from storage import AuctionStorage, RateResolutionRecord
 from version import APP_DISPLAY_NAME, __version__
 from ui_components import APP_STYLE
@@ -134,6 +134,47 @@ def _seed_resolved_rate(
             resolved_at_utc="2026-08-01T15:05:00+00:00", source_version="test",
         )
     )
+
+
+def _seed_ecb_date_rate(
+    widget, auction_date: str, currency: str, *, rate_to_eur: str = "1",
+    ecb_publication_date: str | None = None,
+) -> None:
+    """Directly populate `AuctionStorage`'s durable P.37 `(auction_date,
+    currency)` rate cache, mirroring `_seed_resolved_rate` above for the
+    separate, Auction-ID-keyed Mapping-display cache. The real active
+    processing call graph (`app.py` -> `run_prisma_import_workflow` ->
+    `price_normalization.normalize_prices_for_output`) never injects a fake
+    `ecb_source`, so a non-EUR currency with no cached rate would otherwise
+    need real network access to the public ECB endpoint; seeding this cache
+    directly exercises the exact same read path a previously resolved pair
+    uses in production, without any network access.
+    """
+    from storage import EcbAuctionDateRateRecord
+
+    AuctionStorage(widget._runtime_paths.database).save_ecb_auction_date_rate(
+        EcbAuctionDateRateRecord(
+            auction_date=auction_date, currency=currency,
+            ecb_publication_date=ecb_publication_date or auction_date,
+            rate_to_eur=rate_to_eur,
+            resolved_at_utc="2026-08-01T15:05:00+00:00",
+            source_version="test",
+        )
+    )
+
+
+def _block_live_ecb_access(monkeypatch) -> None:
+    """Patch the production ECB HTTP source so a non-EUR currency with no
+    cached P.37 rate fails closed deterministically and without any real
+    network access, since `app.py`'s real processing call graph never
+    injects a fake `ecb_source` of its own.
+    """
+    from ecb_rates import EcbRateNotFoundError
+
+    def fail(self, currency, *, on_or_before, timeout_seconds):
+        raise EcbRateNotFoundError(f"no rate for {currency} (test double)")
+
+    monkeypatch.setattr("ecb_rates.EcbSdwHttpRateSource.fetch", fail)
 
 
 def test_initial_dashboard_state_and_accessibility(window):
@@ -885,7 +926,7 @@ def test_startup_shows_generic_error_when_the_publication_directory_is_unavailab
     assert "Documents directory is unavailable" in message.call_args.args[2]
 
 
-# --- P.36.21 correction: the real, unmocked active processing call graph ----
+# --- P.36.21/P.37 correction: the real, unmocked active processing call graph
 #
 # These tests never mock `run_prisma_import_workflow` itself: they drive the
 # real `PrismaMonitorApp._select_manual_csv()` -> `_process_selected_csv()` ->
@@ -893,12 +934,13 @@ def test_startup_shows_generic_error_when_the_publication_directory_is_unavailab
 # -> `price_normalization.normalize_prices_for_output()` ->
 # `prisma_publication.publish_cumulative_output()` call graph end-to-end —
 # Select CSV is the single user action that immediately processes the
-# selected file and merges it into cumulative persistent storage. Per the
-# revised specification, PrismaFunction never opens, controls, or downloads
-# anything from the PRISMA website, so a resolved rate always comes from
-# `_seed_resolved_rate` (`storage.AuctionStorage`'s durable per-Auction-ID
-# cache) here, exactly as it would in production for a previously resolved
-# auction.
+# selected file and merges it into cumulative persistent storage. Under
+# P.37, an EUR-unit row resolves without any cache seeding at all (no
+# PRISMA/ECB transport needed for EUR identity); a non-EUR row needs either
+# `_block_live_ecb_access` (deterministic failure, no network) or
+# `_seed_ecb_date_rate` (`storage.AuctionStorage`'s durable
+# `(auction_date, currency)` cache, populated directly, exactly as it would
+# be in production for a previously resolved pair).
 
 
 def _select_csv_and_wait(widget, monkeypatch, csv_path, *, timeout_s: float = 10.0):
@@ -934,10 +976,18 @@ _RESOLVABLE_EXIT_ROW = {
     "Network Point ID Exit": "EXIT-1", "Network Point ID Entry": "", "State": "Finished",
     "Regulated Tariff Exit TSO": "2", "Unit Regulated Exit Capacity Tariff": "cent/kWh/h/Runtime",
 }
+# `_MAPPING_ROW_DEFAULTS`'s "Start of Auction" (01.01.2025 09:00) parses to
+# auction_date "2025-01-01" -- the P.37 cache key `_seed_ecb_date_rate`
+# below must match.
+_UNRESOLVED_ENTRY_AUCTION_DATE = "2025-01-01"
 _UNRESOLVED_ENTRY_ROW = {
     "Auction ID": "1", "Direction": "Entry",
     "Network Point Name Entry": "VGS Storage Hub (4290)", "Network Point ID Entry": "ENTRY-1",
     "State": "Finished",
+    # A non-EUR unit (GBP) so this row genuinely requires a P.37 ECB
+    # resolution, unlike `_RESOLVABLE_EXIT_ROW`'s EUR unit (identity, no
+    # transport needed at all).
+    "Regulated Tariff Entry TSO": "1", "Unit Regulated Entry Capacity Tariff": "pence/kWh/h/Runtime",
 }
 
 
@@ -945,7 +995,9 @@ def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
     window, monkeypatch, tmp_path,
 ):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
+    # No cache seeding needed: `_RESOLVABLE_EXIT_ROW`'s unit is EUR, which
+    # `ecb_rates.resolve_rate_to_eur` resolves to the identity rate with no
+    # transport at all under P.37.
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 
@@ -967,13 +1019,14 @@ def test_active_processing_path_reaches_strict_eur_normalization_and_publishes(
     assert record[header.index("Tariff Price")] == "20.000000"
 
 
-def test_unresolved_currency_produces_no_output_and_no_ui_success(window, monkeypatch, tmp_path):
+def test_unresolved_ecb_rate_produces_no_output_and_no_ui_success(window, monkeypatch, tmp_path):
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
-    # ENTRY-side VGS Storage Hub has no approved currency evidence in the
-    # real, unmodified `DEFAULT_PRISMA_REFERENCES` catalog, and this auction
-    # was never previously resolved, so there is no cached rate either.
+    # `_UNRESOLVED_ENTRY_ROW`'s GBP unit was never previously resolved, so
+    # there is no cached rate, and `_block_live_ecb_access` makes the live
+    # ECB lookup fail deterministically without real network access.
     _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
+    _block_live_ecb_access(monkeypatch)
 
     outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
@@ -987,14 +1040,14 @@ def test_unresolved_currency_produces_no_output_and_no_ui_success(window, monkey
 
 def test_mixed_batch_publishes_nothing_through_the_real_app_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    # Auction "1" has a cached resolution; auction "2" was never resolved and
-    # has no live transport to fall back to.
-    _seed_resolved_rate(widget, "1")
+    # Auction "1" is EUR (resolves without any transport); auction "2" is
+    # GBP and was never resolved, with live ECB access blocked deterministically.
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [
         _RESOLVABLE_EXIT_ROW,
         {**_UNRESOLVED_ENTRY_ROW, "Auction ID": "2", "Network Point ID Entry": "ENTRY-2"},
     ])
+    _block_live_ecb_access(monkeypatch)
 
     outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
 
@@ -1007,6 +1060,7 @@ def test_blocked_processing_does_not_finalize_source_operation_as_accepted(windo
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
+    _block_live_ecb_access(monkeypatch)
 
     outcome = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert outcome.result is None
@@ -1015,20 +1069,21 @@ def test_blocked_processing_does_not_finalize_source_operation_as_accepted(windo
     assert all(row["status"] != "accepted" for row in storage.operations())
 
 
-def test_retry_after_a_rate_becomes_available_succeeds(window, monkeypatch, tmp_path):
+def test_retry_after_an_ecb_rate_becomes_available_succeeds(window, monkeypatch, tmp_path):
     widget, _ = window
     csv_path = tmp_path / "Auction_overview.csv"
-    _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
+    _write_prisma_export_with_rows(csv_path, [_UNRESOLVED_ENTRY_ROW])
 
-    # First selection: auction "1" has never been resolved before, so there
-    # is no cached rate and no live transport to resolve it.
+    # First selection: this GBP-unit row has never been resolved before, and
+    # live ECB access is blocked deterministically, so there is no rate.
+    _block_live_ecb_access(monkeypatch)
     first = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert first.result is None
     assert not (widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME).exists()
 
     # Second selection of the same source: the rate has since become
     # available (e.g. resolved separately and cached).
-    _seed_resolved_rate(widget, "1")
+    _seed_ecb_date_rate(widget, _UNRESOLVED_ENTRY_AUCTION_DATE, "GBP", rate_to_eur="0.5")
     second = _select_csv_and_wait(widget, monkeypatch, csv_path)
     assert second.result is not None
     published = widget._publication_directory / prisma_publication.PUBLISHED_OUTPUT_FILENAME
@@ -1037,7 +1092,6 @@ def test_retry_after_a_rate_becomes_available_succeeds(window, monkeypatch, tmp_
 
 def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
     monkeypatch.setattr(
         AuctionStorage, "export_excel",
         lambda *_a, **_k: pytest.fail(
@@ -1053,7 +1107,6 @@ def test_legacy_excel_export_is_never_invoked_by_the_active_workflow(window, mon
 
 def test_legacy_published_csv_is_never_touched_by_the_active_workflow(window, monkeypatch, tmp_path):
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
     legacy_path = (
         widget._publication_directory / prisma_publication.LEGACY_PUBLISHED_OUTPUT_FILENAME
     )
@@ -1077,7 +1130,6 @@ def test_reselecting_the_same_csv_does_not_duplicate_cumulative_rows(window, mon
     # selecting and processing the exact same accepted source a second time
     # must be an idempotent exact retry, never a second set of rows.
     widget, _ = window
-    _seed_resolved_rate(widget, "1")
     csv_path = tmp_path / "Auction_overview.csv"
     _write_prisma_export_with_rows(csv_path, [_RESOLVABLE_EXIT_ROW])
 

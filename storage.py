@@ -90,6 +90,31 @@ class RateResolutionRecord:
     source_version: str
 
 
+class EcbAuctionDateRateConflictError(AuctionStorageError):
+    """A previously fixed P.37 (auction_date, currency) rate resolution
+    contradicts newly retrieved authoritative ECB data. The previously fixed
+    result is never silently overwritten."""
+
+
+@dataclass(frozen=True)
+class EcbAuctionDateRateRecord:
+    """One deterministically fixed P.37 ECB rate-to-EUR resolution, keyed by
+    (auction_date, currency) -- the calendar date parsed from a row's own
+    `Start of Auction` and a price field's own CSV-unit-derived ISO 4217
+    currency -- sufficient to audit the resolution safely without repeating
+    the ECB lookup. Independent of, and never mixed with,
+    `RateResolutionRecord`'s Auction-ID-keyed P.36.19 table, which continues
+    to serve only the Mapping UI's own Currency/Rate to EUR/Rate Date
+    columns."""
+
+    auction_date: str
+    currency: str
+    ecb_publication_date: str
+    rate_to_eur: str
+    resolved_at_utc: str
+    source_version: str
+
+
 class AuctionStorage:
     AUCTION_IDENTITY_FIELDS = (
         "auction_id", "network_point_id", "direction", "flow_start", "flow_end",
@@ -190,6 +215,73 @@ class AuctionStorage:
         resolved_at_utc TEXT NOT NULL,
         source_version TEXT NOT NULL
     )"""
+    ECB_AUCTION_DATE_RATE_FIELDS = (
+        "auction_date", "currency", "ecb_publication_date",
+        "rate_to_eur", "resolved_at_utc", "source_version",
+    )
+    ECB_AUCTION_DATE_RATES_SQL = """CREATE TABLE IF NOT EXISTS ecb_auction_date_rates (
+        auction_date TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        ecb_publication_date TEXT NOT NULL,
+        rate_to_eur TEXT NOT NULL,
+        resolved_at_utc TEXT NOT NULL,
+        source_version TEXT NOT NULL,
+        PRIMARY KEY (auction_date, currency)
+    )"""
+    # P.37: row-dict keys `processor.py` produces that describe the
+    # side-specific source-currency price/currency breakdown, needed by
+    # `price_normalization.py` but not part of the dormant `auctions` table
+    # schema. Dropped by `_translate_legacy_price_fields` before a row ever
+    # reaches `_upsert_rows`, whose INSERT/UPDATE column list is built
+    # directly from the row dict's own keys.
+    _P37_ONLY_FIELDS = (
+        "tariff_exit_source_mwh_h", "tariff_exit_currency",
+        "tariff_entry_source_mwh_h", "tariff_entry_currency",
+        "premium_currency",
+    )
+    # P.40 correction (2026-08-17, real-Windows validation finding): the
+    # source-operation ledger's identity moved from `UNIQUE(source_date)` to
+    # `UNIQUE(sha256)`. Rejecting a second distinct import for a date that
+    # already has an accepted source was the exact regression this corrects;
+    # row-level idempotence is provided exclusively by
+    # `published_output_row_keys` below, never by this ledger, so multiple
+    # genuinely different CSV files sharing a source date must never
+    # conflict here. `sha256` is still consulted (never source_date) so a
+    # literal exact-content retry of a still in-flight or already-accepted
+    # operation resumes/short-circuits instead of creating a redundant
+    # duplicate ledger row for identical bytes.
+    SOURCE_OPERATIONS_SQL = """CREATE TABLE IF NOT EXISTS prisma_source_operations (
+        operation_id TEXT PRIMARY KEY,
+        source_date TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
+        summary_json TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(sha256)
+    )"""
+    # P.40 composite-key cumulative-publication identity boundary: "Auction
+    # ID + Network Point Name + Capacity Type" is the exact, sole persistent
+    # row key `prisma_publication.publish_cumulative_output` uses to decide
+    # whether an incoming row already has a durably published counterpart,
+    # across sessions and across otherwise-unrelated source files/dates. The
+    # PRIMARY KEY enforces this at the database level for every row this
+    # table ever records; there is no separate content-based key. This table
+    # is created additively (`CREATE TABLE IF NOT EXISTS`) so an existing
+    # database predating this increment opens safely with no rewrite of any
+    # other table; rows already published under the pre-P.40 exact-full-row
+    # rule have no key here until the next time their source is processed
+    # (a documented, one-time transitional limit — see
+    # `prisma_publication.py`'s module docstring for the full contract,
+    # including the immutable-row, never-update-only-skip policy).
+    PUBLISHED_OUTPUT_KEYS_SQL = """CREATE TABLE IF NOT EXISTS published_output_row_keys (
+        auction_id TEXT NOT NULL,
+        network_point_name TEXT NOT NULL,
+        capacity_type TEXT NOT NULL,
+        recorded_at_utc TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (auction_id, network_point_name, capacity_type)
+    )"""
 
     def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,21 +371,12 @@ class AuctionStorage:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE (auction_id, network_point_id, direction, flow_start, flow_end)
                 )""",
-                    """
-                CREATE TABLE IF NOT EXISTS prisma_source_operations (
-                    operation_id TEXT PRIMARY KEY,
-                    source_date TEXT NOT NULL,
-                    source_name TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('pending','data_committed','accepted')),
-                    summary_json TEXT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(source_date)
-                )""",
                     self.RATE_RESOLUTIONS_SQL,
+                    self.ECB_AUCTION_DATE_RATES_SQL,
+                    self.PUBLISHED_OUTPUT_KEYS_SQL,
             ):
                 connection.execute(statement)
+            self._ensure_source_operations_schema(connection)
             self._ensure_historical_schema(connection)
 
     @staticmethod
@@ -345,6 +428,43 @@ class AuctionStorage:
             expected.execute("CREATE TABLE auctions (id INTEGER PRIMARY KEY)")
             cls._create_historical_tables(expected)
             return cls._schema_fingerprint(expected)
+
+    @classmethod
+    def _ensure_source_operations_schema(cls, connection: sqlite3.Connection) -> None:
+        """Create `prisma_source_operations`, migrating a pre-P.40-correction
+        database in place.
+
+        A database created before this correction has `UNIQUE(source_date)`
+        baked into the table itself; `CREATE TABLE IF NOT EXISTS` is a no-op
+        against an already-existing table, so it alone cannot lift that
+        constraint on an existing installation — exactly the database state
+        that reproduced the real-Windows regression this corrects. When the
+        old constraint is detected, the table is losslessly rebuilt under
+        `SOURCE_OPERATIONS_SQL`'s `UNIQUE(sha256)` identity within the same
+        transaction `_create_schema` already holds, so this either fully
+        applies or leaves the database completely unchanged.
+        """
+        existing_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='prisma_source_operations'"
+        ).fetchone()
+        if existing_sql is None:
+            connection.execute(cls.SOURCE_OPERATIONS_SQL)
+            return
+        normalized = "".join((existing_sql[0] or "").split())
+        if "UNIQUE(source_date)" not in normalized:
+            return
+        connection.execute(
+            "ALTER TABLE prisma_source_operations RENAME TO prisma_source_operations_pre_p40"
+        )
+        connection.execute(cls.SOURCE_OPERATIONS_SQL)
+        connection.execute(
+            "INSERT OR IGNORE INTO prisma_source_operations "
+            "(operation_id, source_date, source_name, sha256, status, summary_json, "
+            "created_at, updated_at) "
+            "SELECT operation_id, source_date, source_name, sha256, status, summary_json, "
+            "created_at, updated_at FROM prisma_source_operations_pre_p40"
+        )
+        connection.execute("DROP TABLE prisma_source_operations_pre_p40")
 
     @classmethod
     def _ensure_historical_schema(cls, connection: sqlite3.Connection) -> None:
@@ -591,9 +711,6 @@ class AuctionStorage:
                 "SELECT * FROM prisma_source_operations ORDER BY source_date"
             ))
 
-    def unresolved_operations(self) -> list[sqlite3.Row]:
-        return [row for row in self.operations() if row["status"] != "accepted"]
-
     def import_legacy_operation(
         self, operation_id: str, source_date: str, source_name: str, digest: str
     ) -> None:
@@ -605,20 +722,28 @@ class AuctionStorage:
                 (operation_id, source_date, source_name, digest),
             )
 
-    def operation_for_date(self, source_date: str) -> sqlite3.Row | None:
+    def operation_for_digest(self, digest: str) -> sqlite3.Row | None:
         with self._connection() as connection, connection:
             return connection.execute(
-                "SELECT * FROM prisma_source_operations WHERE source_date = ?", (source_date,)
+                "SELECT * FROM prisma_source_operations WHERE sha256 = ?", (digest,)
             ).fetchone()
 
     def begin_operation(self, source_date: str, source_name: str, digest: str) -> sqlite3.Row:
-        existing = self.operation_for_date(source_date)
+        """Begin (or resume) the source-operation ledger entry for one CSV's
+        exact byte content.
+
+        P.40 correction: identity is `sha256` only, never `source_date` — a
+        different file for a date that already has an accepted or
+        in-progress operation is always its own independent operation, never
+        rejected or blocked. Resuming by digest is purely an internal
+        bookkeeping optimization for crash recovery (an interrupted retry of
+        the exact same bytes continues the same ledger row instead of
+        creating a redundant duplicate); it provides no row-level dedup
+        guarantee of its own — that is `prisma_publication`'s composite-key
+        responsibility exclusively.
+        """
+        existing = self.operation_for_digest(digest)
         if existing is not None:
-            if existing["sha256"] != digest:
-                state = "accepted" if existing["status"] == "accepted" else "unresolved"
-                raise AuctionStorageError(
-                    f"A different PRISMA source for this date is already {state}."
-                )
             return existing
         operation_id = uuid.uuid4().hex
         with self._connection() as connection, connection:
@@ -627,20 +752,32 @@ class AuctionStorage:
                 "(operation_id, source_date, source_name, sha256, status) VALUES (?, ?, ?, ?, 'pending')",
                 (operation_id, source_date, source_name, digest),
             )
-        return self.operation_for_date(source_date)  # type: ignore[return-value]
+        return self.operation_for_digest(digest)  # type: ignore[return-value]
 
     @classmethod
     def _translate_legacy_price_fields(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """See `_LEGACY_PRICE_FIELD_ALIASES` for why this translation exists."""
+        """See `_LEGACY_PRICE_FIELD_ALIASES` for why the rename exists, and
+        `_P37_ONLY_FIELDS` for why those keys are dropped: both exist so a
+        `processor.py` row dict -- which now also carries P.37's
+        side-specific source-price/currency breakdown for
+        `price_normalization.py` -- can still be passed unmodified into
+        `_upsert_rows`, whose INSERT/UPDATE column list is built directly
+        from the row dict's own keys and must match the `auctions` table
+        schema exactly."""
         translated = []
         for row in rows:
-            if not any(field in row for field in cls._LEGACY_PRICE_FIELD_ALIASES):
+            if not any(
+                field in row
+                for field in (*cls._LEGACY_PRICE_FIELD_ALIASES, *cls._P37_ONLY_FIELDS)
+            ):
                 translated.append(row)
                 continue
             updated = dict(row)
             for new_name, legacy_name in cls._LEGACY_PRICE_FIELD_ALIASES.items():
                 if new_name in updated:
                     updated[legacy_name] = updated.pop(new_name)
+            for field in cls._P37_ONLY_FIELDS:
+                updated.pop(field, None)
             translated.append(updated)
         return translated
 
@@ -788,6 +925,117 @@ class AuctionStorage:
                 ),
             )
         return record
+
+    def get_ecb_auction_date_rate(
+        self, auction_date: str, currency: str
+    ) -> EcbAuctionDateRateRecord | None:
+        """Return the previously fixed P.37 rate resolution for
+        `(auction_date, currency)`, or `None` when no resolution has been
+        fixed yet."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM ecb_auction_date_rates WHERE auction_date = ? AND currency = ?",
+                (auction_date, currency),
+            ).fetchone()
+        if row is None:
+            return None
+        return EcbAuctionDateRateRecord(**{
+            field: row[field] for field in self.ECB_AUCTION_DATE_RATE_FIELDS
+        })
+
+    def save_ecb_auction_date_rate(
+        self, record: EcbAuctionDateRateRecord
+    ) -> EcbAuctionDateRateRecord:
+        """Atomically fix one new P.37 `(auction_date, currency)` rate
+        resolution.
+
+        Reusing an identical previously fixed resolution is a no-op that
+        returns the existing record unchanged (`resolved_at_utc` is excluded
+        from the equality check, since reuse must not fail merely because
+        time has passed). Any other difference from a previously fixed
+        record for the same `(auction_date, currency)` is a contradiction
+        between cached data and newly retrieved authoritative ECB data, and
+        raises `EcbAuctionDateRateConflictError` with both records for
+        diagnostics instead of silently overwriting the previously fixed
+        result.
+        """
+        with self._connection() as connection, self._transaction(connection):
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                "SELECT * FROM ecb_auction_date_rates WHERE auction_date = ? AND currency = ?",
+                (record.auction_date, record.currency),
+            ).fetchone()
+            if existing_row is not None:
+                existing = EcbAuctionDateRateRecord(**{
+                    field: existing_row[field] for field in self.ECB_AUCTION_DATE_RATE_FIELDS
+                })
+                comparable = [
+                    field for field in self.ECB_AUCTION_DATE_RATE_FIELDS
+                    if field != "resolved_at_utc"
+                ]
+                if all(getattr(existing, field) == getattr(record, field) for field in comparable):
+                    return existing
+                raise EcbAuctionDateRateConflictError(
+                    "A previously fixed ECB rate resolution for "
+                    f"{record.auction_date}/{record.currency} contradicts newly "
+                    f"retrieved data: existing={existing!r} new={record!r}."
+                )
+            connection.execute(
+                "INSERT INTO ecb_auction_date_rates "
+                "(auction_date, currency, ecb_publication_date, rate_to_eur, "
+                "resolved_at_utc, source_version) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    record.auction_date, record.currency, record.ecb_publication_date,
+                    record.rate_to_eur, record.resolved_at_utc, record.source_version,
+                ),
+            )
+        return record
+
+    def published_output_row_keys(self) -> set[tuple[str, str, str]]:
+        """Return every P.40 composite key ("Auction ID + Network Point Name
+        + Capacity Type") ever durably recorded as published, across every
+        prior call and every prior session. An incoming row whose key is in
+        this set already has a stored, immutable counterpart and must be
+        skipped, never replaced, by the caller."""
+        with self._connection() as connection:
+            return {
+                (row["auction_id"], row["network_point_name"], row["capacity_type"])
+                for row in connection.execute(
+                    "SELECT auction_id, network_point_name, capacity_type "
+                    "FROM published_output_row_keys"
+                )
+            }
+
+    def record_published_output_row_keys(
+        self, keys: list[tuple[str, str, str]]
+    ) -> None:
+        """Atomically record newly published P.40 composite keys.
+
+        Each ``(auction_id, network_point_name, capacity_type)`` tuple must
+        not already be recorded; the caller (`prisma_publication.
+        publish_cumulative_output`) always pre-checks against
+        `published_output_row_keys()` before calling this, so a collision
+        here indicates a caller ordering defect, not stale/racing data, and
+        is raised as `AuctionStorageError` rather than silently ignored or
+        overwritten.
+        """
+        if not keys:
+            return
+        with self._connection() as connection, self._transaction(connection):
+            connection.execute("BEGIN IMMEDIATE")
+            for auction_id, network_point_name, capacity_type in keys:
+                try:
+                    connection.execute(
+                        "INSERT INTO published_output_row_keys "
+                        "(auction_id, network_point_name, capacity_type) "
+                        "VALUES (?, ?, ?)",
+                        (auction_id, network_point_name, capacity_type),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise AuctionStorageError(
+                        "A P.40 composite publication key was already "
+                        "recorded; the stored row is never replaced."
+                    ) from exc
 
     @staticmethod
     def apply_excel_widths(path: Path) -> None:

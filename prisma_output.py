@@ -21,15 +21,16 @@ performs no PRISMA navigation, browser, download, UI, accumulation, or
 publication-policy operation; those remain scoped to other increments
 (`P.36.16` and later).
 
-P.36.21 strict EUR contract. `Tariff Price`/`Premium Price` must be confirmed
-EUR/MWh/h before this module ever creates an output file.
-`price_normalization.normalize_prices_for_output` (P.36.21) is called once,
-after import, using the exact-Auction-ID rate resolved by P.36.19's
-`rate_resolution.resolve_rates_for_rows`; when even one otherwise-publishable
-row lacks a confirmed, usable EUR conversion, `write_prisma_output` returns
-`PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED` and writes nothing at all —
-no reservation, no staged file, no partial output. Only a fully normalized
-batch reaches `transform_row`/`_write_rows`.
+P.36.21/P.37 strict EUR contract. `Tariff Price`/`Premium Price` must be
+confirmed EUR/MWh/h before this module ever creates an output file.
+`price_normalization.normalize_prices_for_output` is called once, after
+import, using the ECB rate resolved per P.37 by `(auction_date, currency)`
+parsed directly from each row's own `Start of Auction` and CSV unit strings
+— no PRISMA lookup, no market-catalog currency; when even one otherwise-
+publishable row lacks a confirmed, usable EUR conversion,
+`write_prisma_output` returns `PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED`
+and writes nothing at all — no reservation, no staged file, no partial
+output. Only a fully normalized batch reaches `transform_row`/`_write_rows`.
 
 No customer-approved publication naming/collision policy exists yet for this
 specific transformed output (that is explicitly deferred to the blocked
@@ -58,7 +59,6 @@ from price_normalization import (
     format_price,
     normalize_prices_for_output,
 )
-from prisma_auction_lookup import PrismaAuctionLookup
 from prisma_references import DEFAULT_PRISMA_REFERENCES, PrismaReferenceCatalog
 from processor import PrismaImportError, PrismaImportResult, import_prisma_export
 from storage import AuctionStorage
@@ -116,8 +116,8 @@ _FAILURE_MESSAGES: dict[PrismaOutputOutcome, str] = {
     ),
     PrismaOutputOutcome.PRICE_NORMALIZATION_FAILED: (
         "One or more auctions could not be confirmed in EUR/MWh/h, so no "
-        "output was created. Resolve the missing currency, auction-end, or "
-        "ECB rate evidence, then retry."
+        "output was created. Resolve the missing ECB rate evidence for the "
+        "required auction date and currency, then retry."
     ),
     PrismaOutputOutcome.WRITE_FAILED: (
         "The transformed output could not be written to the selected folder."
@@ -270,8 +270,6 @@ def write_prisma_output(
     *,
     storage: AuctionStorage,
     reference_catalog: PrismaReferenceCatalog = DEFAULT_PRISMA_REFERENCES,
-    auction_lookup: PrismaAuctionLookup | None = None,
-    page: object = None,
     ecb_source: EcbRateSource | None = None,
 ) -> PrismaOutputResult:
     """Transform one validated official PRISMA Export CSV into the exact
@@ -286,17 +284,19 @@ def write_prisma_output(
     The destination boundary is validated before anything else. Exactly one
     output file is produced per successful call; none is produced if the
     destination is invalid, the transformation itself fails (a malformed
-    source file), or — the P.36.21 strict EUR contract — at least one
+    source file), or — the P.36.21/P.37 strict EUR contract — at least one
     otherwise-publishable row lacks a confirmed EUR/MWh/h conversion for its
     Tariff Price/Premium Price (see `price_normalization.py`). This performs
     no accumulation, deduplication, or cross-call state tracking: every call
     is an independent operation over its own ``source_path``, matching the
     excluded scope of `P.36.16`.
 
-    ``storage`` durably caches P.36.19 rate resolutions (reused, never
-    repeated, for an Auction ID already resolved elsewhere in the same
-    processing operation); ``auction_lookup``/``page``/``ecb_source`` are
-    forwarded unchanged to `rate_resolution.resolve_rates_for_rows`.
+    ``storage`` durably caches P.37's `(auction_date, currency)` rate
+    resolutions (reused, never repeated, for a pair already resolved
+    elsewhere in the same processing operation); ``ecb_source`` is forwarded
+    unchanged to `price_normalization.resolve_ecb_rates_for_rows`.
+    ``reference_catalog`` is forwarded only to `import_prisma_export`'s own
+    market/storage resolution, unrelated to currency normalization.
     """
     try:
         directory = _validate_output_directory(output_directory)
@@ -315,9 +315,6 @@ def write_prisma_output(
     normalization = normalize_prices_for_output(
         imported.rows,
         storage=storage,
-        reference_catalog=reference_catalog,
-        auction_lookup=auction_lookup,
-        page=page,
         ecb_source=ecb_source,
     )
     if not normalization.succeeded:

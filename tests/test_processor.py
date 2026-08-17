@@ -252,14 +252,45 @@ def test_flow_before_auction_calendar_date_is_rejected(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize(("unit", "factor"), [("cent/kWh/h/Runtime", 10), ("cent/kWh/d/Runtime", 10 / 24)])
-def test_tariff_and_surcharge_conversions(tmp_path: Path, unit: str, factor: float) -> None:
+@pytest.mark.parametrize(("unit", "currency", "factor"), [
+    ("cent/kWh/h/Runtime", "EUR", 10), ("cent/kWh/d/Runtime", "EUR", 10 / 24),
+    ("pence/kWh/h/Runtime", "GBP", 10), ("pence/kWh/d/Runtime", "GBP", 10 / 24),
+    ("halér/kWh/h/Runtime", "CZK", 10), ("halér/kWh/d/Runtime", "CZK", 10 / 24),
+    ("CHF/100/kWh/h/Runtime", "CHF", 10), ("CHF/100/kWh/d/Runtime", "CHF", 10 / 24),
+])
+def test_tariff_and_surcharge_conversions(
+    tmp_path: Path, unit: str, currency: str, factor: float
+) -> None:
     row = {**BASE, "Regulated Tariff Exit TSO": "1", "Unit Regulated Exit Capacity Tariff": unit,
            "Regulated Tariff Entry TSO": "2", "Unit Regulated Entry Capacity Tariff": unit,
            "Surcharge": "3", "Unit Surcharge": unit}
     result = process_csv(write_csv(tmp_path, [row]))[0]
-    assert result["tariff_source_mwh_h"] == pytest.approx(3 * factor)
+    assert result["tariff_exit_source_mwh_h"] == pytest.approx(1 * factor)
+    assert result["tariff_exit_currency"] == currency
+    assert result["tariff_entry_source_mwh_h"] == pytest.approx(2 * factor)
+    assert result["tariff_entry_currency"] == currency
     assert result["premium_source_mwh_h"] == pytest.approx(3 * factor)
+    assert result["premium_currency"] == currency
+    # LEGACY (pre-P.37, dormant `auctions`-table path): the currency-blind
+    # sum of both tariff sides, unchanged in value from before P.37.
+    assert result["tariff_source_mwh_h"] == pytest.approx(3 * factor)
+
+
+def test_bundle_exit_and_entry_tariff_and_currency_stay_independent_when_currencies_differ(
+    tmp_path: Path,
+) -> None:
+    row = {
+        **BASE,
+        "Regulated Tariff Exit TSO": "1", "Unit Regulated Exit Capacity Tariff": "pence/kWh/h/Runtime",
+        "Regulated Tariff Entry TSO": "2", "Unit Regulated Entry Capacity Tariff": "cent/kWh/h/Runtime",
+    }
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert (result["tariff_exit_source_mwh_h"], result["tariff_exit_currency"]) == (10.0, "GBP")
+    assert (result["tariff_entry_source_mwh_h"], result["tariff_entry_currency"]) == (20.0, "EUR")
+    # LEGACY sum is still the currency-blind addition of both sides, exactly
+    # as before P.37 -- only `price_normalization.py` may treat these two
+    # currencies independently.
+    assert result["tariff_source_mwh_h"] == pytest.approx(30.0)
 
 
 def test_empty_price_unit_pairs_are_zero(tmp_path: Path) -> None:
@@ -268,6 +299,15 @@ def test_empty_price_unit_pairs_are_zero(tmp_path: Path) -> None:
            "Surcharge": "", "Unit Surcharge": ""}
     result = process_csv(write_csv(tmp_path, [row]))[0]
     assert (result["tariff_source_mwh_h"], result["premium_source_mwh_h"]) == (0, 0)
+    assert (result["tariff_exit_currency"], result["tariff_entry_currency"], result["premium_currency"]) == (
+        "", "", "",
+    )
+
+
+def test_present_zero_price_has_nonblank_currency(tmp_path: Path) -> None:
+    row = {**BASE, "Surcharge": "0", "Unit Surcharge": "cent/kWh/h/Runtime"}
+    result = process_csv(write_csv(tmp_path, [row]))[0]
+    assert (result["premium_source_mwh_h"], result["premium_currency"]) == (0.0, "EUR")
 
 
 def test_empty_price_with_present_unit_has_auditable_rejection(tmp_path: Path) -> None:
@@ -283,7 +323,14 @@ def test_empty_price_with_present_unit_has_auditable_rejection(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(("value", "unit"), [
-    ("1", "pence/kWh/h/Runtime"), ("1", "halér/kWh/h/Runtime"), ("1", ""),
+    ("1", ""), ("1", "USD/kWh/h/Runtime"),
+    # CHF without the literal "/100" segment stays unsupported -- the unit
+    # string itself, not just the currency name, must match exactly.
+    ("1", "CHF/kWh/h/Runtime"),
+    # "/d/d" and "/h/d" (no "/Runtime" suffix) stay unsupported, unchanged
+    # from before P.37.
+    ("1", "cent/kWh/d/d"), ("1", "cent/kWh/h/d"),
+    ("1", "pence/kWh/d/d"), ("1", "halér/kWh/h/d"),
     ("bad", "cent/kWh/h/Runtime"), ("-1", "cent/kWh/h/Runtime"),
     ("NaN", "cent/kWh/h/Runtime"), ("Infinity", "cent/kWh/h/Runtime"),
 ])
@@ -394,7 +441,15 @@ def test_wrong_csv_contract_is_rejected(tmp_path: Path) -> None:
 def test_process_csv_compatibility_and_output_keys(tmp_path: Path) -> None:
     result = process_csv(write_csv(tmp_path, [BASE]))
     assert isinstance(result, list) and isinstance(result[0], dict)
-    assert set(result[0]) == {"auction_id", "auction_date", "exit_market", "entry_market", "direction", "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type", "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours", "tariff_source_mwh_h", "premium_source_mwh_h", "state"}
+    assert set(result[0]) == {
+        "auction_id", "auction_date", "exit_market", "entry_market", "direction",
+        "network_point", "network_point_id", "tso_exit", "tso_entry", "product_type",
+        "flow_start", "flow_end", "booked_capacity_kwh_h", "runtime_hours",
+        "tariff_exit_source_mwh_h", "tariff_exit_currency",
+        "tariff_entry_source_mwh_h", "tariff_entry_currency",
+        "premium_source_mwh_h", "premium_currency",
+        "tariff_source_mwh_h", "state",
+    }
 
 
 def test_cp1252_text_and_numeric_prices_are_preserved(tmp_path: Path) -> None:
