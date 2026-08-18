@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLayout,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -88,13 +87,11 @@ class PrismaMonitorApp(QMainWindow):
         handler: Callable[[], None],
         *,
         primary: bool = False,
-        sidebar: bool = True,
         tooltip: str = "",
     ) -> QPushButton:
         button = QPushButton(text)
         button.clicked.connect(handler)
         button.setProperty("primary", primary)
-        button.setProperty("sidebar", sidebar)
         button.setToolTip(tooltip)
         button.setAccessibleName(text)
         return button
@@ -102,68 +99,67 @@ class PrismaMonitorApp(QMainWindow):
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("workspace")
-        outer = QHBoxLayout(root)
+        outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(260)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(22, 24, 22, 22)
-        side.setSpacing(9)
+
+        outer.addWidget(self._build_toolbar())
+
+        content = QWidget()
+        content.setObjectName("contentArea")
+        main = QVBoxLayout(content)
+        main.setContentsMargins(20, 16, 20, 0)
+        main.setSpacing(0)
+        main.addWidget(self._build_mapping_panel(), 1)
+        outer.addWidget(content, 1)
+
+        outer.addWidget(self._build_status_bar())
+
+        self.setCentralWidget(root)
+        self.setStyleSheet(APP_STYLE)
+        self._update_mapping_empty_state()
+        self._set_status_badge("ready", "Ready")
+
+    def _build_toolbar(self) -> QFrame:
+        toolbar = QFrame()
+        toolbar.setObjectName("toolbar")
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(20, 10, 20, 10)
+        bar.setSpacing(14)
         brand = QLabel("PrismaFunction")
         brand.setObjectName("brand")
         subtitle = QLabel("PRISMA Export processing")
         subtitle.setObjectName("subtitle")
-        side.addWidget(brand)
-        side.addWidget(subtitle)
-        side.addSpacing(20)
+        bar.addWidget(brand)
+        bar.addWidget(subtitle)
+        bar.addStretch()
+        self.manual_csv_label = QLabel("No CSV selected")
+        self.manual_csv_label.setObjectName("filename")
+        self.manual_csv_label.setAccessibleName("Selected PRISMA Export CSV")
+        bar.addWidget(self.manual_csv_label)
         self.choose_manual_csv_button = self._button(
-            "Select CSV", self._select_manual_csv,
+            "Select CSV", self._select_manual_csv, primary=True,
             tooltip=(
                 "Select a local PRISMA Export CSV; it is validated, "
                 "processed, and published immediately"
             ),
         )
-        self.manual_csv_label = QLabel("No CSV selected")
-        self.manual_csv_label.setObjectName("filename")
-        self.manual_csv_label.setWordWrap(True)
-        self.manual_csv_label.setAccessibleName("Selected PRISMA Export CSV")
-        self._side_group(
-            side, "PRISMA EXPORT CSV", self.choose_manual_csv_button, self.manual_csv_label
-        )
-        side.addStretch()
+        bar.addWidget(self.choose_manual_csv_button)
         version = QLabel(f"Version {__version__}")
         version.setObjectName("subtitle")
-        side.addWidget(version)
+        bar.addWidget(version)
+        return toolbar
 
-        content = QWidget()
-        content.setObjectName("contentArea")
-        main = QVBoxLayout(content)
-        main.setContentsMargins(28, 22, 28, 20)
-        main.setSpacing(16)
-        header = QHBoxLayout()
-        titles = QVBoxLayout()
-        title = QLabel("PRISMA Export processing")
-        title.setStyleSheet("font-size: 19pt; font-weight: 700; color: #152033")
-        titles.addWidget(title)
-        content_subtitle = QLabel(
-            "Select a PRISMA Export CSV to process and add it to the cumulative mapping."
-        )
-        content_subtitle.setObjectName("contentSubtitle")
-        titles.addWidget(content_subtitle)
-        header.addLayout(titles)
-        header.addStretch()
-        main.addLayout(header)
+    def _build_mapping_panel(self) -> QFrame:
         mapping_panel = QFrame()
         mapping_panel.setObjectName("panel")
         mapping_layout = QVBoxLayout(mapping_panel)
         mapping_layout.setContentsMargins(16, 14, 16, 10)
         mapping_header = QHBoxLayout()
-        mapping_title = QLabel("Mapping")
-        mapping_title.setObjectName("contentSectionLabel")
-        mapping_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        mapping_header.addWidget(mapping_title)
+        self.mapping_section_label = QLabel("Mapping")
+        self.mapping_section_label.setObjectName("contentSectionLabel")
+        self.mapping_section_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        mapping_header.addWidget(self.mapping_section_label)
         mapping_header.addStretch()
         mapping_layout.addLayout(mapping_header)
         self.mapping_table_model = MappingTableModel(self)
@@ -188,39 +184,86 @@ class PrismaMonitorApp(QMainWindow):
         self.mapping_empty_label.setAlignment(Qt.AlignCenter)
         self.mapping_empty_label.setStyleSheet("color:#718096; padding:18px")
         mapping_layout.addWidget(self.mapping_empty_label)
-        main.addWidget(mapping_panel, 1)
-        status_row = QHBoxLayout()
-        status_caption = QLabel("Status:")
-        status_caption.setObjectName("contentSectionLabel")
-        status_row.addWidget(status_caption)
+        return mapping_panel
+
+    def _build_status_bar(self) -> QFrame:
+        status_bar = QFrame()
+        status_bar.setObjectName("statusBar")
+        status_outer = QVBoxLayout(status_bar)
+        status_outer.setContentsMargins(20, 8, 20, 8)
+        status_outer.setSpacing(6)
+
+        counters_row = QHBoxLayout()
+        counters_row.setSpacing(18)
+        self.status_badge = QLabel("Ready")
+        self.status_badge.setObjectName("statusBadge")
+        counters_row.addWidget(self.status_badge)
+        self.status_counter_labels: dict[str, QLabel] = {}
+        for name in ("Source", "Accepted", "Filtered", "Rejected", "Duplicates", "Inserted"):
+            label = QLabel(f"{name}: –")
+            label.setObjectName("statusCounter")
+            self.status_counter_labels[name] = label
+            counters_row.addWidget(label)
+        counters_row.addStretch()
+        self.details_button = QPushButton("Details")
+        self.details_button.setObjectName("detailsButton")
+        self.details_button.setCheckable(True)
+        self.details_button.setAccessibleName("Details")
+        self.details_button.toggled.connect(self._toggle_status_details)
+        counters_row.addWidget(self.details_button)
+        status_outer.addLayout(counters_row)
+
+        self.status_details_panel = QFrame()
+        self.status_details_panel.setObjectName("statusDetails")
+        details_layout = QHBoxLayout(self.status_details_panel)
+        details_layout.setContentsMargins(0, 6, 0, 0)
+        details_caption = QLabel("Status:")
+        details_caption.setObjectName("contentSectionLabel")
+        details_layout.addWidget(details_caption)
         self.status = QLabel("Ready")
         self.status.setObjectName("primaryStatus")
         self.status.setWordWrap(True)
-        status_row.addWidget(self.status, 1)
-        main.addLayout(status_row)
-        outer.addWidget(sidebar)
-        outer.addWidget(content, 1)
-        self.setCentralWidget(root)
-        self.setStyleSheet(APP_STYLE)
-        self._update_mapping_empty_state()
+        details_layout.addWidget(self.status, 1)
+        self.status_details_panel.setVisible(False)
+        status_outer.addWidget(self.status_details_panel)
 
-    @staticmethod
-    def _side_group(layout: QLayout, label: str, *widgets: QWidget) -> QLabel:
-        heading = QLabel(label)
-        heading.setObjectName("section")
-        layout.addWidget(heading)
-        for widget in widgets:
-            layout.addWidget(widget)
-        layout.addSpacing(13)
-        return heading
+        return status_bar
+
+    def _toggle_status_details(self, checked: bool) -> None:
+        self.status_details_panel.setVisible(checked)
+        self.details_button.setText("Hide details" if checked else "Details")
+
+    def _set_status_badge(self, state: str, text: str) -> None:
+        self.status_badge.setText(text)
+        self.status_badge.setProperty("state", state)
+        self.status_badge.style().unpolish(self.status_badge)
+        self.status_badge.style().polish(self.status_badge)
+
+    def _update_status_counters(self, result: PrismaWorkflowResult) -> None:
+        source_rows = result.total_source_rows if result.total_source_rows is not None else result.processed
+        accepted = result.accepted if result.accepted is not None else result.processed
+        deduplicated = result.deduplicated if result.deduplicated is not None else 0
+        values = {
+            "Source": source_rows, "Accepted": accepted, "Filtered": result.filtered,
+            "Rejected": result.rejected, "Duplicates": deduplicated, "Inserted": result.inserted,
+        }
+        for name, value in values.items():
+            text = "–" if value is None else str(value)
+            self.status_counter_labels[name].setText(f"{name}: {text}")
+        has_issues = any(value not in (None, 0) for value in (result.filtered, result.rejected, deduplicated))
+        self._set_status_badge(
+            "warning" if has_issues else "success", "Warning" if has_issues else "Success"
+        )
 
     def _update_controls(self) -> None:
         self.choose_manual_csv_button.setEnabled(not self._processing_active)
 
     def _update_mapping_empty_state(self) -> None:
-        has_rows = self.mapping_table_model.rowCount() > 0
+        count = self.mapping_table_model.rowCount()
+        has_rows = count > 0
         self.mapping_table.setVisible(has_rows)
         self.mapping_empty_label.setVisible(not has_rows)
+        self.mapping_section_label.setText(f"Mapping · {count} row" + ("" if count == 1 else "s"))
 
     def _clear_mapping_display(self) -> None:
         """Discard any displayed mapping rows and show the empty state.
@@ -290,6 +333,7 @@ class PrismaMonitorApp(QMainWindow):
         """
         self._processing_active = True
         self.status.setText("Importing PRISMA Export CSV...")
+        self._set_status_badge("processing", "Processing")
         self._update_controls()
         self._processing_generation += 1
         generation = self._processing_generation
@@ -366,6 +410,7 @@ class PrismaMonitorApp(QMainWindow):
         if not self._is_closing and self._finish_processing(thread):
             self._refresh_mapping_display_from_output(result.output_path)
             self.status.setText(result.summary())
+            self._update_status_counters(result)
 
     def _processing_failed(
         self, error: str, thread: threading.Thread | None
@@ -377,6 +422,7 @@ class PrismaMonitorApp(QMainWindow):
                 f"PRISMA import failed: {error}",
             )
             self.status.setText(f"PRISMA import failed: {error}")
+            self._set_status_badge("error", "Error")
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
