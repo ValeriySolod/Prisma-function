@@ -200,16 +200,14 @@ def test_initial_dashboard_state_and_accessibility(window):
 def test_light_workspace_widgets_use_explicit_contrast_styles(window):
     widget, _ = window
     content = widget.findChild(QWidget, "contentArea")
-    subtitle = widget.findChild(QLabel, "contentSubtitle")
     section_labels = widget.findChildren(QLabel, "contentSectionLabel")
 
     assert content is not None
-    assert subtitle is not None
-    assert {label.text() for label in section_labels} == {"Mapping", "Status:"}
+    assert any(label.text().startswith("Mapping") for label in section_labels)
+    assert any(label.text() == "Status:" for label in section_labels)
 
     required_rules = (
         "QWidget#contentArea QLabel { color: #243247; }",
-        "QLabel#contentSubtitle { color: #66758a; }",
         "QLabel#contentSectionLabel { color: #314157; font-weight: 600; }",
         "QWidget#contentArea QTableView { border: none; background: white; color: #243247;",
         "QWidget#contentArea QTableView::item { color: #243247; }",
@@ -218,7 +216,15 @@ def test_light_workspace_widgets_use_explicit_contrast_styles(window):
     for rule in required_rules:
         assert rule in APP_STYLE
 
-    assert "QFrame#sidebar QLabel { color: #d8e1ee; }" in APP_STYLE
+    assert "QFrame#toolbar QLabel { color: #d8e1ee; }" in APP_STYLE
+
+
+def test_left_sidebar_is_replaced_by_a_full_width_toolbar(window):
+    widget, _ = window
+    assert widget.findChild(QWidget, "sidebar") is None
+    toolbar = widget.findChild(QWidget, "toolbar")
+    assert toolbar is not None
+    assert widget.choose_manual_csv_button.property("primary") is True
 
 
 def test_recent_activity_section_is_completely_removed(window):
@@ -275,6 +281,11 @@ def test_mapping_panel_receives_positive_vertical_stretch(window):
     index = main_layout.indexOf(mapping_panel)
     assert index >= 0
     assert main_layout.stretch(index) > 0
+
+
+def test_mapping_section_label_shows_cumulative_row_count(window):
+    widget, _ = window
+    assert widget.mapping_section_label.text() == "Mapping · 0 rows"
 
 
 def _write_valid_prisma_export(path):
@@ -790,6 +801,21 @@ def test_processing_success_preserves_full_statistics(window, monkeypatch, tmp_p
     assert not widget._processing_threads
     assert widget.choose_manual_csv_button.isEnabled()
 
+    assert widget.status_counter_labels["Source"].text() == "Source: 4"
+    assert widget.status_counter_labels["Accepted"].text() == "Accepted: 4"
+    assert widget.status_counter_labels["Filtered"].text() == "Filtered: 0"
+    assert widget.status_counter_labels["Rejected"].text() == "Rejected: 0"
+    assert widget.status_counter_labels["Duplicates"].text() == "Duplicates: 0"
+    assert widget.status_counter_labels["Inserted"].text() == "Inserted: 1"
+    assert widget.status_badge.text() == "Success"
+    assert widget.status_badge.property("state") == "success"
+
+    # The full status text stays in the collapsed Details panel until asked for.
+    assert widget.status_details_panel.isHidden()
+    widget.details_button.setChecked(True)
+    assert not widget.status_details_panel.isHidden()
+    assert widget.details_button.text() == "Hide details"
+
     widget._processing_finished(app.ProcessingOutcome(workflow_result, None, widget._processing_generation))
     assert widget.status.text().startswith("accepted Source rows: 4")
 
@@ -814,11 +840,46 @@ def test_import_processing_success_and_error_restore_controls(window, monkeypatc
     assert widget._processing_active
     assert not widget.choose_manual_csv_button.isEnabled()
     assert "Importing" in widget.status.text()
+    assert widget.status_badge.property("state") == "processing"
 
     widget._processing_failed("Unsupported CSV format.", None)
     assert not widget._processing_active
     assert widget.choose_manual_csv_button.isEnabled()
     assert "Unsupported CSV format" in widget.status.text()
+    assert widget.status_badge.property("state") == "error"
+    assert widget.status_badge.text() == "Error"
+
+
+def test_status_badge_shows_warning_when_a_successful_import_has_filtered_or_rejected_rows(
+    window, monkeypatch, tmp_path
+):
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_valid_prisma_export(target)
+    workflow_result = app.PrismaWorkflowResult(
+        5, 1, 0, 0, 2, 1, (), Path("result.xlsx"),
+        SourceUpdateStatus.APPLIED, "accepted",
+    )
+    monkeypatch.setattr(
+        app, "run_prisma_import_workflow", Mock(return_value=workflow_result)
+    )
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    captured: list = []
+    widget.signals.processing_finished.connect(captured.append)
+    widget._select_manual_csv()
+    deadline = time.monotonic() + 5.0
+    while not captured and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.02)
+    assert captured, "processing_finished was not received within the timeout"
+
+    assert widget.status_counter_labels["Filtered"].text() == "Filtered: 2"
+    assert widget.status_counter_labels["Rejected"].text() == "Rejected: 1"
+    assert widget.status_badge.text() == "Warning"
+    assert widget.status_badge.property("state") == "warning"
 
 
 def test_select_csv_is_ignored_while_processing_is_active(window, monkeypatch, tmp_path):
