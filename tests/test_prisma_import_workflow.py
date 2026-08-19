@@ -125,7 +125,13 @@ def test_new_repeat_and_next_daily_export_are_cumulative_and_enriched(tmp_path):
     # match); A-2/A-3 are genuinely distinct (different Booked Capacity) and
     # are appended.
     assert len(records) == 3
-    assert {record["Entry Market"] for record in records} == {"VGS Storage Hub"}
+    # "VGS Storage Hub (4290)" is a RESERVOIR/storage point; per the approved
+    # ENTSOG-based mapping contract a legacy catalog storage label never
+    # populates Entry Market -- only a transmission operator's balancing
+    # zone would, and none is resolvable here (no real Network Point EIC/TSO
+    # evidence in this test fixture), so Entry Market stays blank. The
+    # storage facility identity is still fully carried by Network Point Name.
+    assert {record["Entry Market"] for record in records} == {""}
     assert sorted(record["Booked Capacity"] for record in records) == ["1000.0", "2000.0", "3000.0"]
 
 

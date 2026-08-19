@@ -97,7 +97,13 @@ def write_csv(tmp_path: Path, rows: list[dict]) -> Path:
 
 def test_known_entry_storage_enrichment_and_source_metadata(tmp_path: Path) -> None:
     result = import_prisma_export(write_csv(tmp_path, [BASE]))
-    assert result.rows[0]["entry_market"] == "VGS Storage Hub"
+    # "VGS Storage Hub (4290)" is RESERVOIR/storage evidence. Per the
+    # approved ENTSOG-based mapping contract, a legacy catalog storage label
+    # never populates Entry Market -- only a resolvable transmission-
+    # operator balancing zone would, and BASE carries no real Network Point
+    # EIC/TSO evidence, so Entry Market stays blank. The storage identity
+    # itself is still fully captured below via `entry_reference`.
+    assert result.rows[0]["entry_market"] == ""
     assert result.rows[0]["exit_market"] == ""
     assert result.rows[0]["direction"] == "entry"
     record = result.enriched_records[0]
@@ -463,9 +469,13 @@ def test_non_required_side_is_populated_from_its_own_evidence_regardless_of_dire
     enriched = result.rows[0]
     assert enriched["direction"] == expected_direction
     assert enriched["network_point"] == "VGS Storage Hub (4290)"
-    assert enriched[required_market_key] == "VGS Storage Hub"
-    # The side Direction does not require is still resolved from its own
-    # evidenced field, never cross-filled from the required side.
+    # "VGS Storage Hub (4290)" is RESERVOIR/storage evidence on the required
+    # side; per the approved ENTSOG-based mapping contract a legacy catalog
+    # storage label never populates a Market column, so the required side's
+    # Market stays blank here (no real EIC/TSO evidence to resolve an ENTSOG
+    # balancing zone). The side Direction does not require is still resolved
+    # from its own evidenced field, never cross-filled from the required side.
+    assert enriched[required_market_key] == ""
     assert enriched[other_market_key] == other_market
 
 

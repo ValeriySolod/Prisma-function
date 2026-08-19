@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from prisma_function.csv_contracts import CsvFormat, PRISMA_EXPORT_COLUMNS, require_csv_format
+from prisma_function.entsog_market_resolution import resolve_entsog_market_pair
 from prisma_function.prisma_datetime import (
     PrismaLocalTimestampAmbiguousError,
     PrismaLocalTimestampFormatError,
@@ -361,6 +362,27 @@ def _import_row(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _entsog_pair_for_required_side(
+    row: dict[str, Any], source: dict[str, Any]
+):
+    """Resolve the ENTSOG-based market pair from the row's own required side
+    (the only side a unidirectional row populates), or `None` when the row
+    is a two-sided Exit/Entry bundle -- which keeps its existing direct
+    per-side resolution and never reaches ENTSOG resolution -- or when
+    nothing can be resolved. See `entsog_market_resolution.py`.
+    """
+    if row["direction"] not in ("exit", "entry"):
+        return None
+    suffix = "Exit" if row["direction"] == "exit" else "Entry"
+    return resolve_entsog_market_pair(
+        point_eic=_text(source.get(f"Network Point EIC {suffix}")),
+        tso_eic=_text(source.get(f"TSO EIC {suffix}")),
+        tso_name=_text(source.get(f"TSO {suffix}")),
+        direction=row["direction"],
+        point_type=_text(source.get(f"Network Point Type {suffix}")),
+    )
+
+
 def _enrich_row(
     row: dict[str, Any],
     source: dict[str, Any],
@@ -375,7 +397,28 @@ def _enrich_row(
         "entry": (ReferenceSide.ENTRY,),
         "bundle": (ReferenceSide.EXIT, ReferenceSide.ENTRY),
     }[row["direction"]]
+    entsog_pair = _entsog_pair_for_required_side(row, source)
+
+    def _entsog_value(side: ReferenceSide) -> str | None:
+        if entsog_pair is None:
+            return None
+        value = entsog_pair.exit_market if side is ReferenceSide.EXIT else entsog_pair.entry_market
+        return value or None
+
+    # `resolved` is the audit trail returned as exit_reference/entry_reference:
+    # "what did we identify this side as" -- a STORAGE-classified entry means
+    # the point is a known storage facility (already fully represented by the
+    # unchanged `Network Point Name` output column), a MARKET-classified entry
+    # means a real balancing-zone/trading-hub name. `market_values` is the
+    # separate, narrower set of strings actually written into Exit Market/
+    # Entry Market: only ever populated from a MARKET-classified source.
+    # Storage evidence -- whether from the legacy evidence-based string
+    # catalog or (implicitly, since it never produces one) ENTSOG -- must
+    # never populate a Market column; the approved RESERVOIR mapping requires
+    # the transmission operator's own balancing zone there instead, supplied
+    # exclusively by the ENTSOG resolver.
     resolved: dict[ReferenceSide, PrismaResolvedReference] = {}
+    market_values: dict[ReferenceSide, str] = {}
     # Exit Market/Entry Market are each populated from their own exact,
     # side-specific field (`Network Point Name Exit`/`Network Point Name
     # Entry`) regardless of Direction: a side not required by Direction is
@@ -383,7 +426,11 @@ def _enrich_row(
     # blank or its value has no approved catalog match -- that side's market
     # is simply left blank. Only a side Direction actually requires still
     # rejects the row on the same blank/unknown conditions, exactly as
-    # before. Neither side is ever inferred/cross-filled from the other.
+    # before. Neither side is ever inferred/cross-filled from the other via
+    # the string-alias catalog; the ENTSOG-based fallback below is the one
+    # explicitly approved exception, deriving the opposite side only from
+    # the required side's own EIC/TSO/Direction evidence, never from a
+    # guess.
     for side in (ReferenceSide.EXIT, ReferenceSide.ENTRY):
         required = side in required_sides
         field_name = f"Network Point Name {side.value.title()}"
@@ -405,7 +452,14 @@ def _enrich_row(
                 source_value=original_value,
             )
         reference = catalog.lookup(original_value, side)
+        entsog_value = _entsog_value(side) if required else None
         if reference is None:
+            if entsog_value is not None:
+                resolved[side] = PrismaResolvedReference(
+                    entsog_value, ReferenceClassification.MARKET, side
+                )
+                market_values[side] = entsog_value
+                continue
             if not required:
                 continue
             code = (
@@ -424,15 +478,44 @@ def _enrich_row(
         resolved[side] = PrismaResolvedReference(
             reference.canonical_name, reference.classification, side
         )
+        if reference.classification is ReferenceClassification.STORAGE:
+            # Storage identity confirmed by the legacy catalog; the Market
+            # column must still come exclusively from the ENTSOG resolver's
+            # transmission-operator balancing zone (never the storage
+            # facility's own label). Blank when ENTSOG cannot resolve it --
+            # the row stays accepted (the point itself is known), only its
+            # Market is fail-closed blank.
+            if entsog_value is not None:
+                market_values[side] = entsog_value
+        else:
+            market_values[side] = reference.canonical_name
+
+    # BORDER_TRANSITION_POINT/RESERVOIR only: fill the opposite (non-
+    # required) side from the same ENTSOG evidence the required side was
+    # just resolved from -- e.g. the adjacent balancing zone for a border
+    # point, or nothing at all for a RESERVOIR point, whose opposite side
+    # stays blank by rule (`resolve_entsog_market_pair` itself never returns
+    # a RESERVOIR opposite-side value). Only applies when that side is not
+    # already resolved (a populated opposite-side field with its own
+    # catalog/ENTSOG match above always wins) and never overwrites it.
+    if row["direction"] in ("exit", "entry"):
+        required_side = ReferenceSide.EXIT if row["direction"] == "exit" else ReferenceSide.ENTRY
+        opposite_side = (
+            ReferenceSide.ENTRY if required_side is ReferenceSide.EXIT else ReferenceSide.EXIT
+        )
+        if opposite_side not in resolved:
+            opposite_value = _entsog_value(opposite_side)
+            if opposite_value is not None:
+                resolved[opposite_side] = PrismaResolvedReference(
+                    opposite_value, ReferenceClassification.MARKET, opposite_side
+                )
+                market_values[opposite_side] = opposite_value
+
     enriched = dict(row)
     exit_reference = resolved.get(ReferenceSide.EXIT)
     entry_reference = resolved.get(ReferenceSide.ENTRY)
-    enriched["exit_market"] = (
-        exit_reference.canonical_name if exit_reference is not None else ""
-    )
-    enriched["entry_market"] = (
-        entry_reference.canonical_name if entry_reference is not None else ""
-    )
+    enriched["exit_market"] = market_values.get(ReferenceSide.EXIT, "")
+    enriched["entry_market"] = market_values.get(ReferenceSide.ENTRY, "")
     return enriched, exit_reference, entry_reference
 
 

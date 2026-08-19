@@ -9,6 +9,7 @@ import pytest
 
 from prisma_function.csv_contracts import MONITORING_CSV_COLUMNS, PRISMA_EXPORT_COLUMNS, CsvFormatError
 from prisma_function.processor import (
+    PrismaEnrichmentReasonCode,
     PrismaImportError,
     PrismaImportStatus,
     import_prisma_export,
@@ -602,3 +603,72 @@ def test_invalid_datetime_input_remains_a_typed_row_rejection(tmp_path: Path) ->
     result = import_prisma_export(write_csv(tmp_path, [row]))
     assert result.rows == []
     assert result.issues[0].reason_code == "invalid_flow_start"
+
+
+def test_border_transition_point_resolves_both_markets_via_entsog(tmp_path: Path) -> None:
+    # Dornum (not in the evidenced string catalog): Direction=Exit only
+    # populates the Exit side in the source CSV, yet the approved
+    # BORDER_TRANSITION_POINT rule fills both Exit Market (the TSO's own
+    # zone) and Entry Market (the curated Norway fallback) from that one
+    # side's EIC/TSO/Direction evidence alone.
+    row = {
+        **BASE,
+        "Direction": "Exit",
+        "Network Point Name Entry": "",
+        "Network Point Name Exit": "DORNUM (H451) (H451)",
+        "Network Point EIC Exit": "21Z000000000053Y",
+        "Network Point Type Exit": "BORDER_TRANSITION_POINT",
+        "TSO Exit": "Gasunie Deutschland Transport Services GmbH",
+        "TSO EIC Exit": "21X-DE-D-A0A0A-K",
+    }
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.issues == []
+    enriched = result.rows[0]
+    assert enriched["exit_market"] == "DE THE BZ"
+    assert enriched["entry_market"] == "Norway"
+
+
+def test_reservoir_resolves_only_its_own_side_via_entsog(tmp_path: Path) -> None:
+    # Loenhout Storage (Fluxys Belgium): not in the evidenced string catalog.
+    # The approved RESERVOIR rule fills only the row's own side with the
+    # transmission balancing zone and keeps the opposite Market blank.
+    row = {
+        **BASE,
+        "Direction": "Entry",
+        "Network Point Name Entry": "Loenhout Storage (Fluxys Belgium)",
+        "Network Point EIC Entry": "21Z000000000102A",
+        "Network Point Type Entry": "RESERVOIR",
+        "TSO Entry": "Fluxys Belgium NV/SA",
+        "TSO EIC Entry": "",
+    }
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.issues == []
+    enriched = result.rows[0]
+    assert enriched["entry_market"] == "BeLux"
+    assert enriched["exit_market"] == ""
+
+
+def test_bundle_direction_does_not_use_entsog_fallback(tmp_path: Path) -> None:
+    # "Exit/Entry: preserve direct two-sided CSV resolution when both sides
+    # are present" -- a bundle row populates both sides directly (as real
+    # PRISMA exports do), and an otherwise ENTSOG-resolvable point still
+    # rejects on the unknown required side exactly as before this
+    # increment; the new resolver must never be consulted for a two-sided
+    # row, only the exact string-alias catalog.
+    row = {
+        **BASE,
+        "Direction": "Exit/Entry",
+        "Network Point Name Exit": "DORNUM (H451) (H451)",
+        "Network Point EIC Exit": "21Z000000000053Y",
+        "Network Point Type Exit": "BORDER_TRANSITION_POINT",
+        "TSO Exit": "Gasunie Deutschland Transport Services GmbH",
+        "TSO EIC Exit": "21X-DE-D-A0A0A-K",
+        "Network Point Name Entry": "DORNUM (H151) (H151)",
+        "Network Point EIC Entry": "21Z000000000053Y",
+        "Network Point Type Entry": "BORDER_TRANSITION_POINT",
+        "TSO Entry": "Gasunie Deutschland Transport Services GmbH",
+        "TSO EIC Entry": "",
+    }
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.rows == []
+    assert result.issues[0].reason_code == PrismaEnrichmentReasonCode.UNKNOWN_EXIT_REFERENCE
