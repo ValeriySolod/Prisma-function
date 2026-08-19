@@ -331,14 +331,14 @@ def _write_published_output(path: Path, rows: list[dict[str, str]]) -> None:
 
 def _output_row(**overrides: str) -> dict[str, str]:
     row = {
-        "Auction Date": "2025-01-01",
+        "Auction Date": "01-01-2025",
         "Exit Market": "",
         "Entry Market": "VGS Storage Hub",
         "Capacity Type": "entry",
         "Network Point Name": "VGS Storage Hub (4290)",
         "Product Type": "Day",
-        "Flow Start": "2025-01-02 00:00",
-        "Flow End": "2025-01-03 00:00",
+        "Flow Start": "02-01-2025 00:00",
+        "Flow End": "03-01-2025 00:00",
         "Booked Capacity": "1000.0",
         "Flow Duration Hours": "24.0",
         "Tariff Price": "0.010000",
@@ -570,7 +570,7 @@ def test_selecting_a_valid_csv_populates_mapping_table_from_cumulative_output(
             **{
                 "Entry Market": "VGS Storage Hub",
                 "Network Point Name": "VGS Storage Hub (4290)",
-                "Flow Start": "2025-01-02 00:00",
+                "Flow Start": "02-01-2025 00:00",
                 "Tariff Price": "0.010000",
                 "Premium Price": "0.005000",
             }
@@ -581,7 +581,7 @@ def test_selecting_a_valid_csv_populates_mapping_table_from_cumulative_output(
                 "Entry Market": "",
                 "Capacity Type": "exit",
                 "Network Point Name": "VIP DK-THE (H646) (H646)",
-                "Flow Start": "2025-01-03 00:00",
+                "Flow Start": "03-01-2025 00:00",
                 "Tariff Price": "0.020000",
                 "Premium Price": "0.006000",
             }
@@ -600,10 +600,10 @@ def test_selecting_a_valid_csv_populates_mapping_table_from_cumulative_output(
         return model.data(model.index(row, column))
 
     assert (cell(0, 1), cell(0, 2), cell(0, 3), cell(0, 4), cell(0, 6), cell(0, 10), cell(0, 11)) == (
-        "THE", "", "exit", "VIP DK-THE (H646) (H646)", "2025-01-03 00:00", "0.020000", "0.006000",
+        "THE", "", "exit", "VIP DK-THE (H646) (H646)", "03-01-2025 00:00", "0.020000", "0.006000",
     )
     assert (cell(1, 1), cell(1, 2), cell(1, 3), cell(1, 4), cell(1, 6), cell(1, 10), cell(1, 11)) == (
-        "", "VGS Storage Hub", "entry", "VGS Storage Hub (4290)", "2025-01-02 00:00", "0.010000", "0.005000",
+        "", "VGS Storage Hub", "entry", "VGS Storage Hub (4290)", "02-01-2025 00:00", "0.010000", "0.005000",
     )
 
 
@@ -617,8 +617,8 @@ def test_mapping_display_preserves_cumulative_rows_after_later_slice(
         app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
     )
     _mock_successful_processing(monkeypatch, widget, [
-        _output_row(**{"Exit Market": "Earlier", "Flow Start": "2025-01-02 00:00"}),
-        _output_row(**{"Exit Market": "Later", "Flow Start": "2025-01-04 00:00"}),
+        _output_row(**{"Exit Market": "Earlier", "Flow Start": "02-01-2025 00:00"}),
+        _output_row(**{"Exit Market": "Later", "Flow Start": "04-01-2025 00:00"}),
     ])
 
     widget._select_manual_csv()
@@ -628,6 +628,47 @@ def test_mapping_display_preserves_cumulative_rows_after_later_slice(
     assert model.rowCount() == 2
     assert [model.data(model.index(row, 1)) for row in range(model.rowCount())] == [
         "Later", "Earlier",
+    ]
+
+
+def test_mapping_display_shows_cumulative_rows_published_under_legacy_date_format(
+    window, monkeypatch, tmp_path
+):
+    # Regression: the cumulative published file is never rewritten, so it may
+    # already contain rows written before the Auction Date/Flow Start/Flow
+    # End format correction (legacy `YYYY-MM-DD`/`YYYY-MM-DD HH:mm`)
+    # alongside rows written after it (new `DD-MM-YYYY`/`DD-MM-YYYY HH:mm`).
+    # Selecting a new CSV must still display every cumulative row instead of
+    # failing to parse the legacy rows and clearing the whole Mapping table.
+    widget, _ = window
+    target = tmp_path / "PRISMA_Export.csv"
+    _write_prisma_export_with_rows(target, [{"Auction ID": "1"}])
+    _mock_successful_processing(monkeypatch, widget, [
+        _output_row(**{
+            "Exit Market": "Legacy",
+            "Auction Date": "2025-01-01",
+            "Flow Start": "2025-01-02 00:00",
+            "Flow End": "2025-01-03 00:00",
+        }),
+        _output_row(**{
+            "Exit Market": "New",
+            "Auction Date": "05-01-2025",
+            "Flow Start": "06-01-2025 00:00",
+            "Flow End": "07-01-2025 00:00",
+        }),
+    ])
+    monkeypatch.setattr(
+        app.QFileDialog, "getOpenFileName", Mock(return_value=(str(target), "CSV"))
+    )
+
+    widget._select_manual_csv()
+    _settle_processing(widget)
+
+    model = widget.mapping_table_model
+    assert model.rowCount() == 2
+    assert not widget.mapping_table.isHidden()
+    assert [model.data(model.index(row, 1)) for row in range(model.rowCount())] == [
+        "New", "Legacy",
     ]
 
 

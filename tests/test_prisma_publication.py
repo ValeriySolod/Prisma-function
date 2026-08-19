@@ -167,9 +167,9 @@ def test_published_output_uses_corrected_datetime_representation(tmp_path: Path)
     assert result.succeeded
     _, records = _read_published(result.output_path)
     row = records[0]
-    assert row["Auction Date"] == "2025-01-01"
-    assert row["Flow Start"] == "2025-01-02 00:00"
-    assert row["Flow End"] == "2025-01-03 00:00"
+    assert row["Auction Date"] == "01-01-2025"
+    assert row["Flow Start"] == "02-01-2025 00:00"
+    assert row["Flow End"] == "03-01-2025 00:00"
     for column in ("Auction Date", "Flow Start", "Flow End"):
         assert "T" not in row[column]
         assert "+" not in row[column]

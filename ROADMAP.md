@@ -21,17 +21,17 @@ Prisma Function does not access the PRISMA website. Managed browser/download aut
 
 The Mapping table and published output contain exactly these fields in this order:
 
-1. Auction Date — YYYY-MM-DD
-2. Exit Market
-3. Entry Market
+1. Auction Date — DD-MM-YYYY, derived from Start of Auction
+2. Exit Market — from the approved exact side-specific mapping for the exit side, populated regardless of Direction; blank when its own mapping is unavailable, never inferred or cross-filled from Entry Market
+3. Entry Market — from the approved exact side-specific mapping for the entry side, populated regardless of Direction; blank when its own mapping is unavailable, never inferred or cross-filled from Exit Market
 4. Capacity Type — entry, exit, or bundle
 5. Network Point Name
 6. Product Type — WD, Day Ahead, Month, Quarter, or Year
-7. Flow Start — YYYY-MM-DD HH:mm
-8. Flow End — YYYY-MM-DD HH:mm
+7. Flow Start — DD-MM-YYYY HH:mm
+8. Flow End — DD-MM-YYYY HH:mm
 9. Booked Capacity — kWh/h
 10. Flow Duration Hours
-11. Tariff Price — EUR/MWh/h
+11. Tariff Price — EUR/MWh/h; a bundle row's exit-side and entry-side tariff are each normalized independently, then summed
 12. Premium Price — EUR/MWh/h
 
 Mapping supports unrestricted vertical and horizontal scrolling and has no preview or row-count limit.
@@ -87,6 +87,22 @@ Implemented result:
 
 Automated evidence: 623 passed, 1 skipped (the pre-existing platform-dependent symlink test); `python -m compileall`; `git diff --check`. Real-Windows validation surfaced and led to the two same-day regression fixes above (source-date invariant removal, stale migration-lock recovery); manual real-Windows validation of the corrected behavior, and of the original composite-key dedup itself, remains outstanding.
 
+### P.41 — Mapping format and Exit/Entry Market correction
+
+Status: implemented and automated-tested (2026-08-19) on branch `feature/mapping-format-market-price-corrections`. Not yet merged to `main`.
+
+Implemented result:
+
+- `Auction Date` in Mapping/published output is formatted `DD-MM-YYYY`, derived from Start of Auction; `Flow Start`/`Flow End` are formatted `DD-MM-YYYY HH:mm` (`prisma_datetime.format_mapping_auction_date`/`format_mapping_flow_timestamp`, applied only in `prisma_output.transform_row`'s final Mapping/output formatting step). The internal `YYYY-MM-DD`/`YYYY-MM-DD HH:mm` representation `processor.py` produces and `storage.py`'s ECB-rate keying, cumulative-row dedup, and the dormant Excel export already consume is unchanged.
+- `Exit Market`/`Entry Market` are each resolved from their own exact, side-specific field (`Network Point Name Exit`/`Network Point Name Entry`) regardless of Direction (`processor._enrich_row`): a side not required by the row's Direction is now also attempted, but a blank field or an alias with no approved catalog match on that side only leaves that one market blank — it never rejects the row and is never inferred or cross-filled from the opposite side. The side Direction actually requires keeps its existing reject-on-blank/unknown behavior unchanged.
+- `Capacity Type`/`Network Point Name` direction-selection rules (`processor._direction_and_network`) are unchanged.
+- Tariff Price/Premium Price EUR/MWh/h normalization, independent per-side bundle conversion before summation, and the existing source-unit conversion factors (including ÷24 for `.../d/Runtime` units) were already correct and required no code change; verified by the existing `price_normalization.py`/`processor.py` test coverage.
+- `mapping_presentation._flow_start_sort_key` now parses `Flow Start` using the corrected `DD-MM-YYYY HH:mm` format instead of `datetime.fromisoformat`.
+- **Same-day regression fix:** the cumulative published file is never rewritten, so it durably mixes rows written before this format correction (legacy `YYYY-MM-DD`/`YYYY-MM-DD HH:mm`) with rows written after it (new `DD-MM-YYYY`/`DD-MM-YYYY HH:mm`); the initial `_flow_start_sort_key` change above only accepted the new format and raised on any legacy row, making the whole Mapping display fail (caught by `app.py`'s `_refresh_mapping_display_from_output` as a generic error, clearing the table). `mapping_presentation._parse_flow_start` now tries both formats and never raises: a blank or unparseable Flow Start (either format) sorts after every row with a valid Flow Start instead of blocking display, and `sorted()`'s stability keeps such rows in their original relative order. New rows continue to be written only in the new format (`prisma_output.transform_row`); no previously published row is rewritten, migrated, or deleted.
+- **Same-day display-format follow-up fix:** `Auction Date`/`Flow Start`/`Flow End` were still passed through unchanged for display, so a legacy stored/published row kept showing its original `YYYY-MM-DD`/`YYYY-MM-DD HH:mm` values in Mapping even though sorting already treated it correctly. `mapping_presentation.build_mapping_rows_from_output_records` now converts each of the three fields to the current `DD-MM-YYYY`/`DD-MM-YYYY HH:mm` display format regardless of which contract the underlying record was written under (`_display_auction_date`/`_display_flow_timestamp`, parsed the same dual-format way as `_parse_flow_start`); a blank or unparseable value is still displayed unchanged rather than raising. This is purely an in-memory presentation conversion — the published CSV file and all persisted records are never rewritten, migrated, or otherwise modified.
+
+Automated evidence: 603 passed, 1 skipped (the pre-existing platform-dependent symlink test); `python -m compileall`; `git diff --check`. Manual real-Windows acceptance of the corrected Mapping display (including a cumulative file mixing legacy and new date formats) and published CSV remains outstanding.
+
 ## Next work
 
-Select the next increment only after this merge (P.37 and P.40 together) lands on `main` and both feature branches are cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.
+Select the next increment only after this merge (P.37, P.40, and P.41 together) lands on `main` and all feature branches are cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.

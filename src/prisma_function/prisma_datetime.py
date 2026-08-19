@@ -38,6 +38,8 @@ __all__ = [
     "PRISMA_LOCAL_INPUT_FORMAT",
     "AUCTION_DATE_OUTPUT_FORMAT",
     "FLOW_TIMESTAMP_OUTPUT_FORMAT",
+    "MAPPING_AUCTION_DATE_OUTPUT_FORMAT",
+    "MAPPING_FLOW_TIMESTAMP_OUTPUT_FORMAT",
     "PrismaLocalTimestampError",
     "PrismaLocalTimestampFormatError",
     "PrismaLocalTimestampNonexistentError",
@@ -47,6 +49,8 @@ __all__ = [
     "local_wall_clock_hours",
     "format_auction_date",
     "format_flow_timestamp",
+    "format_mapping_auction_date",
+    "format_mapping_flow_timestamp",
 ]
 
 # Europe/Berlin is this project's already-established, live-verified
@@ -60,6 +64,16 @@ PRISMA_LOCAL_TIMEZONE = ZoneInfo("Europe/Berlin")
 PRISMA_LOCAL_INPUT_FORMAT = "%d.%m.%Y %H:%M"
 AUCTION_DATE_OUTPUT_FORMAT = "%Y-%m-%d"
 FLOW_TIMESTAMP_OUTPUT_FORMAT = "%Y-%m-%d %H:%M"
+
+# Mapping/published-output display contract (this increment): `Auction Date`
+# as `DD-MM-YYYY`, `Flow Start`/`Flow End` as `DD-MM-YYYY HH:mm`. Deliberately
+# distinct from `AUCTION_DATE_OUTPUT_FORMAT`/`FLOW_TIMESTAMP_OUTPUT_FORMAT`
+# above, which remain the internal ISO representation every other module
+# (ECB rate keying, cumulative-row dedup ordering, the dormant Excel export)
+# already parses/sorts by; only the final Mapping/published-CSV formatting
+# step converts to this display contract.
+MAPPING_AUCTION_DATE_OUTPUT_FORMAT = "%d-%m-%Y"
+MAPPING_FLOW_TIMESTAMP_OUTPUT_FORMAT = "%d-%m-%Y %H:%M"
 
 _INPUT_PATTERN = re.compile(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\Z")
 
@@ -188,3 +202,33 @@ def format_flow_timestamp(value: datetime) -> str:
     authoritative `Flow Start`/`Flow End` contract: `YYYY-MM-DD HH:mm`, no
     seconds, no `T` separator, no offset."""
     return value.strftime(FLOW_TIMESTAMP_OUTPUT_FORMAT)
+
+
+def format_mapping_auction_date(value: str) -> str:
+    """Reformat an already-produced internal `Auction Date` string (this
+    module's own `format_auction_date` output, or any equivalent ISO-ish
+    `date.isoformat()`/`datetime.isoformat()` representation already in use
+    elsewhere in this codebase) into the Mapping/published-output display
+    contract: `DD-MM-YYYY`.
+
+    Uses `datetime.fromisoformat`, not a strict format check, so it accepts
+    every internal representation this codebase already produces for this
+    field (date-only `YYYY-MM-DD`) without introducing a second, narrower
+    parse rule.
+    """
+    return datetime.fromisoformat(value).strftime(MAPPING_AUCTION_DATE_OUTPUT_FORMAT)
+
+
+def format_mapping_flow_timestamp(value: str) -> str:
+    """Reformat an already-produced internal `Flow Start`/`Flow End` string
+    (this module's own `format_flow_timestamp` output, or any equivalent
+    ISO-ish representation already in use elsewhere in this codebase) into
+    the Mapping/published-output display contract: `DD-MM-YYYY HH:mm`.
+
+    Uses `datetime.fromisoformat`, not a strict format check, so it accepts
+    every internal representation this codebase already produces for this
+    field (space-separated `YYYY-MM-DD HH:MM` and the legacy `T`-separated,
+    seconds-carrying shape) without introducing a second, narrower parse
+    rule.
+    """
+    return datetime.fromisoformat(value).strftime(MAPPING_FLOW_TIMESTAMP_OUTPUT_FORMAT)
