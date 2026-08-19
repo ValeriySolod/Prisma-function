@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "snapshot_date": "2026-08-19",
+  "source_note": "Curated, source-backed fallback routes for points explicitly approved by the customer where the live ENTSOG operator-point-direction export (https://transparency.entsog.eu/api/v1/operatorpointdirections.json, snapshot 2026-08-19) is missing, blank, or -- for one point (Melendugno) -- carries a contradictory adjacentCountry across its two ENTSOG operator records. Each entry is a full override for its exact (point_eic, operator_key, direction) key: both exit_market and entry_market come from this table, never merged with a partial ENTSOG value, so a known-incomplete ENTSOG record can never leak a misleading half-value into the resolved row. point_eic is the exact 'Network Point EIC Exit/Entry' value observed in the repository's checked-in PRISMA Export CSV samples (Auction_overview.csv, evidence/p35-1/Auction_overview.csv) except where noted otherwise. Consulted only for Network Point Type BORDER_TRANSITION_POINT; never applied to RESERVOIR points.",
+  "routes": [
+    {"route": "Dornum / Dornum GASPOOL: Norway <-> DE THE BZ", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json?pointDirection=ITP-00xxx-DE-TSO-0005-entry", "entries": [
+      {"point_eic": "21Z000000000053Y", "operator_key": "DE-TSO-0005", "direction": "entry", "exit_market": "Norway", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z000000000053Y", "operator_key": "DE-TSO-0005", "direction": "exit", "exit_market": "DE THE BZ", "entry_market": "Norway"},
+      {"point_eic": "21Z000000000053Y", "operator_key": "DE-TSO-0009", "direction": "entry", "exit_market": "Norway", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z000000000053Y", "operator_key": "DE-TSO-0009", "direction": "exit", "exit_market": "DE THE BZ", "entry_market": "Norway"},
+      {"point_eic": "21Z0000000004855", "operator_key": "DE-TSO-0009", "direction": "entry", "exit_market": "Norway", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z0000000004855", "operator_key": "DE-TSO-0009", "direction": "exit", "exit_market": "DE THE BZ", "entry_market": "Norway"}
+    ]},
+    {"route": "Emden EPT / Emden EMS-EPT on German TSOs: Norway <-> DE THE BZ", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json", "entries": [
+      {"point_eic": "21Z0000000000503", "operator_key": "DE-TSO-0009", "direction": "entry", "exit_market": "Norway", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z0000000000503", "operator_key": "DE-TSO-0009", "direction": "exit", "exit_market": "DE THE BZ", "entry_market": "Norway"},
+      {"point_eic": "21Z0000000000511", "operator_key": "DE-TSO-0005", "direction": "entry", "exit_market": "Norway", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z0000000000511", "operator_key": "DE-TSO-0005", "direction": "exit", "exit_market": "DE THE BZ", "entry_market": "Norway"},
+      {"point_eic": "21Z000000000145T", "operator_key": "DE-TSO-0002", "direction": "entry", "exit_market": "Norway", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z000000000145T", "operator_key": "DE-TSO-0002", "direction": "exit", "exit_market": "DE THE BZ", "entry_market": "Norway"}
+    ]},
+    {"route": "Emden EPT on GTS: Norway <-> Netherlands", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json", "entries": [
+      {"point_eic": "21Z000000000055U", "operator_key": "NL-TSO-0001", "direction": "entry", "exit_market": "Norway", "entry_market": "Netherlands"},
+      {"point_eic": "21Z000000000055U", "operator_key": "NL-TSO-0001", "direction": "exit", "exit_market": "Netherlands", "entry_market": "Norway"}
+    ]},
+    {"route": "Dunkerque: Norway <-> TRF", "source_url": "https://transparency.entsog.eu/api/v1/interconnections.json (point ITP-00045)", "entries": [
+      {"point_eic": "21Z000000000047T", "operator_key": "FR-TSO-0003", "direction": "entry", "exit_market": "Norway", "entry_market": "TRF"}
+    ]},
+    {"route": "Passo Gries and Masera-Passo Gries: Switzerland <-> Italy", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00131/ITP-00136)", "entries": [
+      {"point_eic": "21Z0000000002107", "operator_key": "CH-TSO-0001", "direction": "exit", "exit_market": "Switzerland", "entry_market": "Italy"},
+      {"point_eic": "21Z0000000002107", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Switzerland", "entry_market": "Italy"},
+      {"point_eic": "21Z0000000002107", "operator_key": "IT-TSO-0001", "direction": "exit", "exit_market": "Switzerland", "entry_market": "Italy"},
+      {"point_eic": "21Y---A001A021-3", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Switzerland", "entry_market": "Italy"}
+    ]},
+    {"route": "Moffat: Great Britain <-> Ireland", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00495/ITP-00496)", "entries": [
+      {"point_eic": "21Z000000000081T", "operator_key": "UK-TSO-0001", "direction": "exit", "exit_market": "Great Britain", "entry_market": "Ireland"},
+      {"point_eic": "48YBI-EC-------0", "operator_key": "UK-TSO-0001", "direction": "entry", "exit_market": "Great Britain", "entry_market": "Ireland"},
+      {"point_eic": "48ZMOFFAT-ENTRYQ", "operator_key": "UK-TSO-0001", "direction": "entry", "exit_market": "Great Britain", "entry_market": "Ireland"},
+      {"point_eic": "21Z000000000081T", "operator_key": "UK-TSO-0002", "direction": "exit", "exit_market": "Great Britain", "entry_market": "Ireland"},
+      {"point_eic": "21Z000000000081T", "operator_key": "UK-TSO-0002", "direction": "entry", "exit_market": "Great Britain", "entry_market": "Ireland"}
+    ]},
+    {"route": "Ellund: Joint Bal Zone DK/SE <-> DE THE BZ", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00135)", "entries": [
+      {"point_eic": "21Z0000000000260", "operator_key": "DK-TSO-0001", "direction": "entry", "exit_market": "DE THE BZ", "entry_market": "Joint Bal Zone DK/SE"},
+      {"point_eic": "21Z0000000000260", "operator_key": "DK-TSO-0001", "direction": "exit", "exit_market": "Joint Bal Zone DK/SE", "entry_market": "DE THE BZ"}
+    ]},
+    {"route": "Baumgarten AT/SK: Austria <-> Slovakia", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00xxx, Gas Connect Austria/eustream/TAG)", "entries": [
+      {"point_eic": "21Z0000000000600", "operator_key": "AT-TSO-0001", "direction": "exit", "exit_market": "Austria", "entry_market": "Slovakia"},
+      {"point_eic": "21Z0000000000600", "operator_key": "AT-TSO-0001", "direction": "entry", "exit_market": "Slovakia", "entry_market": "Austria"},
+      {"point_eic": "21Z000000000163R", "operator_key": "AT-TSO-0001", "direction": "exit", "exit_market": "Austria", "entry_market": "Slovakia"},
+      {"point_eic": "21Z000000000163R", "operator_key": "AT-TSO-0001", "direction": "entry", "exit_market": "Slovakia", "entry_market": "Austria"},
+      {"point_eic": "21Z000000000164P", "operator_key": "AT-TSO-0003", "direction": "exit", "exit_market": "Austria", "entry_market": "Slovakia"},
+      {"point_eic": "21Z000000000164P", "operator_key": "AT-TSO-0003", "direction": "entry", "exit_market": "Slovakia", "entry_market": "Austria"},
+      {"point_eic": "21Y---A001A023-Y", "operator_key": "SK-TSO-0001", "direction": "exit", "exit_market": "Slovakia", "entry_market": "Austria"},
+      {"point_eic": "21Y---A001A023-Y", "operator_key": "SK-TSO-0001", "direction": "entry", "exit_market": "Austria", "entry_market": "Slovakia"}
+    ]},
+    {"route": "Melendugno: Greece/TAP <-> Italy", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00008; AL-TSO-0001 and IT-TSO-0001 records carry inconsistent adjacentCountry data)", "entries": [
+      {"point_eic": "21Z000000000474A", "operator_key": "AL-TSO-0001", "direction": "entry", "exit_market": "Italy", "entry_market": "Greece/TAP"},
+      {"point_eic": "21Z000000000474A", "operator_key": "AL-TSO-0001", "direction": "exit", "exit_market": "Greece/TAP", "entry_market": "Italy"},
+      {"point_eic": "21Z000000000474A", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Greece/TAP", "entry_market": "Italy"},
+      {"point_eic": "21Z000000000474A", "operator_key": "IT-TSO-0001", "direction": "exit", "exit_market": "Italy", "entry_market": "Greece/TAP"},
+      {"point_eic": "59ZTAPEXIT00000X", "operator_key": "IT-TSO-0001", "direction": "exit", "exit_market": "Italy", "entry_market": "Greece/TAP"}
+    ]},
+    {"route": "Kipoi TAP: Türkiye/TANAP <-> Greece/TAP", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00xxx, Trans Adriatic Pipeline AG)", "entries": [
+      {"point_eic": "21Z0000000004758", "operator_key": "AL-TSO-0001", "direction": "entry", "exit_market": "Türkiye/TANAP", "entry_market": "Greece/TAP"},
+      {"point_eic": "21Z0000000004758", "operator_key": "AL-TSO-0001", "direction": "exit", "exit_market": "Greece/TAP", "entry_market": "Türkiye/TANAP"}
+    ]},
+    {"route": "Kipi DESFA: Türkiye <-> Greece", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00046)", "entries": [
+      {"point_eic": "21Z000000000233W", "operator_key": "GR-TSO-0001", "direction": "entry", "exit_market": "Türkiye", "entry_market": "Greece"},
+      {"point_eic": "21Z000000000233W", "operator_key": "GR-TSO-0001", "direction": "exit", "exit_market": "Greece", "entry_market": "Türkiye"}
+    ]},
+    {"route": "Gorizia/Sempeter: Slovenia <-> Italy", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00xxx, Snam Rete Gas/Plinovodi)", "entries": [
+      {"point_eic": "21Z000000000044Z", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Slovenia", "entry_market": "Italy"},
+      {"point_eic": "21Z000000000044Z", "operator_key": "IT-TSO-0001", "direction": "exit", "exit_market": "Italy", "entry_market": "Slovenia"},
+      {"point_eic": "21Z000000000044Z", "operator_key": "SI-TSO-0001", "direction": "entry", "exit_market": "Italy", "entry_market": "Slovenia"},
+      {"point_eic": "21Z000000000044Z", "operator_key": "SI-TSO-0001", "direction": "exit", "exit_market": "Slovenia", "entry_market": "Italy"},
+      {"point_eic": "21Z000000000044F", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Slovenia", "entry_market": "Italy"}
+    ]},
+    {"route": "Mazara del Vallo: Algeria <-> Italy", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00093)", "entries": [
+      {"point_eic": "21Z000000000080V", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Algeria", "entry_market": "Italy"}
+    ]},
+    {"route": "Gela: Libya <-> Italy", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00074)", "entries": [
+      {"point_eic": "21Z000000000149L", "operator_key": "IT-TSO-0001", "direction": "entry", "exit_market": "Libya", "entry_market": "Italy"}
+    ]},
+    {"route": "Greifswald NEL/OPAL: Russian Federation <-> DE THE BZ", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00247/ITP-00251/ITP-00297)", "entries": [
+      {"point_eic": "21Z000000000255M", "operator_key": "DE-TSO-0005", "direction": "entry", "exit_market": "Russian Federation", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z000000000255M", "operator_key": "DE-TSO-0018", "direction": "entry", "exit_market": "Russian Federation", "entry_market": "DE THE BZ"}
+    ]},
+    {"route": "Lubmin and Lubmin II: Russian Federation <-> DE THE BZ", "source_url": "https://transparency.entsog.eu/api/v1/operatorpointdirections.json (point ITP-00501/ITP-00251)", "entries": [
+      {"point_eic": "21Z0000000004790", "operator_key": "DE-TSO-0005", "direction": "entry", "exit_market": "Russian Federation", "entry_market": "DE THE BZ"},
+      {"point_eic": "21Z000000000241X", "operator_key": "DE-TSO-0020", "direction": "entry", "exit_market": "Russian Federation", "entry_market": "DE THE BZ"}
+    ]}
+  ]
+}

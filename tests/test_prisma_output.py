@@ -142,7 +142,11 @@ def test_successful_transformation_maps_fields_correctly(tmp_path: Path) -> None
     row = records[0]
     assert row["Auction Date"] == "01-01-2025"
     assert row["Exit Market"] == ""
-    assert row["Entry Market"] == "VGS Storage Hub"
+    # "VGS Storage Hub (4290)" is RESERVOIR/storage evidence; per the
+    # approved mapping contract it never populates a Market column -- only
+    # a resolvable transmission-operator balancing zone would, and none is
+    # resolvable here (no real Network Point EIC/TSO evidence in BASE).
+    assert row["Entry Market"] == ""
     assert row["Capacity Type"] == "entry"
     assert row["Network Point Name"] == "VGS Storage Hub (4290)"
     assert row["Product Type"] == "Day Ahead"
@@ -192,14 +196,18 @@ def test_transform_row_is_pure_field_mapping() -> None:
 
 # --- market/storage placement by side ----------------------------------------
 
-def test_entry_direction_populates_only_entry_market_with_storage_classification(tmp_path: Path) -> None:
+def test_entry_direction_with_storage_classification_leaves_market_blank(tmp_path: Path) -> None:
+    # A STORAGE-classified catalog match (RESERVOIR evidence) never
+    # populates Entry Market -- only an ENTSOG-resolved transmission-
+    # operator balancing zone would, and none is resolvable here.
     source = write_csv(tmp_path, [{**BASE, "Direction": "Entry"}])
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
     assert records[0]["Exit Market"] == ""
-    assert records[0]["Entry Market"] == "VGS Storage Hub"
+    assert records[0]["Entry Market"] == ""
+    assert records[0]["Network Point Name"] == "VGS Storage Hub (4290)"
 
 
 def test_exit_direction_populates_only_exit_market_with_market_classification(tmp_path: Path) -> None:
@@ -217,7 +225,13 @@ def test_exit_direction_populates_only_exit_market_with_market_classification(tm
     assert records[0]["Capacity Type"] == "exit"
 
 
-def test_bundle_direction_populates_both_sides_from_side_specific_evidence(tmp_path: Path) -> None:
+def test_bundle_direction_with_storage_classification_leaves_market_blank(tmp_path: Path) -> None:
+    # A STORAGE-classified match on a bundle row is the same contract
+    # violation as on a unidirectional row: a legacy catalog storage label
+    # must never populate either Market column. The bundle row's own
+    # two-sided resolution mechanism is otherwise untouched -- both sides
+    # are still resolved directly from their own evidenced field, never via
+    # the ENTSOG fallback.
     source = write_csv(tmp_path, [{
         **BASE, "Direction": "Exit/Entry",
         "Network Point Name Exit/Entry": "VGS Storage Hub (4290)",
@@ -228,9 +242,10 @@ def test_bundle_direction_populates_both_sides_from_side_specific_evidence(tmp_p
     out_dir.mkdir()
     result = _output(source, out_dir, tmp_path)
     _, records = _read_output(result.output_path)
-    assert records[0]["Exit Market"] == "VGS Storage Hub"
-    assert records[0]["Entry Market"] == "VGS Storage Hub"
+    assert records[0]["Exit Market"] == ""
+    assert records[0]["Entry Market"] == ""
     assert records[0]["Capacity Type"] == "bundle"
+    assert records[0]["Network Point Name"] == "VGS Storage Hub (4290)"
 
 
 # --- rejection behavior --------------------------------------------------
