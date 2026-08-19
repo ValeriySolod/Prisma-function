@@ -376,10 +376,21 @@ def _enrich_row(
         "bundle": (ReferenceSide.EXIT, ReferenceSide.ENTRY),
     }[row["direction"]]
     resolved: dict[ReferenceSide, PrismaResolvedReference] = {}
-    for side in required_sides:
+    # Exit Market/Entry Market are each populated from their own exact,
+    # side-specific field (`Network Point Name Exit`/`Network Point Name
+    # Entry`) regardless of Direction: a side not required by Direction is
+    # still attempted here, but never blocks the row when its own field is
+    # blank or its value has no approved catalog match -- that side's market
+    # is simply left blank. Only a side Direction actually requires still
+    # rejects the row on the same blank/unknown conditions, exactly as
+    # before. Neither side is ever inferred/cross-filled from the other.
+    for side in (ReferenceSide.EXIT, ReferenceSide.ENTRY):
+        required = side in required_sides
         field_name = f"Network Point Name {side.value.title()}"
         original_value = "" if source.get(field_name) is None else str(source[field_name])
         if not original_value.strip():
+            if not required:
+                continue
             code = (
                 PrismaEnrichmentReasonCode.MISSING_REQUIRED_EXIT_REFERENCE
                 if side is ReferenceSide.EXIT
@@ -395,6 +406,8 @@ def _enrich_row(
             )
         reference = catalog.lookup(original_value, side)
         if reference is None:
+            if not required:
+                continue
             code = (
                 PrismaEnrichmentReasonCode.UNKNOWN_EXIT_REFERENCE
                 if side is ReferenceSide.EXIT

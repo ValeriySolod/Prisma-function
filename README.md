@@ -30,14 +30,14 @@ Mapping and the published CSV contain exactly these columns:
 
 | # | Column | Contract |
 |---:|---|---|
-| 1 | Auction Date | YYYY-MM-DD |
-| 2 | Exit Market | Exact exit-side market or storage |
-| 3 | Entry Market | Exact entry-side market or storage |
+| 1 | Auction Date | DD-MM-YYYY |
+| 2 | Exit Market | Exact exit-side market or storage; blank when no approved mapping exists for that side |
+| 3 | Entry Market | Exact entry-side market or storage; blank when no approved mapping exists for that side |
 | 4 | Capacity Type | entry, exit, or bundle |
 | 5 | Network Point Name | Official point name |
 | 6 | Product Type | WD, Day Ahead, Month, Quarter, or Year |
-| 7 | Flow Start | YYYY-MM-DD HH:mm |
-| 8 | Flow End | YYYY-MM-DD HH:mm |
+| 7 | Flow Start | DD-MM-YYYY HH:mm |
+| 8 | Flow End | DD-MM-YYYY HH:mm |
 | 9 | Booked Capacity | kWh/h |
 | 10 | Flow Duration Hours | Difference between Flow Start and Flow End |
 | 11 | Tariff Price | EUR/MWh/h |
@@ -55,6 +55,6 @@ The published file is UTF-8 and semicolon-delimited. Decimal values use a dot.
 - Files are not rejected merely because another file has the same source date.
 - Dates and times use the approved Europe/Berlin CET/CEST contract.
 - Prices are normalized to EUR/MWh/h using the calendar date from Start of Auction and official ECB reference rates.
-- Market/storage resolution uses exact, side-specific, Auction-ID-linked approved evidence only.
+- Market/storage resolution uses exact, side-specific, Auction-ID-linked approved evidence only; Exit Market and Entry Market are each resolved independently regardless of Direction and are never inferred or cross-filled from the opposite side.
 
 See CLAUDE.md for repository rules, ROADMAP.md for active work, and docs/CHANGELOG.md for historical implementation records.

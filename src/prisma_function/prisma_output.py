@@ -52,6 +52,10 @@ from pathlib import Path
 from prisma_function.csv_contracts import CsvFormatError
 from prisma_function.download_directory import DownloadDirectoryError, validate_download_directory
 from prisma_function.ecb_rates import EcbRateSource
+from prisma_function.prisma_datetime import (
+    format_mapping_auction_date,
+    format_mapping_flow_timestamp,
+)
 from prisma_function.price_normalization import (
     NormalizedPrice,
     PriceNormalizationResult,
@@ -164,12 +168,16 @@ def transform_row(row: dict, prices: NormalizedPrice) -> dict[str, str]:
     ``row`` is one entry of `PrismaImportResult.rows`: parsing, unit
     normalization, capacity-threshold filtering, side-specific Market/Storage
     resolution, and Europe/Berlin date/time interpretation already happened
-    there and are not repeated here. `Auction Date`/`Flow Start`/`Flow End`
-    are passed through unchanged as the already-formatted `YYYY-MM-DD`/
-    `YYYY-MM-DD HH:mm` strings `processor.py` (via `prisma_datetime.py`) and
-    `storage.py` already treat as the authoritative timestamp representation;
-    `Booked Capacity`/`Flow Duration Hours` use Python's own `str(float)`
-    representation, which always uses a dot decimal separator.
+    there and are not repeated here. `row["auction_date"]`/`row["flow_start"]`/
+    `row["flow_end"]` are `processor.py`'s (via `prisma_datetime.py`) internal
+    `YYYY-MM-DD`/`YYYY-MM-DD HH:mm` representation, unchanged from before this
+    increment and still what `storage.py`'s ECB-rate keying and dormant Excel
+    export consume; this function reformats only its own output columns via
+    `prisma_datetime.format_mapping_auction_date`/`format_mapping_flow_
+    timestamp` into the Mapping/published-output display contract
+    (`DD-MM-YYYY`/`DD-MM-YYYY HH:mm`). `Booked Capacity`/`Flow Duration Hours`
+    use Python's own `str(float)` representation, which always uses a dot
+    decimal separator.
 
     ``prices`` must already be a confirmed EUR/MWh/h conversion (P.36.21's
     `price_normalization.normalize_prices_for_output`); this function performs
@@ -178,14 +186,14 @@ def transform_row(row: dict, prices: NormalizedPrice) -> dict[str, str]:
     perform an uncontrolled network call.
     """
     return {
-        "Auction Date": row["auction_date"],
+        "Auction Date": format_mapping_auction_date(row["auction_date"]),
         "Exit Market": row["exit_market"],
         "Entry Market": row["entry_market"],
         "Capacity Type": row["direction"],
         "Network Point Name": row["network_point"],
         "Product Type": row["product_type"],
-        "Flow Start": row["flow_start"],
-        "Flow End": row["flow_end"],
+        "Flow Start": format_mapping_flow_timestamp(row["flow_start"]),
+        "Flow End": format_mapping_flow_timestamp(row["flow_end"]),
         "Booked Capacity": str(row["booked_capacity_kwh_h"]),
         "Flow Duration Hours": str(row["runtime_hours"]),
         "Tariff Price": format_price(prices.tariff_price_eur_mwh_h),

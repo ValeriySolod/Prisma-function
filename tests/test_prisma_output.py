@@ -140,14 +140,14 @@ def test_successful_transformation_maps_fields_correctly(tmp_path: Path) -> None
     assert result.succeeded
     _, records = _read_output(result.output_path)
     row = records[0]
-    assert row["Auction Date"] == "2025-01-01"
+    assert row["Auction Date"] == "01-01-2025"
     assert row["Exit Market"] == ""
     assert row["Entry Market"] == "VGS Storage Hub"
     assert row["Capacity Type"] == "entry"
     assert row["Network Point Name"] == "VGS Storage Hub (4290)"
     assert row["Product Type"] == "Day Ahead"
-    assert row["Flow Start"] == "2025-01-02 00:00"
-    assert row["Flow End"] == "2025-01-03 00:00"
+    assert row["Flow Start"] == "02-01-2025 00:00"
+    assert row["Flow End"] == "03-01-2025 00:00"
     assert row["Booked Capacity"] == "1000.0"
     assert row["Flow Duration Hours"] == "24.0"
     # BASE's evidence resolves to EUR (identity conversion, rate == 1), so
@@ -182,9 +182,9 @@ def test_transform_row_is_pure_field_mapping() -> None:
         tariff_price_eur_mwh_h=Decimal("10"), premium_price_eur_mwh_h=Decimal("0"),
     )
     assert transform_row(row, prices) == {
-        "Auction Date": "2025-01-01", "Exit Market": "BG", "Entry Market": "",
+        "Auction Date": "01-01-2025", "Exit Market": "BG", "Entry Market": "",
         "Capacity Type": "exit", "Network Point Name": "Point", "Product Type": "Month",
-        "Flow Start": "2025-02-01 00:00", "Flow End": "2025-03-01 00:00",
+        "Flow Start": "01-02-2025 00:00", "Flow End": "01-03-2025 00:00",
         "Booked Capacity": "2500.0", "Flow Duration Hours": "672.0",
         "Tariff Price": "10.000000", "Premium Price": "0.000000",
     }

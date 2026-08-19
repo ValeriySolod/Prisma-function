@@ -10,6 +10,8 @@ from prisma_function.prisma_datetime import (
     elapsed_hours,
     format_auction_date,
     format_flow_timestamp,
+    format_mapping_auction_date,
+    format_mapping_flow_timestamp,
     parse_prisma_local_timestamp,
 )
 
@@ -46,6 +48,26 @@ def test_formatted_output_never_contains_t_seconds_or_offset(raw: str) -> None:
         assert "T" not in value
         assert "+" not in value
         assert value.count(":") <= 1
+
+
+# --- Mapping/published-output display formatting -----------------------------
+
+def test_format_mapping_auction_date_is_exactly_dd_mm_yyyy() -> None:
+    internal = format_auction_date(parse_prisma_local_timestamp("10.07.2026 09:30"))
+    assert format_mapping_auction_date(internal) == "10-07-2026"
+
+
+def test_format_mapping_flow_timestamp_is_exactly_dd_mm_yyyy_hh_mm() -> None:
+    internal = format_flow_timestamp(parse_prisma_local_timestamp("10.07.2026 09:30"))
+    assert format_mapping_flow_timestamp(internal) == "10-07-2026 09:30"
+
+
+def test_format_mapping_flow_timestamp_accepts_legacy_t_separated_shape() -> None:
+    # `mapping_presentation.py`/`processor.py`'s internal representation is
+    # `YYYY-MM-DD HH:mm`, but earlier data (and several existing test
+    # fixtures elsewhere in this codebase) may still carry the legacy
+    # `T`-separated, seconds-carrying shape; both must reformat identically.
+    assert format_mapping_flow_timestamp("2026-07-10T09:30:00") == "10-07-2026 09:30"
 
 
 # --- format rejection ----------------------------------------------------

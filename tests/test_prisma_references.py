@@ -386,12 +386,20 @@ def test_bundle_missing_required_sides_cannot_be_enriched(tmp_path: Path) -> Non
     )
 
 
-@pytest.mark.parametrize(("direction", "required_field", "irrelevant_field", "expected"), [
-    ("Entry", "Network Point Name Entry", "Network Point Name Exit", "entry"),
-    ("Exit", "Network Point Name Exit", "Network Point Name Entry", "exit"),
-])
+@pytest.mark.parametrize(
+    ("direction", "required_field", "irrelevant_field", "expected", "irrelevant_market_key"),
+    [
+        ("Entry", "Network Point Name Entry", "Network Point Name Exit", "entry", "exit_market"),
+        ("Exit", "Network Point Name Exit", "Network Point Name Entry", "exit", "entry_market"),
+    ],
+)
 def test_irrelevant_populated_side_is_ignored_without_changing_direction(
-    tmp_path: Path, direction: str, required_field: str, irrelevant_field: str, expected: str
+    tmp_path: Path,
+    direction: str,
+    required_field: str,
+    irrelevant_field: str,
+    expected: str,
+    irrelevant_market_key: str,
 ) -> None:
     row = {
         **BASE,
@@ -406,7 +414,59 @@ def test_irrelevant_populated_side_is_ignored_without_changing_direction(
     enriched = result.rows[0]
     assert enriched["direction"] == expected
     assert enriched["network_point"] == "VGS Storage Hub (4290)"
+    # The non-required side is still attempted (regardless of Direction), but
+    # an unmapped value on that side never rejects the row and never falls
+    # back to any inferred value -- it is simply left blank.
+    assert enriched[irrelevant_market_key] == ""
     assert result.enriched_records[0].raw_row[irrelevant_field] == "Contradictory unknown side"
+
+
+@pytest.mark.parametrize(
+    ("direction", "required_field", "other_field", "other_side", "other_value", "other_market", "expected_direction", "required_market_key", "other_market_key"),
+    [
+        (
+            "Entry", "Network Point Name Entry", "Network Point Name Exit",
+            "exit", "VIP DK-THE (H646) (H646)", "THE", "entry",
+            "entry_market", "exit_market",
+        ),
+        (
+            "Exit", "Network Point Name Exit", "Network Point Name Entry",
+            "entry", "Arnoldstein importazione (35718301)", "PSV", "exit",
+            "exit_market", "entry_market",
+        ),
+    ],
+)
+def test_non_required_side_is_populated_from_its_own_evidence_regardless_of_direction(
+    tmp_path: Path,
+    direction: str,
+    required_field: str,
+    other_field: str,
+    other_side: str,
+    other_value: str,
+    other_market: str,
+    expected_direction: str,
+    required_market_key: str,
+    other_market_key: str,
+) -> None:
+    row = {
+        **BASE,
+        "Direction": direction,
+        required_field: "VGS Storage Hub (4290)",
+        other_field: other_value,
+    }
+    if direction == "Exit":
+        row["Network Point ID Exit"] = "EXIT-ID"
+    result = import_prisma_export(
+        write_csv(tmp_path, [row]), reference_catalog=DEFAULT_PRISMA_REFERENCES
+    )
+    assert result.rejected_count == 0
+    enriched = result.rows[0]
+    assert enriched["direction"] == expected_direction
+    assert enriched["network_point"] == "VGS Storage Hub (4290)"
+    assert enriched[required_market_key] == "VGS Storage Hub"
+    # The side Direction does not require is still resolved from its own
+    # evidenced field, never cross-filled from the required side.
+    assert enriched[other_market_key] == other_market
 
 
 @pytest.mark.parametrize(("direction", "field", "code"), [
