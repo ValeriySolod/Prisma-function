@@ -9,8 +9,8 @@ from pathlib import Path
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -48,7 +48,7 @@ from prisma_function.version import APP_DISPLAY_NAME, __version__
 # PrismaMonitorApp._build_ui) lets the user resize further; a horizontal
 # scrollbar appears whenever the available window width is insufficient.
 _MAPPING_COLUMN_WIDTHS = (130, 160, 160, 130, 200, 130, 150, 150, 130, 150, 120, 120)
-_COMPANY_WORDMARK_PATH = Path(__file__).resolve().parent / "resources" / "company_wordmark.png"
+_COMPANY_WORDMARK_PATH = Path(__file__).resolve().parent / "resources" / "company_wordmark.gif"
 
 
 @dataclass(frozen=True)
@@ -134,11 +134,11 @@ class PrismaMonitorApp(QMainWindow):
         company_wordmark.setObjectName("companyWordmark")
         company_wordmark.setAccessibleName("Trafigura company wordmark")
         company_wordmark.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        company_wordmark.setPixmap(
-            QPixmap(str(_COMPANY_WORDMARK_PATH)).scaledToHeight(
-                34, Qt.SmoothTransformation
-            )
-        )
+        company_wordmark.setFixedSize(127, 34)
+        self._company_wordmark_movie = QMovie(str(_COMPANY_WORDMARK_PATH))
+        self._company_wordmark_movie.setScaledSize(QSize(127, 34))
+        company_wordmark.setMovie(self._company_wordmark_movie)
+        self._company_wordmark_movie.start()
         subtitle = QLabel("PRISMA Export processing")
         subtitle.setObjectName("subtitle")
         bar.addWidget(brand)
