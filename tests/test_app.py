@@ -226,6 +226,25 @@ def test_left_sidebar_is_replaced_by_a_full_width_toolbar(window):
     assert toolbar is not None
     assert widget.choose_manual_csv_button.property("primary") is True
 
+    company_wordmark = widget.findChild(QLabel, "companyWordmark")
+    assert company_wordmark is not None
+    assert company_wordmark.accessibleName() == "Trafigura company wordmark"
+    assert len(widget._company_wordmark_frames) == 48
+    assert all(not frame.isNull() for frame in widget._company_wordmark_frames)
+    assert widget._company_wordmark_timer.isActive()
+    first_frame_key = company_wordmark.pixmap().cacheKey()
+    widget._advance_company_wordmark_frame()
+    assert company_wordmark.pixmap().cacheKey() != first_frame_key
+
+    toolbar_widgets = [
+        toolbar.layout().itemAt(index).widget()
+        for index in range(toolbar.layout().count())
+        if toolbar.layout().itemAt(index).widget() is not None
+    ]
+    assert toolbar_widgets[0].text() == "PrismaFunction"
+    assert toolbar_widgets[1] is company_wordmark
+    assert toolbar_widgets[2].text() == "PRISMA Export processing"
+
 
 def test_recent_activity_section_is_completely_removed(window):
     widget, _ = window
