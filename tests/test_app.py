@@ -229,11 +229,12 @@ def test_left_sidebar_is_replaced_by_a_full_width_toolbar(window):
     company_wordmark = widget.findChild(QLabel, "companyWordmark")
     assert company_wordmark is not None
     assert company_wordmark.accessibleName() == "Trafigura company wordmark"
-    company_wordmark_movie = company_wordmark.movie()
-    assert company_wordmark_movie is widget._company_wordmark_movie
-    assert company_wordmark_movie.isValid()
-    assert company_wordmark_movie.scaledSize().height() == 34
-    assert company_wordmark_movie.state() == company_wordmark_movie.MovieState.Running
+    assert len(widget._company_wordmark_frames) == 48
+    assert all(not frame.isNull() for frame in widget._company_wordmark_frames)
+    assert widget._company_wordmark_timer.isActive()
+    first_frame_key = company_wordmark.pixmap().cacheKey()
+    widget._advance_company_wordmark_frame()
+    assert company_wordmark.pixmap().cacheKey() != first_frame_key
 
     toolbar_widgets = [
         toolbar.layout().itemAt(index).widget()
