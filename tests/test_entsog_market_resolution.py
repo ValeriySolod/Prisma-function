@@ -128,6 +128,38 @@ def test_unresolvable_operator_never_resolves() -> None:
     )
 
 
+def test_bacton_entry_resolves_to_ttf_ztp_regardless_of_shared_eic() -> None:
+    # Bacton's own point EIC ("48YBI-EC-------0") and operator (National Gas
+    # Transmission PLC / UK-TSO-0001) also key the unrelated Moffat curated
+    # fallback entry for the same "entry" direction; only the exact Network
+    # Point Name distinguishes the two. The explicit exception must win
+    # ahead of that (otherwise colliding) curated-fallback lookup.
+    result = resolve_entsog_market_pair(
+        point_eic="48YBI-EC-------0",
+        tso_eic="",
+        tso_name="National Gas Transmission PLC",
+        direction="entry",
+        point_type="BORDER_TRANSITION_POINT",
+        point_name="BactonUKEn (48YBI-EC-------0)",
+    )
+    assert result == EntsogMarketPair(exit_market=None, entry_market="TTF/ZTP")
+
+
+def test_moffat_entry_is_unaffected_by_the_bacton_exception() -> None:
+    # Same point EIC/operator/direction as Bacton's exception above, but a
+    # different Network Point Name -- the pre-existing Moffat curated
+    # fallback resolution must be completely unchanged.
+    result = resolve_entsog_market_pair(
+        point_eic="48YBI-EC-------0",
+        tso_eic="",
+        tso_name="National Gas Transmission PLC",
+        direction="entry",
+        point_type="BORDER_TRANSITION_POINT",
+        point_name="MoffatUKEn (48YBI-EC-------0)",
+    )
+    assert result == EntsogMarketPair(exit_market="Great Britain", entry_market="Ireland")
+
+
 def test_bundle_direction_never_resolves() -> None:
     assert (
         resolve_entsog_market_pair(

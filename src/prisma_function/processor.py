@@ -30,6 +30,14 @@ from prisma_function.prisma_references import (
 
 MIN_MARKETED_CAPACITY_KWH_H = 1000.0
 
+# The single French balancing zone label this application's market
+# resolution ever produces (the ENTSOG reference data models mainland France
+# as one unified zone, "TRF" -- see docs/entsog_reference_data.md). An
+# auction whose Exit Market and Entry Market are both "TRF" moves gas
+# entirely within the French system and represents no cross-border auction;
+# the customer-approved rule excludes it from processing and publication.
+FRENCH_MARKET = "TRF"
+
 # P.37: unit string -> (ISO 4217 currency, physical-unit factor to MWh/h).
 # Currency conversion itself never happens here (see price_normalization.py);
 # this only unit-normalizes the source-currency amount, exactly as the
@@ -380,6 +388,7 @@ def _entsog_pair_for_required_side(
         tso_name=_text(source.get(f"TSO {suffix}")),
         direction=row["direction"],
         point_type=_text(source.get(f"Network Point Type {suffix}")),
+        point_name=_text(source.get(f"Network Point Name {suffix}")),
     )
 
 
@@ -516,6 +525,12 @@ def _enrich_row(
     entry_reference = resolved.get(ReferenceSide.ENTRY)
     enriched["exit_market"] = market_values.get(ReferenceSide.EXIT, "")
     enriched["entry_market"] = market_values.get(ReferenceSide.ENTRY, "")
+    if enriched["exit_market"] == FRENCH_MARKET and enriched["entry_market"] == FRENCH_MARKET:
+        raise _RowRejected(
+            "french_internal_auction",
+            "Both resolved markets are French (TRF); this is an internal "
+            "French-system auction, not a cross-border one.",
+        )
     return enriched, exit_reference, entry_reference
 
 
@@ -585,7 +600,7 @@ def import_prisma_export(
                     )
                 )
             except _RowRejected as exc:
-                if exc.code == "capacity_below_threshold":
+                if exc.code in ("capacity_below_threshold", "french_internal_auction"):
                     status = PrismaImportStatus.FILTERED
                     filtered += 1
                 else:

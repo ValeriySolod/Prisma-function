@@ -672,3 +672,97 @@ def test_bundle_direction_does_not_use_entsog_fallback(tmp_path: Path) -> None:
     result = import_prisma_export(write_csv(tmp_path, [row]))
     assert result.rows == []
     assert result.issues[0].reason_code == PrismaEnrichmentReasonCode.UNKNOWN_EXIT_REFERENCE
+
+
+def test_bacton_entry_is_the_explicit_ttf_ztp_exception(tmp_path: Path) -> None:
+    # Bacton's aggregated GB entry point EIC ("48YBI-EC-------0") collides
+    # with the unrelated Moffat curated-fallback entry under the same
+    # operator/direction; only the exact Network Point Name distinguishes
+    # it. The approved decision maps it to the combined "TTF/ZTP" label
+    # rather than leave it blank or misresolve it as Moffat's Ireland side.
+    row = {
+        **BASE,
+        "Direction": "Entry",
+        "Network Point Name Entry": "BactonUKEn (48YBI-EC-------0)",
+        "Network Point EIC Entry": "48YBI-EC-------0",
+        "Network Point Type Entry": "BORDER_TRANSITION_POINT",
+        "TSO Entry": "National Gas Transmission PLC",
+        "TSO EIC Entry": "",
+    }
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.issues == []
+    enriched = result.rows[0]
+    assert enriched["entry_market"] == "TTF/ZTP"
+    assert enriched["exit_market"] == ""
+
+
+def _french_both_sides_catalog() -> PrismaReferenceCatalog:
+    # A minimal, evidence-shaped catalog where both sides resolve to the
+    # single French balancing zone label ("TRF"), so the exclusion test is
+    # independent of any specific ENTSOG/curated-fallback resolution path.
+    return PrismaReferenceCatalog(
+        [
+            PrismaReference(
+                canonical_name="TRF",
+                classification=ReferenceClassification.MARKET,
+                aliases=(
+                    ReferenceAlias("French Exit Point", ReferenceSide.EXIT),
+                    ReferenceAlias("French Entry Point", ReferenceSide.ENTRY),
+                ),
+            )
+        ]
+    )
+
+
+def test_french_internal_auction_is_filtered_not_imported(tmp_path: Path) -> None:
+    # Both sides resolving to the French zone (TRF) makes this an internal
+    # French-system auction; it must be excluded before persistence/
+    # publication, counted as filtered like the capacity threshold.
+    row = {
+        **BASE,
+        "Direction": "Exit/Entry",
+        "Network Point Name Exit": "French Exit Point",
+        "Network Point Name Entry": "French Entry Point",
+    }
+    result = import_prisma_export(
+        write_csv(tmp_path, [row]), reference_catalog=_french_both_sides_catalog()
+    )
+    assert result.rows == []
+    assert result.filtered_count == 1
+    assert result.issues[0].reason_code == "french_internal_auction"
+
+
+def test_french_internal_auction_is_counted_alongside_capacity_filtering(tmp_path: Path) -> None:
+    rows = [
+        {
+            **BASE,
+            "Direction": "Exit/Entry",
+            "Network Point Name Exit": "French Exit Point",
+            "Network Point Name Entry": "French Entry Point",
+        },
+        {**BASE, "Marketed Capacity": "999"},
+    ]
+    result = import_prisma_export(
+        write_csv(tmp_path, rows), reference_catalog=_french_both_sides_catalog()
+    )
+    assert (result.imported_count, result.filtered_count, result.rejected_count) == (0, 2, 0)
+
+
+def test_non_french_pair_is_unaffected_by_the_exclusion(tmp_path: Path) -> None:
+    # Only one side resolving to "TRF" must not trigger the exclusion --
+    # preserves existing behavior for real Norway<->TRF border points such
+    # as Dunkerque.
+    row = {
+        **BASE,
+        "Direction": "Entry",
+        "Network Point Name Entry": "Dunkerque",
+        "Network Point EIC Entry": "21Z000000000047T",
+        "Network Point Type Entry": "BORDER_TRANSITION_POINT",
+        "TSO Entry": "NaTran",
+        "TSO EIC Entry": "",
+    }
+    result = import_prisma_export(write_csv(tmp_path, [row]))
+    assert result.issues == []
+    enriched = result.rows[0]
+    assert enriched["exit_market"] == "Norway"
+    assert enriched["entry_market"] == "TRF"

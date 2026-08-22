@@ -121,16 +121,41 @@ inconsistent `adjacentCountry` data across its two ENTSOG operator records.
 Each entry is a full override for its exact key, never merged with a partial
 ENTSOG value.
 
-### Explicit exceptions (no code path resolves these)
+### Explicit exceptions
 
-- **Bacton Exit** — the aggregated point can lead to either Belgium or the
-  Netherlands; left unresolved.
+- **Bacton Entry** — matched by its exact `Network Point Name Entry`,
+  `"BactonUKEn (48YBI-EC-------0)"`, ahead of every other resolution step
+  (including the curated fallback table). The aggregated point can lead to
+  either Belgium (ZTP) or the Netherlands (TTF); the customer-approved
+  decision is to set `Entry Market` to the combined `"TTF/ZTP"` label rather
+  than leave it blank. This exact-name match is required because PRISMA's
+  own point EIC for Bacton, `48YBI-EC-------0`, is also carried by ENTSOG's
+  own operator-point-direction export for the unrelated Moffat (GB↔Ireland)
+  interconnection under the same operator (National Gas Transmission PLC /
+  `UK-TSO-0001`) and the same `"entry"` direction — an ENTSOG source-data
+  ambiguity that the exact `(point_eic, operator_key, direction)`
+  curated-fallback key alone cannot disambiguate. See
+  `entsog_market_resolution.py`'s `_BACTON_ENTRY_POINT_NAME` constant; Moffat
+  itself resolves exactly as before.
 - **North Sea Entry (NOSEE)** — represents production, not another
   balancing market; only its own side (via Energinet's direct ENTSOG
   record) is ever populated, never a second Market.
 - **CONVERSION B VERS H** — an internal TRF gas-quality conversion point;
   its PRISMA `Network Point Type` is `OTHER_NETWORK_POINT`, which this
   module never considers, so it is already out of scope by construction.
+
+### French internal-auction exclusion
+
+An auction whose resolved `Exit Market` and `Entry Market` are both `"TRF"`
+(the single French balancing zone label this application's market
+resolution ever produces) moves gas entirely within the French system and
+represents no cross-border auction. `processor.py`'s `_enrich_row` excludes
+it — before the row can be persisted or published — by raising the same
+`_RowRejected` mechanism used for the sub-1-MWh capacity filter, under the
+`"french_internal_auction"` code, which `import_prisma_export` counts as
+`filtered_count` alongside the capacity filter. This applies regardless of
+which resolution path (curated fallback, live ENTSOG join, or the
+string-alias catalog) produced the two `"TRF"` values.
 
 ## The PRISMA-TSO-name alias table
 

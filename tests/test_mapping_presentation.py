@@ -48,6 +48,18 @@ def test_mapping_display_fields_match_authoritative_output_contract() -> None:
     )
 
 
+def test_build_mapping_rows_formats_booked_capacity_to_one_decimal_place() -> None:
+    rows = build_mapping_rows_from_output_records(
+        [_record(**{"Booked Capacity": "1089601.0416666665"})]
+    )
+    assert rows[0].booked_capacity == "1089601.0"
+
+
+def test_build_mapping_rows_leaves_unparseable_booked_capacity_unchanged() -> None:
+    rows = build_mapping_rows_from_output_records([_record(**{"Booked Capacity": ""})])
+    assert rows[0].booked_capacity == ""
+
+
 def test_build_mapping_rows_maps_all_twelve_output_fields() -> None:
     rows = build_mapping_rows_from_output_records([_record()])
     assert rows == (

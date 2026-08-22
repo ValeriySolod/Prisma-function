@@ -34,6 +34,22 @@ class EntsogResolvedPointType(str, Enum):
 
 _RESOLVED_POINT_TYPES = frozenset(item.value for item in EntsogResolvedPointType)
 
+# Bacton (GB) Entry: PRISMA's own point EIC for this aggregated point,
+# "48YBI-EC-------0", is also carried by ENTSOG's own operator-point-direction
+# export for the unrelated Moffat (GB<->Ireland) interconnection under the
+# same operator (National Gas Transmission PLC / UK-TSO-0001) and the same
+# "entry" direction -- an ENTSOG source-data ambiguity, not a PRISMA one, that
+# the exact (point_eic, operator_key, direction) curated-fallback key alone
+# cannot disambiguate. Bacton's aggregated point can physically lead to either
+# Belgium (ZTP) or the Netherlands (TTF), per the customer-approved decision
+# to represent it with the combined "TTF/ZTP" label rather than leave it
+# blank. Matched here, before any curated-fallback lookup, by the row's own
+# exact "Network Point Name Entry" text -- the only evidence that actually
+# distinguishes real Bacton PRISMA rows from the unrelated Moffat entry --
+# so the pre-existing Moffat resolution is never affected.
+_BACTON_ENTRY_POINT_NAME = "BactonUKEn (48YBI-EC-------0)"
+_BACTON_ENTRY_MARKET = "TTF/ZTP"
+
 
 @dataclass(frozen=True)
 class EntsogMarketPair:
@@ -79,6 +95,7 @@ def resolve_entsog_market_pair(
     tso_name: str,
     direction: str,
     point_type: str,
+    point_name: str = "",
 ) -> EntsogMarketPair | None:
     """Resolve one unidirectional row's Exit Market/Entry Market pair.
 
@@ -92,11 +109,18 @@ def resolve_entsog_market_pair(
     Returns `None` when nothing can be resolved at all (never a partially
     populated result of all-`None` fields); otherwise returns an
     `EntsogMarketPair` whose individual fields may still be `None`.
+
+    ``point_name`` (the row's own exact `Network Point Name Exit/Entry` text)
+    is consulted only for the single explicit Bacton exception documented
+    above; every other point is resolved exactly as before regardless of its
+    name.
     """
     if point_type not in _RESOLVED_POINT_TYPES:
         return None
     if direction not in ("exit", "entry"):
         return None
+    if direction == "entry" and point_name == _BACTON_ENTRY_POINT_NAME:
+        return EntsogMarketPair(exit_market=None, entry_market=_BACTON_ENTRY_MARKET)
     if not point_eic:
         return None
 
