@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import (
     QAbstractTableModel,
+    QEvent,
     QModelIndex,
     QObject,
     Qt,
 )
+from PySide6.QtGui import QFontMetrics, QResizeEvent
+from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QTableView, QToolTip
 
 from prisma_function.mapping_presentation import MAPPING_DISPLAY_FIELDS, MappingDisplayRow
+from prisma_function.mapping_table_sizing import compute_mapping_column_widths
 
 
 APP_STYLE = """
@@ -96,3 +100,44 @@ class MappingTableModel(QAbstractTableModel):
         self.beginResetModel()
         self.rows = tuple(rows)
         self.endResetModel()
+
+
+class TruncationTooltipDelegate(QStyledItemDelegate):
+    """Shows the full cell value in a tooltip only when its text is elided."""
+
+    def helpEvent(self, event, view, option, index) -> bool:
+        if event is None or event.type() != QEvent.ToolTip:
+            return super().helpEvent(event, view, option, index)
+        text = index.data(Qt.DisplayRole)
+        if not text:
+            QToolTip.hideText()
+            return True
+        cell_option = QStyleOptionViewItem(option)
+        self.initStyleOption(cell_option, index)
+        metrics = QFontMetrics(cell_option.font)
+        cell_padding_px = 8
+        available_width = cell_option.rect.width() - cell_padding_px
+        if metrics.horizontalAdvance(str(text)) > available_width:
+            QToolTip.showText(event.globalPos(), str(text), view)
+        else:
+            QToolTip.hideText()
+        return True
+
+
+class ResponsiveMappingTableView(QTableView):
+    """Mapping table view that keeps the 12 columns readable at any width.
+
+    Column widths are recomputed from `mapping_table_sizing` whenever the
+    viewport is resized, while interactive manual resizing by the user
+    remains available in between resizes.
+    """
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.apply_responsive_column_widths()
+
+    def apply_responsive_column_widths(self) -> None:
+        widths = compute_mapping_column_widths(self.viewport().width())
+        for column, width in enumerate(widths):
+            if self.columnWidth(column) != width:
+                self.setColumnWidth(column, width)

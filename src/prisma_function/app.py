@@ -39,15 +39,9 @@ from prisma_function.runtime_logging import (
     safe_log,
 )
 from prisma_function.runtime_paths import RuntimePathError, RuntimePaths, migrate_legacy_runtime_data, runtime_paths
-from prisma_function.ui_components import APP_STYLE, MappingTableModel
+from prisma_function.ui_components import APP_STYLE, MappingTableModel, ResponsiveMappingTableView, TruncationTooltipDelegate
 from prisma_function.version import APP_DISPLAY_NAME, __version__
 
-# Sensible initial pixel widths for the Mapping table, one per
-# `mapping_presentation.MAPPING_DISPLAY_FIELDS` column in the same order, wide
-# enough that no header label is clipped. Interactive resize mode (see
-# PrismaMonitorApp._build_ui) lets the user resize further; a horizontal
-# scrollbar appears whenever the available window width is insufficient.
-_MAPPING_COLUMN_WIDTHS = (130, 160, 160, 130, 200, 130, 150, 150, 130, 150, 120, 120)
 _COMPANY_WORDMARK_PATH = Path(__file__).resolve().parent / "resources" / "company_wordmark_frames.png"
 _COMPANY_WORDMARK_FRAME_COUNT = 48
 _COMPANY_WORDMARK_FRAME_INTERVAL_MS = 80
@@ -206,8 +200,9 @@ class PrismaMonitorApp(QMainWindow):
         mapping_header.addStretch()
         mapping_layout.addLayout(mapping_header)
         self.mapping_table_model = MappingTableModel(self)
-        self.mapping_table = QTableView()
+        self.mapping_table = ResponsiveMappingTableView()
         self.mapping_table.setModel(self.mapping_table_model)
+        self.mapping_table.setItemDelegate(TruncationTooltipDelegate(self.mapping_table))
         self.mapping_table.setAlternatingRowColors(True)
         self.mapping_table.setSelectionBehavior(QTableView.SelectRows)
         self.mapping_table.setAccessibleName("Mapping")
@@ -218,8 +213,7 @@ class PrismaMonitorApp(QMainWindow):
         mapping_hdr.setMinimumSectionSize(90)
         self.mapping_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.mapping_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        for column, width in enumerate(_MAPPING_COLUMN_WIDTHS):
-            self.mapping_table.setColumnWidth(column, width)
+        self.mapping_table.apply_responsive_column_widths()
         mapping_layout.addWidget(self.mapping_table, 1)
         self.mapping_empty_label = QLabel(
             "No mapping evidence to display. Select a PRISMA Export CSV."

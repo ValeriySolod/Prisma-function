@@ -147,6 +147,18 @@ Implemented result:
 
 Automated evidence: 629 passed, 1 skipped (the pre-existing platform-dependent symlink test); `python -m compileall`; `git diff --check`. Manual real-Windows acceptance remains outstanding.
 
+### P.45 — Responsive Mapping column sizing
+
+Status: implemented and automated-tested (2026-08-22).
+
+Implemented result:
+
+- New Qt-independent `mapping_table_sizing.py` module holds `MAPPING_COLUMN_MIN_WIDTHS` (the 12 compact readable minimum widths, in `MAPPING_DISPLAY_FIELDS` order) and `compute_mapping_column_widths(viewport_width)`, a pure function: at or below the 1385px expansion threshold it returns the minimum widths unchanged (so the table relies on horizontal scrolling rather than compressing columns further); above the threshold, all extra width is allocated to Network Point Name.
+- `ui_components.py` replaces the plain `QTableView` with `ResponsiveMappingTableView`, which recomputes column widths from `mapping_table_sizing` on every `resizeEvent`, and adds `TruncationTooltipDelegate`, an item delegate that shows the full cell value in a tooltip only when the displayed text does not fit the column width.
+- `app.py`'s `_build_mapping_panel` now builds the Mapping table as `ResponsiveMappingTableView` with `TruncationTooltipDelegate` installed, applies the initial responsive widths once, and no longer sets a fixed 1730px-wide column layout. Interactive per-column resize mode, horizontal/vertical scrollbars, the 12-column order, data, CSV output, processing behavior, styling, and the toolbar/status layout are all unchanged.
+
+Automated evidence: 633 passed, 1 skipped (the pre-existing platform-dependent symlink test), including new `tests/test_mapping_table_sizing.py`; `python -m py_compile`; `git diff --check`. Manual real-Windows acceptance remains outstanding.
+
 ## Next work
 
 Select the next increment only after P.42, P.43, and P.44 land on `main` and their feature branches are cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.
