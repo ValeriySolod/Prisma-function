@@ -102,6 +102,23 @@ def _display_flow_timestamp(value: object) -> str:
     return original if parsed is None else parsed.strftime(MAPPING_FLOW_TIMESTAMP_OUTPUT_FORMAT)
 
 
+def _display_booked_capacity(value: object) -> str:
+    """Format a stored Booked Capacity value to exactly one decimal place for
+    display (e.g. `1089601.0416666665` -> `1089601.0`).
+
+    A blank or unparseable value is returned unchanged rather than raising,
+    so one bad row never makes the whole Mapping table undisplayable. This
+    is purely a display conversion: the underlying stored/published value is
+    never rewritten.
+    """
+    original = "" if value is None else str(value)
+    try:
+        number = float(original)
+    except ValueError:
+        return original
+    return f"{number:.1f}"
+
+
 def _flow_start_sort_key(row: Mapping[str, str]) -> tuple[int, datetime]:
     """Deterministic descending-by-Flow-Start sort key.
 
@@ -128,9 +145,10 @@ def build_mapping_rows_from_output_records(
 
     Auction Date/Flow Start/Flow End are converted to the current
     `DD-MM-YYYY`/`DD-MM-YYYY HH:mm` display format regardless of which
-    contract the underlying stored/published record was written under; the
-    stored record itself is a plain input `Mapping` here and is never
-    mutated, rewritten, or migrated by this function.
+    contract the underlying stored/published record was written under, and
+    Booked Capacity is formatted to exactly one decimal place; the stored
+    record itself is a plain input `Mapping` here and is never mutated,
+    rewritten, or migrated by this function.
     """
     ordered_rows = sorted(records, key=_flow_start_sort_key, reverse=True)
     return tuple(
@@ -143,7 +161,7 @@ def build_mapping_rows_from_output_records(
             product_type=row["Product Type"],
             flow_start=_display_flow_timestamp(row["Flow Start"]),
             flow_end=_display_flow_timestamp(row["Flow End"]),
-            booked_capacity=row["Booked Capacity"],
+            booked_capacity=_display_booked_capacity(row["Booked Capacity"]),
             flow_duration_hours=row["Flow Duration Hours"],
             tariff_price=row["Tariff Price"],
             premium_price=row["Premium Price"],
