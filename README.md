@@ -59,8 +59,6 @@ The published file is UTF-8 and semicolon-delimited. Decimal values use a dot.
 
 ## Download and verify a release
 
-**Installer (recommended):**
-
 1. Download `PrismaFunction-Setup-<version>.exe` and `PrismaFunction-Setup-<version>.exe.sha256` from the [GitHub Releases page](../../releases) for the version you want, into the same folder.
 2. Verify the download's integrity before running it, using either tool below.
 
@@ -81,9 +79,5 @@ The published file is UTF-8 and semicolon-delimited. Decimal values use a dot.
 3. Run `PrismaFunction-Setup-<version>.exe` and follow the wizard. It installs Prisma Function under Program Files, adds a Start Menu shortcut, offers an optional Desktop shortcut, and registers a standard Windows uninstaller (Settings > Apps, or Add or Remove Programs). Installing to Program Files is what requires the administrator prompt; nothing else in the installer needs elevated privileges.
 
 A checksum match confirms the downloaded file is byte-for-byte identical to the one published in the release — it detects corruption or tampering in transit. It does **not** verify who published it: the release is not code-signed, so a checksum match alone does not prove the file came from a trusted publisher.
-
-**Portable executable:**
-
-`PrismaFunction-<version>-Windows-x64.exe` and its matching `.sha256` file are also published on the same release for users who prefer to run Prisma Function without installing it. Verify it the same way as above, substituting the portable executable's filename.
 
 See CLAUDE.md for repository rules, ROADMAP.md for active work, and docs/CHANGELOG.md for historical implementation records.

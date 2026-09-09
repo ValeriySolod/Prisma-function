@@ -197,6 +197,18 @@ Implemented result:
 
 Automated evidence: this increment adds installer packaging and release-automation config plus documentation only, touching no application source; the existing test suite and `python -m compileall` are unaffected. The Inno Setup compile and the resulting installer's behavior (Program Files install, shortcuts, uninstaller, elevation prompt) are exercised by GitHub Actions on a real tag push and by manual Windows acceptance, neither of which has run yet against this change.
 
+### P.49 — Installer-only GitHub Release assets
+
+Status: implemented (2026-09-09).
+
+Implemented result:
+
+- `.github/workflows/release.yml` still builds the portable PyInstaller executable, names it, and generates its SHA-256 checksum unchanged, because the Inno Setup installer build step compiles the installer directly from that portable executable. Only the final `gh release create` publish step changed: it now uploads exclusively `PrismaFunction-Setup-<version>.exe` and `PrismaFunction-Setup-<version>.exe.sha256`; the portable executable and its checksum file are no longer attached to the GitHub Release. Test suite, PyInstaller build, Inno Setup build, tag/version validation, and SHA-256 generation for both artifacts are otherwise unchanged.
+- `README.md`'s release section (P.46/P.48) now documents the installer as the only end-user download: the "Installer (recommended)" / "Portable executable" split is removed, and the single remaining flow downloads, verifies, and runs the installer. The existing explanation that a checksum match proves integrity but not publisher identity is unchanged.
+- No application source code or installer behavior changed.
+
+Automated evidence: this increment changes release-automation config and documentation only, touching no application source; the existing test suite and `python -m compileall` are unaffected. The trimmed release-asset list is exercised by GitHub Actions on a real tag push, not by the local test suite.
+
 ## Next work
 
 Select the next increment only after P.42, P.43, and P.44 land on `main` and their feature branches are cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.
