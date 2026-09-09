@@ -115,7 +115,5 @@ jobs:
           gh release create "${{ steps.version.outputs.tag }}" \
             "dist/${{ steps.installer.outputs.name }}" \
             "dist/${{ steps.installer.outputs.name }}.sha256" \
-            "dist/${{ steps.artifact.outputs.name }}" \
-            "dist/${{ steps.artifact.outputs.name }}.sha256" \
             --title "${{ steps.version.outputs.tag }}" \
             --generate-notes
