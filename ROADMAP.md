@@ -185,6 +185,18 @@ Implemented result:
 
 Automated evidence: 638 passed, 1 skipped (the pre-existing platform-dependent symlink test), including the rewritten `tests/test_mapping_table_sizing.py`; `python -m compileall`; `git diff --check`. Manual real-Windows acceptance (including resizing between the enforced minimum and a wide desktop window) remains outstanding.
 
+### P.48 — Windows installer release (Inno Setup)
+
+Status: implemented (2026-09-09).
+
+Implemented result:
+
+- New `installer/PrismaFunction.iss` Inno Setup script packages the existing single-file PyInstaller executable into a standard Windows installer: it installs under Program Files, creates a Start Menu shortcut, offers an optional Desktop shortcut (unchecked by default), and registers a standard Windows uninstaller entry (Inno Setup's built-in uninstall support; no custom logic added). `AppVersion` is supplied at compile time from `src/prisma_function/version.py`'s `__version__` (the same value `release.yml` already derives and verifies against the pushed tag) via an `ISCC.exe /DAppVersion=...` preprocessor define; no version is hardcoded in the script. Admin privileges are required only because the default install location is Program Files — the script adds no other elevation-requiring behavior. The installer only places/removes the application executable and its shortcuts; it never creates, modifies, or deletes anything under `%LOCALAPPDATA%\PrismaFunction\` or the published-output Documents directory.
+- `.github/workflows/release.yml` now also installs Inno Setup (`choco install innosetup`), compiles `installer/PrismaFunction.iss` against the already-built, already-tag-verified portable executable, and generates a SHA-256 checksum for the installer the same way the portable executable's checksum is generated. Both the installer (`PrismaFunction-Setup-<version>.exe` / `.sha256`) and the existing portable executable (`PrismaFunction-<version>-Windows-x64.exe` / `.sha256`) are published to the same GitHub Release; the portable executable is kept as a secondary download for users who prefer not to install. No code signing is added.
+- `README.md`'s release section now presents the installer as the recommended download (with PowerShell/Git Bash SHA-256 verification and a note on what the checksum does and does not prove, matching P.46's existing wording) and keeps the portable-executable instructions as a secondary option.
+
+Automated evidence: this increment adds installer packaging and release-automation config plus documentation only, touching no application source; the existing test suite and `python -m compileall` are unaffected. The Inno Setup compile and the resulting installer's behavior (Program Files install, shortcuts, uninstaller, elevation prompt) are exercised by GitHub Actions on a real tag push and by manual Windows acceptance, neither of which has run yet against this change.
+
 ## Next work
 
 Select the next increment only after P.42, P.43, and P.44 land on `main` and their feature branches are cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.
