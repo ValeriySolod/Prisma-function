@@ -57,4 +57,25 @@ The published file is UTF-8 and semicolon-delimited. Decimal values use a dot.
 - Prices are normalized to EUR/MWh/h using the calendar date from Start of Auction and official ECB reference rates.
 - Market/storage resolution uses exact, side-specific, Auction-ID-linked approved evidence only; Exit Market and Entry Market are each resolved independently regardless of Direction and are never inferred or cross-filled from the opposite side.
 
+## Download and verify a release
+
+1. Download `PrismaFunction-<version>-Windows-x64.exe` and `PrismaFunction-<version>-Windows-x64.exe.sha256` from the [GitHub Releases page](../../releases) for the version you want, into the same folder.
+2. Verify the download's integrity before running it, using either tool below.
+
+**Windows PowerShell:**
+
+```powershell
+$expected = (Get-Content .\PrismaFunction-<version>-Windows-x64.exe.sha256).Split(' ')[0]
+$actual = (Get-FileHash .\PrismaFunction-<version>-Windows-x64.exe -Algorithm SHA256).Hash
+if ($actual -ieq $expected) { "OK: checksum matches" } else { "MISMATCH: do not run this file" }
+```
+
+**Git Bash:**
+
+```bash
+sha256sum -c PrismaFunction-<version>-Windows-x64.exe.sha256
+```
+
+A match confirms the downloaded file is byte-for-byte identical to the one published in the release — it detects corruption or tampering in transit. It does **not** verify who published it: the release is not code-signed, so a checksum match alone does not prove the file came from a trusted publisher.
+
 See CLAUDE.md for repository rules, ROADMAP.md for active work, and docs/CHANGELOG.md for historical implementation records.
