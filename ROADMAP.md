@@ -34,7 +34,7 @@ The Mapping table and published output contain exactly these fields in this orde
 11. Tariff Price — EUR/MWh/h; a bundle row's exit-side and entry-side tariff are each normalized independently, then summed
 12. Premium Price — EUR/MWh/h
 
-Mapping supports unrestricted vertical and horizontal scrolling and has no preview or row-count limit.
+Mapping supports unrestricted vertical scrolling and has no preview or row-count limit. The Mapping panel and table always use the full available application window width; column widths are responsive and are recalculated on every resize so all 12 columns stay visible without horizontal scrolling at any window size the application allows (down to its enforced 1080px-wide minimum), with priority width given to long-content columns (especially Network Point Name) and short-value columns (Exit/Entry Market, Capacity Type, Product Type, Flow Duration Hours, Tariff Price, Premium Price) kept compact; horizontal scrolling remains available as a fallback and manual per-column resizing is still possible.
 
 ## Active invariants
 
@@ -171,6 +171,19 @@ Implemented result:
 - `README.md` documents where to download a release and how to verify its SHA-256 checksum with Windows PowerShell (`Get-FileHash`) or Git Bash (`sha256sum -c`), and states plainly that the checksum verifies file integrity, not publisher identity.
 
 Automated evidence: this increment adds release-automation config and documentation only; the workflow itself is exercised by GitHub Actions on a real tag push, not by the local test suite.
+
+### P.47 — Full-width, tablet-responsive Mapping table sizing
+
+Status: implemented and automated-tested (2026-09-09).
+
+Implemented result:
+
+- `mapping_table_sizing.py`'s single 1385px expansion threshold (P.45) is replaced by a two-tier model: `MAPPING_COLUMN_COMFORTABLE_WIDTHS` (the previous 12 desktop-spacious widths, unchanged) and a new `MAPPING_COLUMN_COMPACT_WIDTHS`, a uniform 66.2% shrink of the comfortable widths (floored at 55px) whose 940px total sum stays comfortably under the Mapping table viewport at the application's enforced 1080px-wide minimum window, so all 12 columns always fit without horizontal scrolling. `compute_mapping_column_widths(viewport_width)` now returns the compact widths at or below that 940px total, the comfortable widths (with any extra space still allocated entirely to Network Point Name) at or above their 1420px total, and linearly interpolates each column between its own compact and comfortable width in between — the normal desktop/tablet resizing range — so long-content columns (led by Network Point Name) gain more pixels per resized pixel than the compact short-value columns (Exit/Entry Market, Capacity Type, Product Type, Flow Duration Hours, Tariff Price, Premium Price).
+- `app.py`'s Mapping header `setMinimumSectionSize` is lowered from 90px to 55px so Qt no longer clamps the new compact widths back up; no other panel/table construction, margins, or layout changed — the Mapping panel already stretched to the full content-area width before this increment, and continues to.
+- **Header-label elision fix:** at compact/interpolated widths, `QHeaderView`'s default center-aligned label painting clipped header text with no ellipsis (e.g. "Capacity Type" rendered as the garbled "apacity Typ"), discovered visually while verifying this increment on real Windows. `mapping_hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)` and `mapping_hdr.setTextElideMode(Qt.ElideRight)` make a too-narrow header label elide cleanly (e.g. "Capacity …") instead. This affects only header-label rendering; no header text, cell data, or `headerData()` contract changed.
+- Interactive per-column resize mode, horizontal/vertical scrollbars (horizontal remains available as a fallback), the `ResponsiveMappingTableView.resizeEvent` recomputation on every resize, `TruncationTooltipDelegate`, the 12-column order, data, CSV output, processing behavior, status counters, toolbar behavior, and styling are all unchanged.
+
+Automated evidence: 638 passed, 1 skipped (the pre-existing platform-dependent symlink test), including the rewritten `tests/test_mapping_table_sizing.py`; `python -m compileall`; `git diff --check`. Manual real-Windows acceptance (including resizing between the enforced minimum and a wide desktop window) remains outstanding.
 
 ## Next work
 
