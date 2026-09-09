@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build, verify, and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install application dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: Compile Python sources
+        run: python -m compileall -q src/prisma_function tests
+
+      - name: Verify tag matches application version
+        shell: bash
+        env:
+          PYTHONPATH: src
+        run: |
+          app_version=$(python -c "from prisma_function.version import __version__; print(__version__)")
+          if [ "$app_version" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::Tag version ${{ steps.version.outputs.version }} does not match src/prisma_function/version.py (__version__ = $app_version)"
+            exit 1
+          fi
+
+      - name: Install packaging tool
+        run: python -m pip install --disable-pip-version-check pyinstaller==6.21.0
+
+      - name: Build Windows executable
+        run: >
+          python -m PyInstaller --clean --noconfirm --onefile --windowed
+          --name PrismaFunction
+          --paths src
+          --add-data "src/prisma_function/resources;prisma_function/resources"
+          src/prisma_function/__main__.py
+
+      - name: Name release artifact
+        id: artifact
+        shell: bash
+        run: |
+          name="PrismaFunction-${{ steps.version.outputs.version }}-Windows-x64.exe"
+          mv "dist/PrismaFunction.exe" "dist/$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SHA-256 checksum
+        shell: bash
+        working-directory: dist
+        run: sha256sum --binary "${{ steps.artifact.outputs.name }}" > "${{ steps.artifact.outputs.name }}.sha256"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "dist/${{ steps.artifact.outputs.name }}" \
+            "dist/${{ steps.artifact.outputs.name }}.sha256" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes

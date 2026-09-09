@@ -159,6 +159,19 @@ Implemented result:
 
 Automated evidence: 633 passed, 1 skipped (the pre-existing platform-dependent symlink test), including new `tests/test_mapping_table_sizing.py`; `python -m py_compile`; `git diff --check`. Manual real-Windows acceptance remains outstanding.
 
+### P.46 — GitHub release publishing with SHA-256 verification
+
+Status: implemented (2026-09-09).
+
+Implemented result:
+
+- New `.github/workflows/release.yml` GitHub Actions workflow, triggered by pushing a `v<major>.<minor>.<patch>` tag: it installs the pinned `requirements.txt` dependencies, runs the full test suite and `python -m compileall`, verifies the tag's version matches `src/prisma_function/version.py`'s `__version__`, builds a single-file Windows executable with PyInstaller (`--onefile --windowed`, invoked directly with CLI flags — no persistent `.spec` file), and publishes a GitHub Release for the tag.
+- The release artifact and a matching checksum file are both uploaded to the same GitHub Release, named `PrismaFunction-<version>-Windows-x64.exe` and `PrismaFunction-<version>-Windows-x64.exe.sha256`; the checksum file is generated with `sha256sum --binary` so it is directly consumable by `sha256sum -c`.
+- No code signing is included. No application behavior, UI, mapping logic, CSV processing, or runtime data handling changed; the existing `windows-ci.yml` push/PR workflow is untouched.
+- `README.md` documents where to download a release and how to verify its SHA-256 checksum with Windows PowerShell (`Get-FileHash`) or Git Bash (`sha256sum -c`), and states plainly that the checksum verifies file integrity, not publisher identity.
+
+Automated evidence: this increment adds release-automation config and documentation only; the workflow itself is exercised by GitHub Actions on a real tag push, not by the local test suite.
+
 ## Next work
 
 Select the next increment only after P.42, P.43, and P.44 land on `main` and their feature branches are cleaned up. Do not restore or continue superseded P.36 managed-download work. Future work must be derived from the newest approved specification and an explicit customer decision.
